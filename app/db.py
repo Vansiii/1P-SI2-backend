@@ -4,6 +4,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from .config import get_settings
+from .models.base import Base
 
 engine: AsyncEngine | None = None
 session_factory: async_sessionmaker[AsyncSession] | None = None
@@ -50,6 +51,14 @@ async def test_database_connection() -> None:
         raise RuntimeError(
             "No se pudo conectar a la base de datos de Supabase. Revisa DATABASE_URL en backend/.env"
         ) from exc
+
+
+async def create_database_tables() -> None:
+    # Importa modelos para registrar tablas en Base.metadata antes de create_all.
+    from .models import revoked_token, workshop_user  # noqa: F401
+
+    async with get_engine().begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
 
 
 async def close_database_connection() -> None:
