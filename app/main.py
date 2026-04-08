@@ -1,32 +1,49 @@
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
 
-from .config import get_settings
-from .db import (
+from .api.v1.router import api_router
+from .core import (
     close_database_connection,
     create_database_tables,
-    get_db_session,
+    get_settings,
     test_database_connection,
+    configure_logging,
+    ErrorHandlingMiddleware,
+    LoggingMiddleware,
+    RequestIDMiddleware,
 )
-from .routers.auth import router as auth_router
+
+# Configure logging first
+configure_logging()
 
 settings = get_settings()
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    """Application lifespan manager."""
+    # Startup
     await test_database_connection()
-    await create_database_tables()
+    if settings.environment == "development":
+        await create_database_tables()
     yield
+    # Shutdown
     await close_database_connection()
 
 
-app = FastAPI(title=settings.app_name, version=settings.app_version, lifespan=lifespan)
+# Create FastAPI app
+app = FastAPI(
+    title=settings.app_name,
+    version=settings.app_version,
+    description="Sistema de Gestión de Talleres Mecánicos - API REST",
+    lifespan=lifespan,
+    docs_url="/docs" if settings.environment != "production" else None,
+    redoc_url="/redoc" if settings.environment != "production" else None,
+)
 
+# Add middleware (order matters - first added is outermost)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
@@ -35,22 +52,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(auth_router)
+# Add custom middleware
+app.add_middleware(ErrorHandlingMiddleware)
+app.add_middleware(LoggingMiddleware)
+app.add_middleware(RequestIDMiddleware)
+
+# Include API router
+app.include_router(api_router)
 
 
-@app.get("/")
+# Root endpoint
+@app.get("/", tags=["Root"])
 def read_root() -> dict[str, str]:
-    return {"message": "API de FastAPI inicializada correctamente"}
-
-
-@app.get("/health")
-def health_check() -> dict[str, str]:
-    return {"status": "ok"}
-
-
-@app.get("/db/health")
-async def database_health_check(
-    session: AsyncSession = Depends(get_db_session),
-) -> dict[str, str]:
-    await session.execute(text("SELECT 1"))
-    return {"database": "connected"}
+    """Root endpoint with basic API information."""
+    return {
+        "message": "Sistema de Gestión de Talleres Mecánicos - API REST",
+        "version": settings.app_version,
+        "docs": "/docs" if settings.environment != "production" else "disabled",
+        "health": "/api/v1/health",
+    }
