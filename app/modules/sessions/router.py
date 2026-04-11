@@ -1,21 +1,31 @@
+"""
+Session management router.
+"""
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..core import get_db_session
-from ..shared.dependencies.auth import get_current_user
-from ..models.user import User
-from ..schemas.session import SessionListResponse
-from ..services.session_service import SessionService
+from ...core import get_db_session
+from ...core.permissions import Permission
+from ...core.dependencies import require_permission
+from ...shared.dependencies.auth import get_current_user
+from ...models.user import User
+from ...schemas.session import SessionListResponse
+from ...services.session_service import SessionService
 
 router = APIRouter()
 
 
-@router.get("", response_model=SessionListResponse)
+@router.get(
+    "",
+    response_model=SessionListResponse,
+    summary="Get active sessions",
+    description="Get all active sessions for the current user",
+)
 async def get_sessions(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session)
 ):
-    """Obtiene todas las sesiones activas del usuario"""
+    """Get all active sessions for the current user."""
     # Obtener el JTI actual desde el token del usuario
     current_jti = getattr(current_user, "_current_jti", None)
     if not current_jti:
@@ -47,13 +57,17 @@ async def get_sessions(
     )
 
 
-@router.delete("/{jti}")
+@router.delete(
+    "/{jti}",
+    summary="Revoke specific session",
+    description="Revoke a specific session by JTI",
+)
 async def revoke_session(
     jti: str,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session)
 ):
-    """Revoca una sesión específica"""
+    """Revoke a specific session."""
     current_jti = getattr(current_user, "_current_jti", None)
     if not current_jti:
         raise HTTPException(
@@ -77,12 +91,16 @@ async def revoke_session(
     return {"message": "Sesión cerrada exitosamente"}
 
 
-@router.delete("")
+@router.delete(
+    "",
+    summary="Revoke all other sessions",
+    description="Revoke all sessions except the current one",
+)
 async def revoke_all_sessions(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session)
 ):
-    """Revoca todas las sesiones excepto la actual"""
+    """Revoke all sessions except the current one."""
     current_jti = getattr(current_user, "_current_jti", None)
     if not current_jti:
         raise HTTPException(

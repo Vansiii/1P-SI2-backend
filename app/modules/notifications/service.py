@@ -37,7 +37,7 @@ class NotificationService:
             
             success = await self.email_provider.send_email(
                 to_email=to_email,
-                subject=f"Bienvenido al Sistema de Gestión de Talleres - {app_name}",
+                subject=f"Bienvenido a {app_name}",
                 html_content=html_content,
                 text_content=text_content,
             )

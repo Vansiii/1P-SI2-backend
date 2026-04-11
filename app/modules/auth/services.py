@@ -351,6 +351,9 @@ class RegistrationService:
             Tuple of (administrator, token_response)
         """
         additional_data = {
+            "first_name": request.first_name,
+            "last_name": request.last_name,
+            "phone": request.phone,
             "role_level": request.role_level,
         }
         

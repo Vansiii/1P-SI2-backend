@@ -37,7 +37,7 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
-    description="Sistema de Gestión de Talleres Mecánicos - API REST",
+    description="MecánicoYa - API REST",
     lifespan=lifespan,
     docs_url="/docs" if settings.environment != "production" else None,
     redoc_url="/redoc" if settings.environment != "production" else None,
@@ -66,7 +66,7 @@ app.include_router(api_router)
 def read_root() -> dict[str, str]:
     """Root endpoint with basic API information."""
     return {
-        "message": "Sistema de Gestión de Talleres Mecánicos - API REST",
+        "message": "MecánicoYa - API REST",
         "version": settings.app_version,
         "docs": "/docs" if settings.environment != "production" else "disabled",
         "health": "/api/v1/health",

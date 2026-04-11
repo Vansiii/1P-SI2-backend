@@ -26,6 +26,8 @@ from .service import (
     TechnicianService,
     AdministratorService,
 )
+from ...core.permissions import Permission, UserRole
+from ...core.dependencies import require_permission, require_role, AdminUser
 from ...shared.dependencies.auth import get_current_user
 from ...shared.schemas.pagination import PaginationParams
 from ...models.user import User
@@ -41,13 +43,14 @@ router = APIRouter()
     response_model=List[UserResponse],
     summary="List users",
     description="Get list of users with optional filtering by type",
+    dependencies=[Depends(require_permission(Permission.ADMIN_MANAGE_USERS))],
 )
 async def list_users(
     user_type: str = Query(None, description="Filter by user type"),
     active_only: bool = Query(True, description="Show only active users"),
     pagination: PaginationParams = Depends(),
     session: AsyncSession = Depends(get_db_session),
-    current_user: User = Depends(get_current_user),
+    admin: AdminUser = None,  # Verificación de admin ya hecha por dependency
 ):
     """List users with optional filtering."""
     user_service = UserService(session)
