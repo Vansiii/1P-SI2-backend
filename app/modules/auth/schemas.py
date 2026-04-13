@@ -123,6 +123,9 @@ class TechnicianRegistrationRequest(BaseUserRegistrationRequest):
 class AdministratorRegistrationRequest(BaseUserRegistrationRequest):
     """Administrator registration request schema."""
     
+    first_name: str = Field(..., max_length=60, description="First name")
+    last_name: str = Field(..., max_length=60, description="Last name")
+    phone: str = Field(..., max_length=20, description="Phone number")
     role_level: int = Field(default=1, ge=1, le=10, description="Role level")
 
 

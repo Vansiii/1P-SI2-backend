@@ -1,6 +1,6 @@
 # Backend - FastAPI
 
-Sistema de gestión de emergencias vehiculares con autenticación avanzada y seguridad robusta.
+MecanicoYa - Plataforma de asistencia mecánica con autenticación avanzada y seguridad robusta.
 
 ## Requisitos
 

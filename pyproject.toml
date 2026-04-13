@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "1p-si2-backend"
 version = "0.1.0"
-description = "Sistema de Gestión de Talleres Mecánicos - Backend API"
+description = "MecanicoYa - Backend API"
 readme = "README.md"
 requires-python = ">=3.10"
 authors = [

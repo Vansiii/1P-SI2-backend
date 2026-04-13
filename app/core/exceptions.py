@@ -246,3 +246,7 @@ class WeakPasswordException(ValidationException):
             message=f"Contraseña no cumple los requisitos: {reason}",
             details={"password_requirement": reason},
         )
+
+
+# Alias for backward compatibility
+ForbiddenException = AuthorizationException

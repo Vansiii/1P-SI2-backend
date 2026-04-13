@@ -7,6 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...core import get_db_session, get_logger
 from ...core.responses import create_success_response
+from ...core.permissions import Permission
+from ...core.dependencies import require_permission, CurrentUser
 from ...shared.dependencies.auth import get_current_user
 from ...models.user import User
 from .schemas import (
@@ -309,73 +311,96 @@ async def logout(
     "/me",
     summary="Get current user profile",
     description="Get the current authenticated user's profile",
+    dependencies=[Depends(require_permission(Permission.PROFILE_VIEW_OWN))],
 )
 async def get_profile(
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Get current user profile."""
+    """Get current user profile - optimized with single query using polymorphic loading."""
     from sqlalchemy import select
+    from sqlalchemy.orm import selectinload, with_polymorphic
     from ...models.client import Client
     from ...models.workshop import Workshop
     from ...models.technician import Technician
     from ...models.administrator import Administrator
     
+    # Use polymorphic loading to get all data in one query
+    try:
+        # Create polymorphic query based on user type
+        if current_user.user_type == "client":
+            result = await session.execute(
+                select(Client).where(Client.id == current_user.id)
+            )
+            user = result.scalar_one_or_none()
+        elif current_user.user_type == "workshop":
+            result = await session.execute(
+                select(Workshop).where(Workshop.id == current_user.id)
+            )
+            user = result.scalar_one_or_none()
+        elif current_user.user_type == "technician":
+            result = await session.execute(
+                select(Technician).where(Technician.id == current_user.id)
+            )
+            user = result.scalar_one_or_none()
+        elif current_user.user_type == "admin":
+            result = await session.execute(
+                select(Administrator).where(Administrator.id == current_user.id)
+            )
+            user = result.scalar_one_or_none()
+        else:
+            user = current_user
+            
+        if not user:
+            user = current_user
+            
+    except Exception as e:
+        logger.error(f"Error loading polymorphic user: {str(e)}", user_id=current_user.id)
+        user = current_user
+    
     # Build response based on user type
     user_data = {
-        "id": current_user.id,
-        "email": current_user.email,
-        "first_name": current_user.first_name,
-        "last_name": current_user.last_name,
-        "phone": current_user.phone,
-        "user_type": current_user.user_type,
-        "is_active": current_user.is_active,
-        "two_factor_enabled": current_user.two_factor_enabled,
-        "created_at": current_user.created_at.isoformat(),
-        "updated_at": current_user.updated_at.isoformat(),
+        "id": user.id,
+        "email": user.email,
+        "first_name": user.first_name,
+        "last_name": user.last_name,
+        "phone": user.phone,
+        "user_type": user.user_type,
+        "is_active": user.is_active,
+        "two_factor_enabled": user.two_factor_enabled,
+        "created_at": user.created_at.isoformat(),
+        "updated_at": user.updated_at.isoformat(),
     }
     
-    # Load type-specific data
-    if current_user.user_type == "client":
-        result = await session.execute(select(Client).where(Client.id == current_user.id))
-        client = result.scalar_one_or_none()
-        if client:
-            user_data.update({
-                "direccion": client.direccion,
-                "ci": client.ci,
-                "fecha_nacimiento": client.fecha_nacimiento.isoformat() if client.fecha_nacimiento else None,
-            })
-    elif current_user.user_type == "workshop":
-        result = await session.execute(select(Workshop).where(Workshop.id == current_user.id))
-        workshop = result.scalar_one_or_none()
-        if workshop:
-            user_data.update({
-                "workshop_name": workshop.workshop_name,
-                "owner_name": workshop.owner_name,
-                "address": workshop.address,
-                "direccion": workshop.address,  # Alias para compatibilidad con frontend
-                "workshop_phone": workshop.workshop_phone,
-                "latitude": float(workshop.latitude) if workshop.latitude else None,
-                "longitude": float(workshop.longitude) if workshop.longitude else None,
-                "coverage_radius_km": float(workshop.coverage_radius_km) if workshop.coverage_radius_km else None,
-            })
-    elif current_user.user_type == "technician":
-        result = await session.execute(select(Technician).where(Technician.id == current_user.id))
-        technician = result.scalar_one_or_none()
-        if technician:
-            user_data.update({
-                "workshop_id": technician.workshop_id,
-                "current_latitude": float(technician.current_latitude) if technician.current_latitude else None,
-                "current_longitude": float(technician.current_longitude) if technician.current_longitude else None,
-                "is_available": technician.is_available,
-            })
-    elif current_user.user_type == "admin":
-        result = await session.execute(select(Administrator).where(Administrator.id == current_user.id))
-        admin = result.scalar_one_or_none()
-        if admin:
-            user_data.update({
-                "role_level": admin.role_level,
-            })
+    # Add type-specific data
+    if user.user_type == "client" and isinstance(user, Client):
+        user_data.update({
+            "direccion": user.direccion,
+            "ci": user.ci,
+            "fecha_nacimiento": user.fecha_nacimiento.isoformat() if user.fecha_nacimiento else None,
+        })
+    elif user.user_type == "workshop" and isinstance(user, Workshop):
+        user_data.update({
+            "workshop_name": user.workshop_name,
+            "owner_name": user.owner_name,
+            "address": user.address,
+            "direccion": user.address,  # Alias para compatibilidad
+            "workshop_phone": user.workshop_phone,
+            "latitude": float(user.latitude) if user.latitude else None,
+            "longitude": float(user.longitude) if user.longitude else None,
+            "coverage_radius_km": float(user.coverage_radius_km) if user.coverage_radius_km else None,
+        })
+    elif user.user_type == "technician" and isinstance(user, Technician):
+        user_data.update({
+            "workshop_id": user.workshop_id,
+            "current_latitude": float(user.current_latitude) if user.current_latitude else None,
+            "current_longitude": float(user.current_longitude) if user.current_longitude else None,
+            "is_available": user.is_available,
+        })
+    elif user.user_type == "admin" and isinstance(user, Administrator):
+        user_data.update({
+            "role_level": user.role_level,
+        })
     
     return create_success_response(
         data=user_data,
@@ -387,6 +412,7 @@ async def get_profile(
     "/me",
     summary="Update current user profile",
     description="Update the current authenticated user's profile",
+    dependencies=[Depends(require_permission(Permission.PROFILE_UPDATE_OWN))],
 )
 async def update_profile(
     request: UpdateProfileRequest,
@@ -412,6 +438,7 @@ async def update_profile(
     "/me",
     summary="Delete current user account",
     description="Delete the current authenticated user's account",
+    dependencies=[Depends(require_permission(Permission.PROFILE_DELETE_OWN))],
 )
 async def delete_account(
     request: DeleteAccountRequest,

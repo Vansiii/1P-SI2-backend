@@ -34,6 +34,14 @@ def get_engine() -> AsyncEngine:
             pool_timeout=settings.db_pool_timeout,
             pool_recycle=3600,  # Recycle connections every hour
             echo=False,  # Disable SQL query logging for cleaner output
+            connect_args={
+                "server_settings": {
+                    "application_name": "1P-SI2-Backend",
+                    "statement_timeout": "30000",  # 30 seconds timeout for queries
+                },
+                "command_timeout": 30,  # 30 seconds timeout for commands
+                "timeout": 30,  # Connection timeout
+            },
         )
         
         logger.info(

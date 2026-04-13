@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     """Application settings with validation and environment support."""
     
     # Application
-    app_name: str = "Sistema de Gestión de Talleres"
+    app_name: str = "MecánicoYa"
     app_version: str = "0.1.0"
     environment: Literal["development", "staging", "production"] = Field(
         default="development", alias="ENVIRONMENT"
@@ -42,6 +42,18 @@ class Settings(BaseSettings):
     cors_origins_raw: str = Field(
         default="http://localhost:4200,http://127.0.0.1:4200",
         alias="CORS_ORIGINS",
+    )
+    
+    # Supabase Configuration (Backend - Service Role)
+    supabase_url: str = Field(
+        ...,  # Required, no default
+        alias="SUPABASE_URL",
+        description="Supabase project URL"
+    )
+    supabase_service_role_key: str = Field(
+        ...,  # Required, no default
+        alias="SUPABASE_SERVICE_ROLE_KEY",
+        description="Supabase service role key (backend only, never expose to frontend)"
     )
     
     # Email Configuration
@@ -134,6 +146,30 @@ class Settings(BaseSettings):
         """Validate positive integers."""
         if value <= 0:
             raise ValueError("Los valores de configuración de BD deben ser positivos")
+        return value
+    
+    @field_validator("supabase_url")
+    @classmethod
+    def validate_supabase_url(cls, value: str) -> str:
+        """Validate Supabase URL format."""
+        if not value:
+            raise ValueError("SUPABASE_URL es requerida")
+        if not value.startswith("https://"):
+            raise ValueError("SUPABASE_URL debe comenzar con https://")
+        if ".supabase.co" not in value:
+            raise ValueError("SUPABASE_URL debe ser una URL válida de Supabase")
+        return value
+    
+    @field_validator("supabase_service_role_key")
+    @classmethod
+    def validate_supabase_service_role_key(cls, value: str) -> str:
+        """Validate Supabase service role key."""
+        if not value:
+            raise ValueError("SUPABASE_SERVICE_ROLE_KEY es requerida")
+        if len(value) < 100:
+            raise ValueError("SUPABASE_SERVICE_ROLE_KEY parece inválida (muy corta)")
+        if not value.startswith("eyJ"):
+            raise ValueError("SUPABASE_SERVICE_ROLE_KEY debe ser un JWT válido")
         return value
     
     @property

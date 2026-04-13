@@ -28,6 +28,7 @@ from .evidencia_audio import EvidenciaAudio
 from .evidencia_imagen import EvidenciaImagen
 from .historial_servicio import HistorialServicio
 from .incidente import Incidente
+from .rechazo_taller import RechazoTaller
 from .servicio import Servicio
 from .servicio_taller import ServicioTaller
 from .technician_especialidad import TechnicianEspecialidad
@@ -60,6 +61,7 @@ __all__ = [
     "ServicioTaller",
     "EstadosServicio",
     "HistorialServicio",
+    "RechazoTaller",
     "Configuracion",
     "Especialidad",
     "TechnicianEspecialidad",
