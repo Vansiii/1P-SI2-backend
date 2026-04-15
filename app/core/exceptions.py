@@ -202,7 +202,18 @@ class AccountLockedException(AuthenticationException):
         retry_after: int | None = None,
         details: dict[str, Any] | None = None,
     ):
-        message = "Cuenta bloqueada temporalmente por múltiples intentos fallidos"
+        # Calcular minutos restantes para el mensaje
+        minutes_remaining = (retry_after // 60) if retry_after else 5
+        seconds_remaining = (retry_after % 60) if retry_after else 0
+        
+        if minutes_remaining > 0:
+            time_msg = f"{minutes_remaining} minuto{'s' if minutes_remaining != 1 else ''}"
+            if seconds_remaining > 0:
+                time_msg += f" y {seconds_remaining} segundo{'s' if seconds_remaining != 1 else ''}"
+        else:
+            time_msg = f"{seconds_remaining} segundo{'s' if seconds_remaining != 1 else ''}"
+        
+        message = f"Cuenta bloqueada temporalmente por múltiples intentos fallidos. Intenta nuevamente en {time_msg}."
 
         payload_details = details.copy() if details else {}
         if unlock_time:

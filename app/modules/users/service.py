@@ -3,6 +3,7 @@ Service for user management operations.
 """
 from typing import List, Optional
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...core import get_logger, UserNotFoundException
@@ -42,10 +43,35 @@ class UserService:
         return user
     
     async def get_users_by_type(self, user_type: str, active_only: bool = True) -> List[User]:
-        """Get all users by type."""
-        if active_only:
-            return await self.user_repo.find_active_by_user_type(user_type)
-        return await self.user_repo.find_by_user_type(user_type)
+        """Get all users by type with proper model loading."""
+        if user_type == "workshop":
+            stmt = select(Workshop)
+            if active_only:
+                stmt = stmt.where(Workshop.is_active == True)
+            result = await self.session.execute(stmt)
+            return list(result.scalars().all())
+        elif user_type == "client":
+            stmt = select(Client)
+            if active_only:
+                stmt = stmt.where(Client.is_active == True)
+            result = await self.session.execute(stmt)
+            return list(result.scalars().all())
+        elif user_type == "technician":
+            stmt = select(Technician)
+            if active_only:
+                stmt = stmt.where(Technician.is_active == True)
+            result = await self.session.execute(stmt)
+            return list(result.scalars().all())
+        elif user_type == "administrator":
+            stmt = select(Administrator)
+            if active_only:
+                stmt = stmt.where(Administrator.is_active == True)
+            result = await self.session.execute(stmt)
+            return list(result.scalars().all())
+        else:
+            if active_only:
+                return await self.user_repo.find_active_by_user_type(user_type)
+            return await self.user_repo.find_by_user_type(user_type)
     
     async def deactivate_user(self, user_id: int) -> None:
         """Deactivate a user account."""

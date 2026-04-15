@@ -48,29 +48,90 @@ router = APIRouter()
 async def list_users(
     user_type: str = Query(None, description="Filter by user type"),
     active_only: bool = Query(True, description="Show only active users"),
-    pagination: PaginationParams = Depends(),
+    skip: int = Query(0, ge=0, description="Number of records to skip"),
+    limit: int = Query(100, ge=1, le=500, description="Number of records to return"),
     session: AsyncSession = Depends(get_db_session),
     admin: AdminUser = None,  # Verificación de admin ya hecha por dependency
 ):
-    """List users with optional filtering."""
+    """List users with optional filtering and pagination."""
     user_service = UserService(session)
     
     if user_type:
-        users = await user_service.get_users_by_type(user_type, active_only)
+        all_users = await user_service.get_users_by_type(user_type, active_only)
     else:
         # This would need to be implemented in the service
-        users = []
+        all_users = []
     
     # Apply pagination
-    start = pagination.offset
-    end = start + pagination.limit
-    paginated_users = users[start:end]
+    total = len(all_users)
+    paginated_users = all_users[skip:skip + limit]
     
-    return create_paginated_response(
-        data=paginated_users,
-        total=len(users),
-        limit=pagination.limit,
-        offset=pagination.offset,
+    # Convert SQLAlchemy models to dicts for JSON serialization
+    users_data = []
+    for user in paginated_users:
+        try:
+            user_dict = {
+                "id": user.id,
+                "email": user.email,
+                "user_type": user.user_type,
+                "is_active": user.is_active,
+                "two_factor_enabled": user.two_factor_enabled,
+                "created_at": user.created_at.isoformat() if user.created_at else None,
+                "updated_at": user.updated_at.isoformat() if user.updated_at else None,
+            }
+            
+            # Add type-specific fields - attributes are already loaded since we queried the specific model
+            if user_type == "workshop":
+                lat = user.latitude
+                lon = user.longitude
+                radius = user.coverage_radius_km
+                user_dict.update({
+                    "workshop_name": user.workshop_name,
+                    "owner_name": user.owner_name,
+                    "latitude": float(lat) if lat is not None else None,
+                    "longitude": float(lon) if lon is not None else None,
+                    "coverage_radius_km": float(radius) if radius is not None else None,
+                })
+            elif user_type == "client":
+                fecha = user.fecha_nacimiento
+                user_dict.update({
+                    "direccion": user.direccion,
+                    "ci": user.ci,
+                    "fecha_nacimiento": fecha.isoformat() if fecha else None,
+                })
+            elif user_type == "technician":
+                clat = user.current_latitude
+                clon = user.current_longitude
+                user_dict.update({
+                    "workshop_id": user.workshop_id,
+                    "current_latitude": float(clat) if clat is not None else None,
+                    "current_longitude": float(clon) if clon is not None else None,
+                    "is_available": user.is_available,
+                })
+            elif user_type == "administrator":
+                user_dict.update({
+                    "role_level": user.role_level,
+                })
+            
+            users_data.append(user_dict)
+        except Exception as e:
+            logger.error(f"Error serializing user {user.id}: {str(e)}", exc_info=True)
+            continue
+    
+    # Calculate pagination metadata
+    total_pages = (total + limit - 1) // limit if limit > 0 else 1
+    current_page = (skip // limit) + 1 if limit > 0 else 1
+    
+    # Return in consistent paginated format
+    return create_success_response(
+        data={
+            "users": users_data,
+            "total": total,
+            "page": current_page,
+            "page_size": limit,
+            "total_pages": total_pages,
+        },
+        status_code=200,
     )
 
 

@@ -20,6 +20,86 @@ class AuditRepository(BaseRepository[AuditLog]):
     def __init__(self, session: AsyncSession):
         super().__init__(session, AuditLog)
     
+    async def find_with_filters(
+        self,
+        user_id: int | None = None,
+        action: str | None = None,
+        resource_type: str | None = None,
+        start_date: datetime | None = None,
+        end_date: datetime | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> tuple[Sequence[AuditLog], int]:
+        """
+        Find audit logs with optional filters and return total count.
+        
+        Args:
+            user_id: Filter by user ID (optional)
+            action: Filter by action
+            resource_type: Filter by resource type
+            start_date: Filter by start date
+            end_date: Filter by end date
+            limit: Maximum number of records
+            offset: Number of records to skip
+            
+        Returns:
+            Tuple of (list of audit logs, total count)
+        """
+        try:
+            query = select(AuditLog)
+            count_query = select(func.count(AuditLog.id))
+            
+            if user_id:
+                query = query.where(AuditLog.user_id == user_id)
+                count_query = count_query.where(AuditLog.user_id == user_id)
+            
+            if action:
+                query = query.where(AuditLog.action == action)
+                count_query = count_query.where(AuditLog.action == action)
+            
+            if resource_type:
+                query = query.where(AuditLog.resource_type == resource_type)
+                count_query = count_query.where(AuditLog.resource_type == resource_type)
+            
+            if start_date:
+                query = query.where(AuditLog.created_at >= start_date)
+                count_query = count_query.where(AuditLog.created_at >= start_date)
+            
+            if end_date:
+                query = query.where(AuditLog.created_at <= end_date)
+                count_query = count_query.where(AuditLog.created_at <= end_date)
+            
+            # Get total count
+            count_result = await self.session.execute(count_query)
+            total = count_result.scalar() or 0
+            
+            # Get paginated results
+            query = query.order_by(AuditLog.created_at.desc())
+            query = query.offset(offset).limit(limit)
+            
+            result = await self.session.execute(query)
+            logs = result.scalars().all()
+            
+            logger.debug(
+                "Found audit logs with filters",
+                count=len(logs),
+                total=total,
+                user_id=user_id,
+                action=action,
+                resource_type=resource_type,
+            )
+            
+            return logs, total
+            
+        except Exception as exc:
+            logger.error(
+                "Error finding audit logs with filters",
+                user_id=user_id,
+                error=str(exc),
+                exc_info=True,
+            )
+            raise
+    
     async def find_by_user(
         self,
         user_id: int,

@@ -130,7 +130,7 @@ class AuditService:
         resource_type: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
-    ) -> List[AuditLog]:
+    ) -> tuple[List[AuditLog], int]:
         """
         Get audit logs with optional filters.
         
@@ -142,7 +142,7 @@ class AuditService:
             offset: Offset for pagination
             
         Returns:
-            List of AuditLog
+            Tuple of (List of AuditLog, total count)
         """
         return await self.audit_repo.find_with_filters(
             user_id=user_id,

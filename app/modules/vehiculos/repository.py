@@ -7,66 +7,77 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...models.vehiculo import Vehiculo
+from ...shared.repositories.base import BaseRepository
 
 
-class VehiculoRepository:
+class VehiculoRepository(BaseRepository[Vehiculo]):
     """Repository para operaciones de vehículos."""
     
     def __init__(self, session: AsyncSession):
-        self.session = session
-    
-    async def create(self, vehiculo: Vehiculo) -> Vehiculo:
-        """Crear un nuevo vehículo."""
-        self.session.add(vehiculo)
-        await self.session.commit()
-        await self.session.refresh(vehiculo)
-        return vehiculo
-    
-    async def find_by_id(self, vehiculo_id: int) -> Optional[Vehiculo]:
-        """Buscar vehículo por ID."""
-        result = await self.session.execute(
-            select(Vehiculo).where(Vehiculo.id == vehiculo_id)
-        )
-        return result.scalar_one_or_none()
+        super().__init__(session, Vehiculo)
     
     async def find_by_matricula(self, matricula: str) -> Optional[Vehiculo]:
-        """Buscar vehículo por matrícula."""
-        result = await self.session.execute(
-            select(Vehiculo).where(Vehiculo.matricula == matricula.upper())
-        )
-        return result.scalar_one_or_none()
-    
-    async def find_by_client(self, client_id: int, active_only: bool = True) -> List[Vehiculo]:
-        """Buscar vehículos de un cliente."""
-        query = select(Vehiculo).where(Vehiculo.client_id == client_id)
+        """
+        Buscar vehículo por matrícula.
         
+        Args:
+            matricula: Matrícula del vehículo
+            
+        Returns:
+            Vehículo o None si no existe
+        """
+        return await self.find_by_field('matricula', matricula.upper())
+    
+    async def find_by_client(
+        self, 
+        client_id: int, 
+        active_only: bool = True,
+        skip: int = 0,
+        limit: int = 100
+    ) -> List[Vehiculo]:
+        """
+        Buscar vehículos de un cliente.
+        
+        Args:
+            client_id: ID del cliente
+            active_only: Si True, solo retorna vehículos activos
+            skip: Número de registros a saltar
+            limit: Máximo número de registros a retornar
+            
+        Returns:
+            Lista de vehículos del cliente
+        """
         if active_only:
-            query = query.where(Vehiculo.is_active == True)
-        
-        query = query.order_by(Vehiculo.created_at.desc())
-        
-        result = await self.session.execute(query)
-        return list(result.scalars().all())
+            return list(await self.find_active(
+                skip=skip,
+                limit=limit,
+                client_id=client_id
+            ))
+        else:
+            return list(await self.find_all(
+                skip=skip,
+                limit=limit,
+                client_id=client_id
+            ))
     
-    async def find_all(self, active_only: bool = True) -> List[Vehiculo]:
-        """Buscar todos los vehículos del sistema."""
-        query = select(Vehiculo)
+    async def find_all_vehicles(
+        self, 
+        active_only: bool = True,
+        skip: int = 0,
+        limit: int = 100
+    ) -> List[Vehiculo]:
+        """
+        Buscar todos los vehículos del sistema.
         
+        Args:
+            active_only: Si True, solo retorna vehículos activos
+            skip: Número de registros a saltar
+            limit: Máximo número de registros a retornar
+            
+        Returns:
+            Lista de todos los vehículos
+        """
         if active_only:
-            query = query.where(Vehiculo.is_active == True)
-        
-        query = query.order_by(Vehiculo.created_at.desc())
-        
-        result = await self.session.execute(query)
-        return list(result.scalars().all())
-    
-    async def update(self, vehiculo: Vehiculo) -> Vehiculo:
-        """Actualizar un vehículo."""
-        await self.session.commit()
-        await self.session.refresh(vehiculo)
-        return vehiculo
-    
-    async def delete(self, vehiculo: Vehiculo) -> None:
-        """Eliminar un vehículo (soft delete)."""
-        vehiculo.is_active = False
-        await self.session.commit()
+            return list(await self.find_active(skip=skip, limit=limit))
+        else:
+            return list(await self.find_all(skip=skip, limit=limit))

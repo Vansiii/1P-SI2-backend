@@ -33,6 +33,7 @@ class VehiculoService:
                 f"Ya existe un vehículo registrado con la matrícula {request.matricula}"
             )
         
+        # Crear el objeto Vehiculo directamente
         vehiculo = Vehiculo(
             client_id=client_id,
             matricula=request.matricula.upper(),
@@ -43,16 +44,19 @@ class VehiculoService:
             imagen=request.imagen,
         )
         
-        created = await self.repository.create(vehiculo)
+        # Agregar a la sesión y hacer commit
+        self.session.add(vehiculo)
+        await self.session.commit()
+        await self.session.refresh(vehiculo)
         
         logger.info(
             "Vehículo creado",
-            vehiculo_id=created.id,
+            vehiculo_id=vehiculo.id,
             client_id=client_id,
-            matricula=created.matricula
+            matricula=vehiculo.matricula
         )
         
-        return created
+        return vehiculo
     
     async def get_vehiculo(self, vehiculo_id: int, client_id: int) -> Vehiculo:
         """Obtener un vehículo por ID."""
@@ -77,7 +81,7 @@ class VehiculoService:
     
     async def get_all_vehiculos(self, active_only: bool = True) -> List[Vehiculo]:
         """Obtener todos los vehículos del sistema (solo admin)."""
-        return await self.repository.find_all(active_only)
+        return await self.repository.find_all_vehicles(active_only)
     
     async def update_vehiculo(
         self,
@@ -102,21 +106,24 @@ class VehiculoService:
         if request.is_active is not None:
             vehiculo.is_active = request.is_active
         
-        updated = await self.repository.update(vehiculo)
+        # Commit changes
+        await self.session.commit()
+        await self.session.refresh(vehiculo)
         
         logger.info(
             "Vehículo actualizado",
-            vehiculo_id=updated.id,
+            vehiculo_id=vehiculo.id,
             client_id=client_id
         )
         
-        return updated
+        return vehiculo
     
     async def delete_vehiculo(self, vehiculo_id: int, client_id: int) -> None:
         """Eliminar un vehículo (soft delete)."""
         vehiculo = await self.get_vehiculo(vehiculo_id, client_id)
         
-        await self.repository.delete(vehiculo)
+        # Soft delete usando el método del repositorio
+        await self.repository.soft_delete(vehiculo.id)
         
         logger.info(
             "Vehículo eliminado",

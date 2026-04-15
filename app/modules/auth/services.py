@@ -395,6 +395,35 @@ class AuthService:
         )
         return int(result.scalar() or 0)
 
+    async def _clear_failed_login_attempts(self, email: str) -> None:
+        """
+        Clear/mark as resolved recent failed login attempts after successful login.
+        This resets the counter so the user gets fresh attempts on next failure.
+        
+        We update the attempted_at timestamp of recent failed attempts to be older
+        than the lockout window, effectively removing them from the count.
+        """
+        from sqlalchemy import update
+        
+        window_start = datetime.now(UTC) - timedelta(minutes=self.settings.lockout_duration_minutes)
+        
+        # Update failed attempts to be outside the counting window
+        # Set their timestamp to be older than the lockout window
+        old_timestamp = datetime.now(UTC) - timedelta(minutes=self.settings.lockout_duration_minutes + 1)
+        
+        await self.session.execute(
+            update(LoginAttempt)
+            .where(
+                LoginAttempt.email == email,
+                LoginAttempt.success == False,
+                LoginAttempt.failure_reason == "invalid_password",
+                LoginAttempt.attempted_at >= window_start,
+            )
+            .values(attempted_at=old_timestamp)
+        )
+        
+        logger.info("Failed login attempts reset after successful login", email=email)
+
     async def _record_login_attempt(
         self,
         *,
@@ -449,7 +478,7 @@ class AuthService:
         user = await self.user_repo.find_active_by_email(email)
         if not user:
             logger.warning("Login attempt with non-existent email", email=email)
-            raise InvalidCredentialsException("Email incorrecto o no existe")
+            raise InvalidCredentialsException("El email no existe. Verifica tu correo electrónico.")
 
         now = datetime.now(UTC)
         if user.blocked_until and user.blocked_until > now:
@@ -519,35 +548,6 @@ class AuthService:
                     "max_attempts": self.settings.max_login_attempts,
                 },
             )
-        
-        # Validate user type is allowed for web platform
-        allowed_web_types = [UserType.WORKSHOP, UserType.TECHNICIAN, UserType.ADMINISTRATOR]
-        if user.user_type not in allowed_web_types:
-            await self._record_login_attempt(
-                email=email,
-                success=False,
-                ip_address=ip_address,
-                user_agent=user_agent,
-                user_id=user.id,
-                failure_reason="unauthorized_user_type",
-            )
-            await self.session.commit()
-            
-            logger.warning(
-                "Login attempt from unauthorized user type for web platform",
-                user_id=user.id,
-                user_type=user.user_type,
-                email=email
-            )
-            
-            raise InvalidCredentialsException(
-                message="Este tipo de usuario no tiene acceso a la plataforma web. Por favor, usa la aplicación móvil.",
-                details={
-                    "user_type": user.user_type,
-                    "allowed_types": allowed_web_types,
-                    "platform": "web"
-                }
-            )
 
         # Successful login clears stale block marker and records attempt.
         await self._record_login_attempt(
@@ -558,6 +558,9 @@ class AuthService:
             user_id=user.id,
             failure_reason=None,
         )
+        
+        # Clear failed login attempts counter after successful login
+        await self._clear_failed_login_attempts(email)
         
         # Check if 2FA is enabled
         if user.two_factor_enabled:
@@ -650,6 +653,9 @@ class AuthService:
         
         # Update last login
         await self.user_repo.update_last_login(user.id)
+        
+        # Clear failed login attempts counter after successful 2FA login
+        await self._clear_failed_login_attempts(email)
         
         logger.info("User logged in successfully with 2FA", user_id=user.id, email=email)
         

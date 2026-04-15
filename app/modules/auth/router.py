@@ -166,71 +166,30 @@ async def login(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Authenticate user and return tokens."""
-    from ...core import InvalidCredentialsException
-    from ...core.constants import UserType
-    from ...modules.auth.repository import UserRepository
-    from ...core.security import verify_password, create_access_token, create_refresh_token
-    from ...models.refresh_token import RefreshToken
-    from datetime import timedelta, UTC
-    
     client_ip = raw_request.client.host if raw_request.client else "unknown"
     user_agent = raw_request.headers.get("user-agent")
     
-    email = login_request.email.strip().lower()
+    # Use AuthService for proper login handling with failed attempts tracking
+    auth_service = AuthService(session)
+    user, token_response = await auth_service.login(
+        login_request,
+        ip_address=client_ip,
+        user_agent=user_agent,
+    )
     
-    # Find user by email
-    user_repo = UserRepository(session)
-    user = await user_repo.find_active_by_email(email)
-    
-    if not user:
-        logger.warning("Login attempt with non-existent email", email=email)
-        raise InvalidCredentialsException("Email o contraseña incorrectos")
-    
-    # Verify password
-    if not verify_password(login_request.password, user.password_hash):
-        logger.warning("Login attempt with invalid password", user_id=user.id, email=email)
-        raise InvalidCredentialsException("Email o contraseña incorrectos")
-    
-    # Check if 2FA is enabled
-    if user.two_factor_enabled:
-        from ...modules.two_factor.service import TwoFactorService
-        two_factor_service = TwoFactorService(session)
-        await two_factor_service.generate_login_otp(user.email)
-        
+    # Check if 2FA is required
+    if token_response.requires_2fa:
         return create_success_response(
             data={
                 "requires_2fa": True,
                 "user_type": user.user_type,
+                "email": user.email,
                 "message": "Se requiere autenticación de dos factores",
             },
             message="2FA requerido",
         )
     
-    # Generate tokens
-    access_token, expires_at, jti = create_access_token(
-        subject=str(user.id),
-        email=user.email,
-        user_type=user.user_type,
-    )
-    
-    refresh_token, refresh_token_hash = create_refresh_token()
-    
-    # Save refresh token
-    refresh_token_record = RefreshToken(
-        user_id=user.id,
-        token_hash=refresh_token_hash,
-        jti=jti,
-        expires_at=datetime.now(UTC) + timedelta(days=7),
-    )
-    
-    session.add(refresh_token_record)
-    await session.commit()
-    
-    # Update last login
-    await user_repo.update_last_login(user.id)
-    
-    logger.info("User logged in successfully", user_id=user.id, email=email, user_type=user.user_type)
-    
+    # Return successful login response
     return create_success_response(
         data={
             "user": {
@@ -239,10 +198,10 @@ async def login(
                 "user_type": user.user_type,
             },
             "tokens": {
-                "access_token": access_token,
-                "refresh_token": refresh_token,
-                "token_type": "bearer",
-                "expires_in": 30 * 60,  # 30 minutes
+                "access_token": token_response.access_token,
+                "refresh_token": token_response.refresh_token,
+                "token_type": token_response.token_type,
+                "expires_in": token_response.expires_in,
             },
         },
         message="Login exitoso",
@@ -319,88 +278,84 @@ async def get_profile(
 ):
     """Get current user profile - optimized with single query using polymorphic loading."""
     from sqlalchemy import select
-    from sqlalchemy.orm import selectinload, with_polymorphic
     from ...models.client import Client
     from ...models.workshop import Workshop
     from ...models.technician import Technician
     from ...models.administrator import Administrator
     
-    # Use polymorphic loading to get all data in one query
+    # Build base user data
+    user_data = {
+        "id": current_user.id,
+        "email": current_user.email,
+        "first_name": current_user.first_name,
+        "last_name": current_user.last_name,
+        "phone": current_user.phone,
+        "user_type": current_user.user_type,
+        "is_active": current_user.is_active,
+        "two_factor_enabled": current_user.two_factor_enabled,
+        "created_at": current_user.created_at.isoformat(),
+        "updated_at": current_user.updated_at.isoformat(),
+    }
+    
+    # Load type-specific data based on user type
     try:
-        # Create polymorphic query based on user type
         if current_user.user_type == "client":
             result = await session.execute(
                 select(Client).where(Client.id == current_user.id)
             )
-            user = result.scalar_one_or_none()
+            client = result.scalar_one_or_none()
+            if client:
+                user_data.update({
+                    "direccion": client.direccion,
+                    "ci": client.ci,
+                    "fecha_nacimiento": client.fecha_nacimiento.isoformat() if client.fecha_nacimiento else None,
+                })
+                
         elif current_user.user_type == "workshop":
             result = await session.execute(
                 select(Workshop).where(Workshop.id == current_user.id)
             )
-            user = result.scalar_one_or_none()
+            workshop = result.scalar_one_or_none()
+            if workshop:
+                user_data.update({
+                    "workshop_name": workshop.workshop_name,
+                    "owner_name": workshop.owner_name,
+                    "address": workshop.address,
+                    "direccion": workshop.address,  # Alias para compatibilidad
+                    "workshop_phone": workshop.workshop_phone,
+                    "latitude": float(workshop.latitude) if workshop.latitude else None,
+                    "longitude": float(workshop.longitude) if workshop.longitude else None,
+                    "coverage_radius_km": float(workshop.coverage_radius_km) if workshop.coverage_radius_km else None,
+                })
+                
         elif current_user.user_type == "technician":
             result = await session.execute(
                 select(Technician).where(Technician.id == current_user.id)
             )
-            user = result.scalar_one_or_none()
+            technician = result.scalar_one_or_none()
+            if technician:
+                user_data.update({
+                    "workshop_id": technician.workshop_id,
+                    "current_latitude": float(technician.current_latitude) if technician.current_latitude else None,
+                    "current_longitude": float(technician.current_longitude) if technician.current_longitude else None,
+                    "is_available": technician.is_available,
+                })
+                
         elif current_user.user_type == "admin":
             result = await session.execute(
                 select(Administrator).where(Administrator.id == current_user.id)
             )
-            user = result.scalar_one_or_none()
-        else:
-            user = current_user
-            
-        if not user:
-            user = current_user
+            admin = result.scalar_one_or_none()
+            if admin:
+                # Access role_level while still in session
+                role_level = admin.role_level
+                user_data.update({
+                    "role_level": role_level,
+                })
             
     except Exception as e:
-        logger.error(f"Error loading polymorphic user: {str(e)}", user_id=current_user.id)
-        user = current_user
-    
-    # Build response based on user type
-    user_data = {
-        "id": user.id,
-        "email": user.email,
-        "first_name": user.first_name,
-        "last_name": user.last_name,
-        "phone": user.phone,
-        "user_type": user.user_type,
-        "is_active": user.is_active,
-        "two_factor_enabled": user.two_factor_enabled,
-        "created_at": user.created_at.isoformat(),
-        "updated_at": user.updated_at.isoformat(),
-    }
-    
-    # Add type-specific data
-    if user.user_type == "client" and isinstance(user, Client):
-        user_data.update({
-            "direccion": user.direccion,
-            "ci": user.ci,
-            "fecha_nacimiento": user.fecha_nacimiento.isoformat() if user.fecha_nacimiento else None,
-        })
-    elif user.user_type == "workshop" and isinstance(user, Workshop):
-        user_data.update({
-            "workshop_name": user.workshop_name,
-            "owner_name": user.owner_name,
-            "address": user.address,
-            "direccion": user.address,  # Alias para compatibilidad
-            "workshop_phone": user.workshop_phone,
-            "latitude": float(user.latitude) if user.latitude else None,
-            "longitude": float(user.longitude) if user.longitude else None,
-            "coverage_radius_km": float(user.coverage_radius_km) if user.coverage_radius_km else None,
-        })
-    elif user.user_type == "technician" and isinstance(user, Technician):
-        user_data.update({
-            "workshop_id": user.workshop_id,
-            "current_latitude": float(user.current_latitude) if user.current_latitude else None,
-            "current_longitude": float(user.current_longitude) if user.current_longitude else None,
-            "is_available": user.is_available,
-        })
-    elif user.user_type == "admin" and isinstance(user, Administrator):
-        user_data.update({
-            "role_level": user.role_level,
-        })
+        logger.error(f"Error loading user type-specific data: {str(e)}", user_id=current_user.id, user_type=current_user.user_type)
+        # Continue with base user data
     
     return create_success_response(
         data=user_data,
