@@ -99,7 +99,7 @@ class UserType:
     CLIENT = "client"
     WORKSHOP = "workshop"
     TECHNICIAN = "technician"
-    ADMINISTRATOR = "administrator"
+    ADMINISTRATOR = "admin"  # Usar 'admin' para coincidir con el constraint de BD
     
     @classmethod
     def all(cls) -> list[str]:
@@ -146,7 +146,7 @@ class ResourceType:
     CLIENT = "client"
     WORKSHOP = "workshop"
     TECHNICIAN = "technician"
-    ADMINISTRATOR = "administrator"
+    ADMINISTRATOR = "admin"  # Usar 'admin' para coincidir con el constraint de BD
     VEHICLE = "vehicle"
     INCIDENT = "incident"
     SERVICE = "service"

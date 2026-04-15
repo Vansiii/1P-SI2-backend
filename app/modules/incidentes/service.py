@@ -59,7 +59,11 @@ class IncidenteService:
             es_ambiguo=False,  # Se actualizará cuando se procese con IA
         )
         
-        created_incidente = await self.repository.create(incidente)
+        # Agregar a la sesión y hacer flush
+        self.session.add(incidente)
+        await self.session.flush()
+        await self.session.refresh(incidente)
+        created_incidente = incidente
         
         # Crear evidencias de texto (descripción principal)
         evidencia_texto = Evidencia(
@@ -113,6 +117,9 @@ class IncidenteService:
                     uploaded_by=client_id,
                 )
                 await self.repository.create_evidencia_audio(evidencia_audio)
+        
+        # Commit all changes
+        await self.session.commit()
         
         logger.info(
             "Incidente creado",
@@ -203,7 +210,9 @@ class IncidenteService:
         incidente.estado_actual = "asignado"
         incidente.assigned_at = datetime.now(UTC)
         
-        updated = await self.repository.update(incidente)
+        # Commit changes
+        await self.session.commit()
+        await self.session.refresh(incidente)
         
         logger.info(
             "Incidente aceptado",
@@ -214,7 +223,7 @@ class IncidenteService:
         
         # TODO: Notificar al cliente que su solicitud fue aceptada
         
-        return updated
+        return incidente
     
     async def reject_incidente(
         self,
@@ -259,11 +268,12 @@ class IncidenteService:
     
     async def get_all_incidentes(self) -> List[Incidente]:
         """Obtener todos los incidentes del sistema (solo admin)."""
-        return await self.repository.find_all()
+        # Usar límite alto para obtener todos
+        return list(await self.repository.find_all(skip=0, limit=10000))
     
     async def get_all_incidentes_by_estado(self, estado: str) -> List[Incidente]:
         """Obtener todos los incidentes por estado (solo admin)."""
-        return await self.repository.find_all_by_estado(estado)
+        return await self.repository.find_by_estado(estado, skip=0, limit=10000)
     
     async def update_estado(
         self,
@@ -289,7 +299,9 @@ class IncidenteService:
         elif nuevo_estado == "resuelto" and not incidente.resolved_at:
             incidente.resolved_at = datetime.now(UTC)
         
-        updated = await self.repository.update(incidente)
+        # Commit changes
+        await self.session.commit()
+        await self.session.refresh(incidente)
         
         logger.info(
             "Estado de incidente actualizado",
@@ -299,7 +311,7 @@ class IncidenteService:
             user_type=user_type
         )
         
-        return updated
+        return incidente
     
     async def get_incidente_with_evidencias(
         self,

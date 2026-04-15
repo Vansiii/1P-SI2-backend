@@ -38,28 +38,51 @@ async def get_audit_logs(
     action: str = Query(None, description="Filter by action"),
     resource_type: str = Query(None, description="Filter by resource type"),
     resource_id: int = Query(None, description="Filter by resource ID"),
-    pagination: PaginationParams = Depends(),
+    skip: int = Query(0, ge=0, description="Number of records to skip"),
+    limit: int = Query(20, ge=1, le=100, description="Number of records to return"),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Get audit logs with filtering and pagination."""
     audit_service = AuditService(session)
     
-    logs = await audit_service.get_audit_logs(
+    logs, total = await audit_service.get_audit_logs(
         user_id=user_id,
         action=action,
         resource_type=resource_type,
-        limit=pagination.limit,
-        offset=pagination.offset,
+        limit=limit,
+        offset=skip,
     )
     
-    # For total count, we'd need a separate count query
-    total = len(logs)  # Simplified for now
+    # Convert SQLAlchemy models to dicts for JSON serialization
+    logs_data = []
+    for log in logs:
+        log_dict = {
+            "id": log.id,
+            "user_id": log.user_id,
+            "action": log.action,
+            "resource_type": log.resource_type,
+            "resource_id": log.resource_id,
+            "ip_address": log.ip_address,
+            "user_agent": log.user_agent,
+            "details": log.details,
+            "timestamp": log.created_at.isoformat() if log.created_at else None,
+        }
+        logs_data.append(log_dict)
     
-    return create_paginated_response(
-        data=logs,
-        total=total,
-        limit=pagination.limit,
-        offset=pagination.offset,
+    # Calculate pagination metadata
+    total_pages = (total + limit - 1) // limit  # Ceiling division
+    current_page = (skip // limit) + 1
+    
+    # Return paginated response in consistent format
+    return create_success_response(
+        data={
+            "logs": logs_data,
+            "total": total,
+            "page": current_page,
+            "page_size": limit,
+            "total_pages": total_pages,
+        },
+        status_code=200,
     )
 
 

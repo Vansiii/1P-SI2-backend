@@ -20,6 +20,7 @@ ENV/
 .env.local
 .env.*.local
 .env.example
+.env.railway
 
 # IDE
 .vscode/

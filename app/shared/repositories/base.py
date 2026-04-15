@@ -422,6 +422,72 @@ class BaseRepository(Generic[ModelType]):
             )
             raise
     
+    async def find_active(
+        self,
+        skip: int = 0,
+        limit: int = 100,
+        **filters
+    ) -> Sequence[ModelType]:
+        """
+        Find active entities (where is_active=True).
+        
+        Args:
+            skip: Number of records to skip
+            limit: Maximum number of records to return
+            **filters: Additional filters
+            
+        Returns:
+            List of active entities
+        """
+        if hasattr(self.model, 'is_active'):
+            filters['is_active'] = True
+        return await self.find_all(skip=skip, limit=limit, **filters)
+    
+    async def soft_delete(self, id: Any) -> ModelType:
+        """
+        Soft delete entity by setting is_active=False.
+        
+        Args:
+            id: Entity ID
+            
+        Returns:
+            Updated entity
+            
+        Raises:
+            NotFoundException: If entity not found
+            ValueError: If model doesn't have is_active field
+        """
+        if not hasattr(self.model, 'is_active'):
+            raise ValueError(f"Model {self.model.__name__} doesn't support soft delete (no is_active field)")
+        
+        try:
+            db_obj = await self.find_by_id_or_raise(id)
+            db_obj.is_active = False
+            
+            await self.session.commit()
+            await self.session.refresh(db_obj)
+            
+            logger.info(
+                "Soft deleted entity",
+                model=self.model.__name__,
+                id=id,
+            )
+            
+            return db_obj
+            
+        except Exception as exc:
+            await self.session.rollback()
+            if isinstance(exc, NotFoundException):
+                raise
+            logger.error(
+                "Error soft deleting entity",
+                model=self.model.__name__,
+                id=id,
+                error=str(exc),
+                exc_info=True,
+            )
+            raise
+    
     async def bulk_create(self, objects: list[CreateSchemaType]) -> list[ModelType]:
         """
         Create multiple entities in bulk.
