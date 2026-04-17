@@ -128,9 +128,18 @@ class IncidenteService:
             vehiculo_id=request.vehiculo_id,
             estado="pendiente"
         )
-        
-        # TODO: Aquí se llamaría al servicio de IA para procesar el incidente
-        # await self._process_with_ai(created_incidente)
+
+        # Trigger asynchronous AI processing without delaying the incident response.
+        try:
+            from .ai_service import IncidentAIService
+
+            IncidentAIService.schedule_incident_processing(created_incidente.id)
+        except Exception as exc:
+            logger.warning(
+                "Failed to schedule incident AI processing",
+                incidente_id=created_incidente.id,
+                error=str(exc),
+            )
         
         return created_incidente
     

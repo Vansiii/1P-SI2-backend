@@ -92,6 +92,17 @@ class Settings(BaseSettings):
     rate_limit_admin_multiplier: int = Field(
         default=3, alias="RATE_LIMIT_ADMIN_MULTIPLIER"
     )
+
+    # Gemini AI Configuration
+    gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
+    gemini_model: str = Field(default="gemini-2.0-flash", alias="GEMINI_MODEL")
+    gemini_fallback_models: str = Field(
+        default="gemini-flash-lite-latest,gemini-2.5-flash,gemini-2.0-flash-lite",
+        alias="GEMINI_FALLBACK_MODELS",
+    )
+    gemini_timeout_seconds: int = Field(default=30, alias="GEMINI_TIMEOUT_SECONDS")
+    gemini_max_media_bytes: int = Field(default=4_000_000, alias="GEMINI_MAX_MEDIA_BYTES")
+    gemini_prompt_version: str = Field(default="v1", alias="GEMINI_PROMPT_VERSION")
     
     # Logging
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
@@ -147,6 +158,30 @@ class Settings(BaseSettings):
         if value <= 0:
             raise ValueError("Los valores de configuración de BD deben ser positivos")
         return value
+
+    @field_validator("gemini_timeout_seconds", "gemini_max_media_bytes")
+    @classmethod
+    def validate_positive_gemini_values(cls, value: int) -> int:
+        """Validate positive Gemini numeric settings."""
+        if value <= 0:
+            raise ValueError("Gemini numeric settings must be positive")
+        return value
+
+    @field_validator("gemini_model")
+    @classmethod
+    def validate_gemini_model(cls, value: str) -> str:
+        """Validate Gemini model name."""
+        normalized_value = value.strip()
+        if not normalized_value:
+            raise ValueError("GEMINI_MODEL cannot be empty")
+        return normalized_value
+
+    @field_validator("gemini_fallback_models")
+    @classmethod
+    def validate_gemini_fallback_models(cls, value: str) -> str:
+        """Validate Gemini fallback model list format."""
+        normalized_models = [model.strip() for model in value.split(",") if model.strip()]
+        return ",".join(normalized_models)
     
     @field_validator("supabase_url")
     @classmethod
@@ -255,6 +290,11 @@ class Settings(BaseSettings):
     def smtp_password(self) -> str:
         """Alias for brevo_smtp_password."""
         return self.brevo_smtp_password
+
+    @property
+    def is_gemini_enabled(self) -> bool:
+        """Check whether Gemini integration is enabled."""
+        return bool(self.gemini_api_key and self.gemini_api_key.strip())
 
 
 @lru_cache

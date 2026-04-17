@@ -24,6 +24,7 @@ from app.models.technician import Technician
 from app.models.administrator import Administrator
 from app.models.vehiculo import Vehiculo
 from app.models.incidente import Incidente
+from app.models.incident_ai_analysis import IncidentAIAnalysis
 from app.models.evidencia import Evidencia
 from app.models.evidencia_imagen import EvidenciaImagen
 from app.models.evidencia_audio import EvidenciaAudio

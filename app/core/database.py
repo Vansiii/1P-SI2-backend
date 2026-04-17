@@ -144,6 +144,7 @@ async def create_database_tables() -> None:
         EvidenciaImagen,
         HistorialServicio,
         Incidente,
+        IncidentAIAnalysis,
         LoginAttempt,
         PasswordResetToken,
         RefreshToken,

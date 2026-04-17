@@ -6,10 +6,10 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ...core import get_db_session, get_logger
+from ...core import NotFoundException, get_db_session, get_logger
 from ...core.responses import create_success_response
 from ...core.permissions import Permission
-from ...core.dependencies import require_permission
+from ...core.dependencies import require_any_permission, require_permission
 from ...shared.dependencies.auth import get_current_user
 from ...models.user import User
 from .schemas import (
@@ -22,6 +22,7 @@ from .schemas import (
     EvidenciaAudioResponse,
 )
 from .service import IncidenteService
+from .ai_service import IncidentAIService
 from pydantic import BaseModel, Field
 
 class AcceptIncidenteRequest(BaseModel):
@@ -238,6 +239,153 @@ async def reject_incidente(
     return create_success_response(
         data=IncidenteResponse.model_validate(incidente).model_dump(mode='json'),
         message="Solicitud rechazada. El sistema buscará otro taller disponible.",
+    )
+
+
+@router.post(
+    "/{incidente_id}/procesar-ia",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Process incident with AI",
+    description="Queue an incident for multimodal Gemini classification",
+    dependencies=[Depends(require_permission(Permission.ADMIN_MANUAL_INTERVENTION))],
+)
+async def process_incidente_with_ai(
+    incidente_id: int,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Queue incident AI processing with current evidence payload."""
+    logger.info(
+        "Manual request to process incident with AI",
+        incidente_id=incidente_id,
+        requested_by=current_user.id,
+        user_type=current_user.user_type,
+    )
+
+    service = IncidentAIService(session)
+    analysis = await service.queue_incident_processing(
+        incident_id=incidente_id,
+        force_reprocess=False,
+    )
+
+    if analysis.status == "completed":
+        return create_success_response(
+            data=service.serialize_analysis(analysis),
+            message="Incident already has an up-to-date AI analysis",
+            status_code=status.HTTP_200_OK,
+        )
+
+    IncidentAIService.dispatch_processing_by_analysis_id(analysis.id)
+    return create_success_response(
+        data=service.serialize_analysis(analysis),
+        message="AI processing queued successfully",
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+
+
+@router.post(
+    "/{incidente_id}/reprocesar-ia",
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Reprocess incident with AI",
+    description="Force a new multimodal Gemini classification run",
+    dependencies=[Depends(require_permission(Permission.ADMIN_MANUAL_INTERVENTION))],
+)
+async def reprocess_incidente_with_ai(
+    incidente_id: int,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Force a new AI processing attempt for an incident."""
+    logger.info(
+        "Manual request to reprocess incident with AI",
+        incidente_id=incidente_id,
+        requested_by=current_user.id,
+        user_type=current_user.user_type,
+    )
+
+    service = IncidentAIService(session)
+    analysis = await service.queue_incident_processing(
+        incident_id=incidente_id,
+        force_reprocess=True,
+    )
+
+    IncidentAIService.dispatch_processing_by_analysis_id(analysis.id)
+    return create_success_response(
+        data=service.serialize_analysis(analysis),
+        message="AI reprocessing queued successfully",
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+
+
+@router.get(
+    "/{incidente_id}/analisis-ia",
+    summary="Get latest AI analysis",
+    description="Return the most recent technical AI analysis for an incident",
+    dependencies=[
+        Depends(
+            require_any_permission(
+                Permission.EMERGENCY_VIEW_OWN,
+                Permission.ADMIN_MANUAL_INTERVENTION,
+            )
+        )
+    ],
+)
+async def get_latest_incidente_ai_analysis(
+    incidente_id: int,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Get the latest AI analysis entry for one incident."""
+    incidente_service = IncidenteService(session)
+    await incidente_service.get_incidente(
+        incidente_id=incidente_id,
+        user_id=current_user.id,
+        user_type=current_user.user_type,
+    )
+
+    service = IncidentAIService(session)
+    latest_analysis = await service.get_latest_analysis_for_incident(incidente_id)
+    if not latest_analysis:
+        raise NotFoundException(resource_type="AI analysis", resource_id=incidente_id)
+
+    return create_success_response(
+        data=service.serialize_analysis(latest_analysis),
+        message="AI analysis retrieved successfully",
+    )
+
+
+@router.get(
+    "/{incidente_id}/analisis-ia/historial",
+    summary="List AI analysis history",
+    description="Return AI analysis history for an incident",
+    dependencies=[
+        Depends(
+            require_any_permission(
+                Permission.EMERGENCY_VIEW_OWN,
+                Permission.ADMIN_MANUAL_INTERVENTION,
+            )
+        )
+    ],
+)
+async def get_incidente_ai_analysis_history(
+    incidente_id: int,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Get AI analysis history for one incident."""
+    incidente_service = IncidenteService(session)
+    await incidente_service.get_incidente(
+        incidente_id=incidente_id,
+        user_id=current_user.id,
+        user_type=current_user.user_type,
+    )
+
+    service = IncidentAIService(session)
+    history = await service.list_analysis_history(incidente_id)
+
+    return create_success_response(
+        data=[service.serialize_analysis(analysis) for analysis in history],
+        message=f"Found {len(history)} AI analyses",
     )
 
 

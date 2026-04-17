@@ -5,6 +5,7 @@ from datetime import datetime, UTC
 from typing import Any, Generic, TypeVar
 from uuid import uuid4
 
+from fastapi.encoders import jsonable_encoder
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -91,7 +92,7 @@ def create_success_response(
     
     return JSONResponse(
         status_code=status_code,
-        content=response_data,
+        content=jsonable_encoder(response_data),
     )
 
 
@@ -123,7 +124,7 @@ def create_paginated_response(
     
     return JSONResponse(
         status_code=200,
-        content=response_data,
+        content=jsonable_encoder(response_data),
     )
 
 
