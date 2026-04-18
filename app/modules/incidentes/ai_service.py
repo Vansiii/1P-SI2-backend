@@ -362,8 +362,46 @@ class IncidentAIService:
         """Sync normalized classifier output into the existing incident columns."""
         incident.categoria_ia = classification.category
         incident.prioridad_ia = classification.priority
-        incident.resumen_ia = classification.summary
+        incident.resumen_ia = IncidentAIService._build_incident_ai_summary(classification)
         incident.es_ambiguo = classification.is_ambiguous
+
+    @staticmethod
+    def _build_incident_ai_summary(classification: GeminiIncidentClassification) -> str:
+        """Build a richer summary string for incident-level visualization clients."""
+        summary_sections: list[str] = []
+
+        base_summary = classification.summary.strip()
+        if base_summary:
+            summary_sections.append(base_summary)
+
+        cleaned_findings = [finding.strip() for finding in classification.findings if finding.strip()]
+        if cleaned_findings:
+            summary_sections.append(f"Hallazgos clave: {'; '.join(cleaned_findings)}.")
+
+        recommendation = classification.workshop_recommendation.strip()
+        if recommendation:
+            summary_sections.append(f"Recomendación de taller: {recommendation}")
+
+        cleaned_missing_data = [
+            missing_item.strip() for missing_item in classification.missing_data if missing_item.strip()
+        ]
+        if cleaned_missing_data:
+            summary_sections.append(
+                "Información adicional recomendada para confirmar diagnóstico: "
+                f"{'; '.join(cleaned_missing_data)}."
+            )
+
+        confidence_percentage = int(round(classification.confidence * 100))
+        summary_sections.append(f"Confianza estimada del análisis: {confidence_percentage}%.")
+
+        if classification.is_ambiguous:
+            summary_sections.append(
+                "Caso marcado como ambiguo: se recomienda validación técnica humana antes "
+                "de cerrar el diagnóstico."
+            )
+
+        enriched_summary = "\n\n".join(section for section in summary_sections if section)
+        return enriched_summary[:1800]
 
     async def _mark_analysis_failed(self, analysis: IncidentAIAnalysis, error: Exception) -> None:
         """Persist failed analysis state with truncated error metadata."""

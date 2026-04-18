@@ -92,3 +92,30 @@ def test_gemini_endpoint_builder_uses_model_name() -> None:
     endpoint = GeminiIncidentClassifier._build_endpoint("gemini-1.5-flash")
 
     assert endpoint.endswith("/models/gemini-1.5-flash:generateContent")
+
+
+def test_incident_ai_summary_builder_adds_context_sections() -> None:
+    classification = GeminiIncidentClassification.model_validate(
+        {
+            "category": "motor",
+            "priority": "alta",
+            "summary": "El motor presenta apagado repentino luego de vibración intensa y olor a combustible.",
+            "is_ambiguous": True,
+            "confidence": 0.72,
+            "findings": [
+                "vibración previa al apagado",
+                "olor marcado a combustible",
+                "sin respuesta al encendido inmediato",
+            ],
+            "missing_data": ["lectura de códigos OBD", "estado de presión de combustible"],
+            "workshop_recommendation": "Realizar diagnóstico inicial de inyección, bomba y chispa con protocolo de seguridad.",
+        }
+    )
+
+    enriched_summary = IncidentAIService._build_incident_ai_summary(classification)
+
+    assert "Hallazgos clave:" in enriched_summary
+    assert "Recomendación de taller:" in enriched_summary
+    assert "Información adicional recomendada" in enriched_summary
+    assert "Confianza estimada del análisis:" in enriched_summary
+    assert "Caso marcado como ambiguo" in enriched_summary

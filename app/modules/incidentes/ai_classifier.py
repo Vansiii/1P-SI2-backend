@@ -63,12 +63,12 @@ class GeminiIncidentClassification(BaseModel):
         "incierto",
     ]
     priority: Literal["alta", "media", "baja"]
-    summary: str = Field(..., min_length=10, max_length=700)
+    summary: str = Field(..., min_length=25, max_length=1200)
     is_ambiguous: bool
     confidence: float = Field(..., ge=0, le=1)
-    findings: list[str] = Field(default_factory=list)
-    missing_data: list[str] = Field(default_factory=list)
-    workshop_recommendation: str = Field(default="", max_length=700)
+    findings: list[str] = Field(default_factory=list, max_length=8)
+    missing_data: list[str] = Field(default_factory=list, max_length=6)
+    workshop_recommendation: str = Field(default="", max_length=900)
 
 
 @dataclass(slots=True)
@@ -444,24 +444,29 @@ class GeminiIncidentClassifier:
 
         return (
             "You are an assistant that classifies vehicle emergency incidents for workshop dispatch. "
-            "Analyze user description and optional multimedia evidence.\n\n"
+            "Analyze user description and optional multimedia evidence. "
+            "Write the analysis in Spanish with practical workshop context.\n\n"
             "Return ONLY a valid JSON object with this exact schema and keys:\n"
             "{\n"
             '  "category": "one of the allowed categories",\n'
             '  "priority": "alta | media | baja",\n'
-            '  "summary": "concise operational summary",\n'
+            '  "summary": "detailed technical context for dispatch and diagnostics",\n'
             '  "is_ambiguous": true or false,\n'
             '  "confidence": number between 0 and 1,\n'
             '  "findings": ["objective finding 1", "objective finding 2"],\n'
             '  "missing_data": ["missing item 1", "missing item 2"],\n'
-            '  "workshop_recommendation": "first action for workshop"\n'
+            '  "workshop_recommendation": "immediate action plan for workshop"\n'
             "}\n\n"
             "Rules:\n"
             f"- Allowed categories: {categories}.\n"
             "- Do not invent facts not present in evidence.\n"
             "- If evidence is insufficient, set category='incierto' and is_ambiguous=true.\n"
             "- If confidence < 0.65, set is_ambiguous=true.\n"
-            "- Summary must be action-oriented and in Spanish.\n\n"
+            "- Summary must be action-oriented, in Spanish, and provide useful context for technicians.\n"
+            "- Summary should cover symptoms, probable cause hypothesis, operational risk, and urgency rationale.\n"
+            "- Findings should include 3 to 6 concise evidence-based points when possible.\n"
+            "- Missing_data should identify what additional evidence would increase certainty.\n"
+            "- Workshop_recommendation should include immediate action, first diagnostics, and safety caution if relevant.\n\n"
             "Incident description:\n"
             f"{description.strip()}"
         )
