@@ -1,5 +1,5 @@
 ﻿from sqlalchemy import String
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base
 
@@ -17,5 +17,5 @@ class Especialidad(Base):
     descripcion: Mapped[str | None] = mapped_column(String(255), nullable=True)
     
     # Relaciones
-    # technicians = relationship("TechnicianEspecialidad", back_populates="especialidad")
+    technicians = relationship("TechnicianEspecialidad", back_populates="especialidad")
 

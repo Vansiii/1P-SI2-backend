@@ -77,6 +77,43 @@ class EvidenciaAudioResponse(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class TechnicianBasicInfo(BaseModel):
+    """Información básica del técnico asignado."""
+    id: int
+    first_name: str
+    last_name: str
+    phone: Optional[str] = None
+    current_latitude: Optional[float] = None
+    current_longitude: Optional[float] = None
+    is_online: bool = False
+    
+    model_config = {"from_attributes": True}
+
+
+class WorkshopBasicInfo(BaseModel):
+    """Información básica del taller asignado."""
+    id: int
+    workshop_name: str
+    phone: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    address: Optional[str] = None
+    
+    model_config = {"from_attributes": True}
+
+
+class SuggestedTechnicianInfo(BaseModel):
+    """Información del técnico sugerido por la IA."""
+    technician_id: int
+    first_name: str
+    last_name: str
+    phone: Optional[str] = None
+    final_score: float
+    distance_km: float
+    ai_reasoning: Optional[str] = None
+    assignment_strategy: str
+
+
 class IncidenteResponse(BaseModel):
     """Response con datos de un incidente."""
     id: int
@@ -97,6 +134,13 @@ class IncidenteResponse(BaseModel):
     updated_at: datetime
     assigned_at: Optional[datetime]
     resolved_at: Optional[datetime]
+    
+    # Información del técnico y taller asignados
+    technician: Optional[TechnicianBasicInfo] = None
+    workshop: Optional[WorkshopBasicInfo] = None
+    
+    # Información del técnico sugerido por la IA (si existe)
+    suggested_technician: Optional[SuggestedTechnicianInfo] = None
     
     model_config = {"from_attributes": True}
 

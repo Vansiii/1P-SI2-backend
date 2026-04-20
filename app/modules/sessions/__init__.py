@@ -1,7 +1,7 @@
 """
-Sessions module for managing user sessions.
+Session management module.
 """
-
 from .router import router
+from .services import SessionService
 
-__all__ = ["router"]
+__all__ = ["router", "SessionService"]

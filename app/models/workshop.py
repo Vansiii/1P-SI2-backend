@@ -1,7 +1,7 @@
 ﻿from datetime import datetime
 
 from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Numeric, String, Text, func
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .user import User
 
@@ -34,7 +34,11 @@ class Workshop(User):
     # Disponibilidad y cobertura
     coverage_radius_km: Mapped[float | None] = mapped_column(Numeric(5, 2), nullable=True, default=10.0)
     is_available: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
-    is_verified: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=False)
+    is_verified: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=True)  # Auto-verify workshops
+    
+    # Relaciones
+    technicians = relationship("Technician", back_populates="workshop", foreign_keys="[Technician.workshop_id]")
+    incidentes = relationship("Incidente", back_populates="workshop")
 
     __mapper_args__ = {
         "polymorphic_identity": "workshop",

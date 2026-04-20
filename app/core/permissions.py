@@ -51,6 +51,7 @@ class Permission(str, Enum):
     EMERGENCY_VIEW_OWN = "emergency:view_own"
     EMERGENCY_TRACK = "emergency:track"
     EMERGENCY_VIEW_HISTORY = "emergency:view_history"
+    EMERGENCY_CANCEL_OWN = "emergency:cancel_own"  # Cancelar propio incidente
     
     # CU05: Comunicarse con el Taller
     CHAT_CLIENT_TO_WORKSHOP = "chat:client_to_workshop"
@@ -186,6 +187,7 @@ ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
         Permission.EMERGENCY_VIEW_OWN,
         Permission.EMERGENCY_TRACK,
         Permission.EMERGENCY_VIEW_HISTORY,
+        Permission.EMERGENCY_CANCEL_OWN,  # Cancelar propio incidente
         
         # CU05: Comunicarse con el Taller
         Permission.CHAT_CLIENT_TO_WORKSHOP,
@@ -270,6 +272,10 @@ ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
         
         # CU02: Gestionar Contraseña
         Permission.PASSWORD_CHANGE,
+        
+        # CU04: Ver incidentes asignados
+        Permission.EMERGENCY_VIEW_OWN,
+        Permission.EMERGENCY_TRACK,
         
         # CU08: Gestionar Atención del Servicio (limitado)
         Permission.SERVICE_UPDATE_STATUS,
@@ -463,3 +469,31 @@ def get_user_permissions_list(user_role: str) -> list[str]:
         return [perm.value for perm in get_role_permissions(role)]
     except ValueError:
         return []
+
+
+# Export all permission-related items
+__all__ = [
+    "UserRole",
+    "Permission",
+    "check_permission",
+    "check_any_permission",
+    "check_all_permissions",
+    "get_role_permissions",
+    "get_user_permissions",
+]
+
+
+# Import dependency factories for backward compatibility (at the end to avoid circular imports)
+def __getattr__(name):
+    """Lazy import for dependency factories to avoid circular imports."""
+    if name in ("require_permission", "require_any_permission", "require_all_permissions", 
+                "require_role", "require_any_role"):
+        from .dependencies import (
+            require_permission,
+            require_any_permission,
+            require_all_permissions,
+            require_role,
+            require_any_role
+        )
+        return locals()[name]
+    raise AttributeError(f"module '{__name__}' has no attribute '{name}'")

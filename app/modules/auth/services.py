@@ -280,6 +280,8 @@ class RegistrationService:
             "latitude": request.latitude,
             "longitude": request.longitude,
             "coverage_radius_km": request.coverage_radius_km,
+            "is_verified": True,  # Auto-verify workshops on registration
+            "is_available": True,  # Make workshop available by default
         }
         
         user, access_token, refresh_token = await self._register_user_base(
@@ -302,40 +304,94 @@ class RegistrationService:
         request: TechnicianRegistrationRequest
     ) -> tuple[Technician, TokenResponse]:
         """
-        Register a new technician.
+        Register a new technician with optional specialties.
         
         Args:
             request: Technician registration data
             
         Returns:
             Tuple of (technician, token_response)
+            
+        Raises:
+            UserNotFoundException: If workshop or specialties don't exist
+            EmailAlreadyExistsException: If email already exists
+            WeakPasswordException: If password is weak
         """
         # Verify workshop exists
         workshop = await self.workshop_repo.find_by_id(request.workshop_id)
         if not workshop:
-            raise UserNotFoundException(f"Workshop {request.workshop_id}")
+            logger.error("Workshop not found during technician registration", workshop_id=request.workshop_id)
+            raise UserNotFoundException(f"Taller con ID {request.workshop_id} no encontrado")
+        
+        # Verify workshop is active
+        if not workshop.is_active:
+            logger.error("Inactive workshop during technician registration", workshop_id=request.workshop_id)
+            raise ValueError(f"El taller {workshop.business_name} no está activo")
+        
+        # Verify specialties exist if provided
+        if request.specialty_ids:
+            from sqlalchemy import select
+            from ...models.especialidad import Especialidad
+            
+            existing_specialties = await self.session.scalars(
+                select(Especialidad.id).where(Especialidad.id.in_(request.specialty_ids))
+            )
+            existing_ids = set(existing_specialties.all())
+            missing_ids = set(request.specialty_ids) - existing_ids
+            
+            if missing_ids:
+                logger.error("Invalid specialty IDs during technician registration", 
+                           missing_ids=list(missing_ids), provided_ids=request.specialty_ids)
+                raise ValueError(f"Especialidades no encontradas: {list(missing_ids)}")
         
         additional_data = {
+            "first_name": request.first_name,
+            "last_name": request.last_name,
+            "phone": request.phone,
             "workshop_id": request.workshop_id,
             "current_latitude": request.current_latitude,
             "current_longitude": request.current_longitude,
             "is_available": request.is_available,
         }
         
-        user, access_token, refresh_token = await self._register_user_base(
-            email=request.email,
-            password=request.password,
-            user_type=UserType.TECHNICIAN,
-            additional_data=additional_data,
-        )
-        
-        token_response = TokenResponse(
-            access_token=access_token,
-            refresh_token=refresh_token,
-            expires_in=30 * 60,  # 30 minutes
-        )
-        
-        return user, token_response
+        try:
+            user, access_token, refresh_token = await self._register_user_base(
+                email=request.email,
+                password=request.password,
+                user_type=UserType.TECHNICIAN,
+                additional_data=additional_data,
+            )
+            
+            # Assign specialties if provided
+            if request.specialty_ids:
+                from ...models.technician_especialidad import TechnicianEspecialidad
+                for specialty_id in request.specialty_ids:
+                    assignment = TechnicianEspecialidad(
+                        technician_id=user.id,
+                        especialidad_id=specialty_id
+                    )
+                    self.session.add(assignment)
+                await self.session.commit()
+                
+                logger.info("Technician specialties assigned", 
+                          technician_id=user.id, specialty_ids=request.specialty_ids)
+            
+            token_response = TokenResponse(
+                access_token=access_token,
+                refresh_token=refresh_token,
+                expires_in=30 * 60,  # 30 minutes
+            )
+            
+            logger.info("Technician registered successfully", 
+                       technician_id=user.id, workshop_id=request.workshop_id)
+            
+            return user, token_response
+            
+        except Exception as e:
+            logger.error("Error during technician registration", 
+                        error=str(e), workshop_id=request.workshop_id, email=request.email)
+            await self.session.rollback()
+            raise
     
     async def register_administrator(
         self, 
@@ -354,7 +410,7 @@ class RegistrationService:
             "first_name": request.first_name,
             "last_name": request.last_name,
             "phone": request.phone,
-            "role_level": request.role_level,
+            "role_level": str(request.role_level),  # Convert to string for database
         }
         
         user, access_token, refresh_token = await self._register_user_base(
@@ -601,6 +657,33 @@ class AuthService:
         # Update last login
         await self.user_repo.update_last_login(user.id)
         
+        # If user is a technician, update online status and broadcast
+        if user.user_type == UserType.TECHNICIAN:
+            try:
+                from ..real_time.services import RealTimeService
+                from sqlalchemy import update as sql_update
+                
+                # Update technician online status
+                await self.session.execute(
+                    sql_update(Technician)
+                    .where(Technician.id == user.id)
+                    .values(
+                        is_online=True,
+                        last_seen_at=datetime.now(UTC)
+                    )
+                )
+                await self.session.commit()
+                
+                # Broadcast online status to workshop
+                real_time_service = RealTimeService(self.session)
+                await real_time_service.broadcast_technician_status_change(
+                    technician_id=user.id,
+                    is_online=True,
+                    last_seen_at=datetime.now(UTC)
+                )
+            except Exception as e:
+                logger.error(f"Error broadcasting technician online status: {str(e)}")
+        
         logger.info("User logged in successfully", user_id=user.id, email=email)
         
         token_response = UnifiedTokenResponse(
@@ -656,6 +739,33 @@ class AuthService:
         
         # Clear failed login attempts counter after successful 2FA login
         await self._clear_failed_login_attempts(email)
+        
+        # If user is a technician, update online status and broadcast
+        if user.user_type == UserType.TECHNICIAN:
+            try:
+                from ..real_time.services import RealTimeService
+                from sqlalchemy import update as sql_update
+                
+                # Update technician online status
+                await self.session.execute(
+                    sql_update(Technician)
+                    .where(Technician.id == user.id)
+                    .values(
+                        is_online=True,
+                        last_seen_at=datetime.now(UTC)
+                    )
+                )
+                await self.session.commit()
+                
+                # Broadcast online status to workshop
+                real_time_service = RealTimeService(self.session)
+                await real_time_service.broadcast_technician_status_change(
+                    technician_id=user.id,
+                    is_online=True,
+                    last_seen_at=datetime.now(UTC)
+                )
+            except Exception as e:
+                logger.error(f"Error broadcasting technician online status: {str(e)}")
         
         logger.info("User logged in successfully with 2FA", user_id=user.id, email=email)
         

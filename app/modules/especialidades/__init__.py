@@ -1,0 +1,3 @@
+"""
+Especialidades module.
+"""

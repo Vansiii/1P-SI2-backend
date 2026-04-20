@@ -18,6 +18,10 @@ from .schemas import (
     UpdateWorkshopRequest,
     UpdateTechnicianRequest,
     LocationRequest,
+    ToggleWorkshopAvailabilityRequest,
+    VerifyWorkshopRequest,
+    UpdateWorkshopBalanceRequest,
+    WorkshopBalanceResponse,
 )
 from .service import (
     UserService,
@@ -303,19 +307,88 @@ async def update_workshop(
     session: AsyncSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user),
 ):
-    """Update workshop information."""
+    """Update workshop information and emit workshop_updated WebSocket event."""
     workshop_service = WorkshopService(session)
-    
-    if request.latitude is not None and request.longitude is not None:
-        workshop = await workshop_service.update_workshop_location(
-            workshop_id, request.latitude, request.longitude
-        )
+
+    update_data = request.model_dump(exclude_none=True)
+
+    if update_data:
+        workshop = await workshop_service.update_workshop(workshop_id, update_data)
     else:
         workshop = await workshop_service.get_workshop_by_id(workshop_id)
-    
+
     return create_success_response(
         data=workshop,
         message="Taller actualizado exitosamente",
+    )
+
+
+@router.patch(
+    "/workshops/{workshop_id}/availability",
+    response_model=WorkshopResponse,
+    summary="Toggle workshop availability",
+    description="Toggle workshop availability and notify admins via WebSocket",
+)
+async def toggle_workshop_availability(
+    workshop_id: int,
+    request: ToggleWorkshopAvailabilityRequest,
+    session: AsyncSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Toggle workshop availability and emit workshop_availability_changed to all admins."""
+    workshop_service = WorkshopService(session)
+    workshop = await workshop_service.toggle_availability(workshop_id, request.is_available)
+
+    return create_success_response(
+        data=workshop,
+        message="Disponibilidad del taller actualizada exitosamente",
+    )
+
+
+@router.patch(
+    "/workshops/{workshop_id}/verify",
+    response_model=WorkshopResponse,
+    summary="Verify workshop",
+    description="Update workshop verification status and notify the workshop owner via WebSocket",
+    dependencies=[Depends(require_permission(Permission.ADMIN_MANAGE_USERS))],
+)
+async def verify_workshop(
+    workshop_id: int,
+    request: VerifyWorkshopRequest,
+    session: AsyncSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Verify or un-verify a workshop and emit workshop_verified to the workshop owner."""
+    workshop_service = WorkshopService(session)
+    workshop = await workshop_service.verify_workshop(workshop_id, request.is_verified)
+
+    return create_success_response(
+        data=workshop,
+        message="Estado de verificación del taller actualizado exitosamente",
+    )
+
+
+@router.patch(
+    "/workshops/{workshop_id}/balance",
+    response_model=WorkshopBalanceResponse,
+    summary="Update workshop balance",
+    description="Update workshop balance and notify the workshop owner via WebSocket",
+    dependencies=[Depends(require_permission(Permission.ADMIN_MANAGE_USERS))],
+)
+async def update_workshop_balance(
+    workshop_id: int,
+    request: UpdateWorkshopBalanceRequest,
+    session: AsyncSession = Depends(get_db_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Update workshop balance fields and emit workshop_balance_updated to the workshop owner."""
+    workshop_service = WorkshopService(session)
+    balance_data = request.model_dump(exclude_none=True)
+    balance = await workshop_service.update_balance(workshop_id, balance_data)
+
+    return create_success_response(
+        data=balance,
+        message="Balance del taller actualizado exitosamente",
     )
 
 
@@ -331,12 +404,56 @@ async def get_technician(
     session: AsyncSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user),
 ):
-    """Get technician by ID."""
-    technician_service = TechnicianService(session)
-    technician = await technician_service.get_technician_by_id(technician_id)
+    """Get technician by ID with specialties."""
+    from sqlalchemy.orm import selectinload
+    from sqlalchemy import select
+    from ...models.technician import Technician
+    
+    # Load technician with specialties
+    result = await session.execute(
+        select(Technician)
+        .where(Technician.id == technician_id)
+        .options(selectinload(Technician.especialidades))
+    )
+    technician = result.scalar_one_or_none()
+    
+    if not technician:
+        from fastapi import HTTPException
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Technician {technician_id} not found"
+        )
+    
+    # Build response with specialties
+    technician_data = {
+        "id": technician.id,
+        "email": technician.email,
+        "user_type": technician.user_type,
+        "is_active": technician.is_active,
+        "two_factor_enabled": technician.two_factor_enabled,
+        "created_at": technician.created_at,
+        "updated_at": technician.updated_at,
+        "workshop_id": technician.workshop_id,
+        "current_latitude": float(technician.current_latitude) if technician.current_latitude else None,
+        "current_longitude": float(technician.current_longitude) if technician.current_longitude else None,
+        "location_updated_at": technician.location_updated_at,
+        "location_accuracy": float(technician.location_accuracy) if technician.location_accuracy else None,
+        "is_available": technician.is_available,
+        "is_on_duty": technician.is_on_duty,
+        "is_online": technician.is_online,
+        "last_seen_at": technician.last_seen_at,
+        "especialidades": [
+            {
+                "id": te.especialidad.id,
+                "nombre": te.especialidad.nombre,
+                "descripcion": te.especialidad.descripcion
+            }
+            for te in technician.especialidades
+        ] if technician.especialidades else []
+    }
     
     return create_success_response(
-        data=technician,
+        data=technician_data,
         message="Técnico obtenido exitosamente",
     )
 
@@ -371,7 +488,7 @@ async def get_workshop_technicians(
     "/technicians/{technician_id}",
     response_model=TechnicianResponse,
     summary="Update technician",
-    description="Update technician information",
+    description="Update technician information including specialties",
 )
 async def update_technician(
     technician_id: int,
@@ -379,21 +496,118 @@ async def update_technician(
     session: AsyncSession = Depends(get_db_session),
     current_user: User = Depends(get_current_user),
 ):
-    """Update technician information."""
-    technician_service = TechnicianService(session)
+    """Update technician information including basic fields and specialties."""
+    from sqlalchemy.orm import selectinload
+    from sqlalchemy import select, delete
+    from ...models.technician import Technician
+    from ...models.technician_especialidad import TechnicianEspecialidad
     
+    # Load technician
+    result = await session.execute(
+        select(Technician)
+        .where(Technician.id == technician_id)
+        .options(selectinload(Technician.especialidades))
+    )
+    technician = result.scalar_one_or_none()
+    
+    if not technician:
+        from fastapi import HTTPException
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Technician {technician_id} not found"
+        )
+    
+    # Update basic fields
+    if request.first_name is not None:
+        technician.first_name = request.first_name
+    if request.last_name is not None:
+        technician.last_name = request.last_name
+    if request.phone is not None:
+        technician.phone = request.phone
     if request.is_available is not None:
-        technician = await technician_service.update_technician_availability(
-            technician_id, request.is_available
+        technician.is_available = request.is_available
+    if request.is_on_duty is not None:
+        technician.is_on_duty = request.is_on_duty
+    if request.current_latitude is not None:
+        technician.current_latitude = request.current_latitude
+    if request.current_longitude is not None:
+        technician.current_longitude = request.current_longitude
+    if request.location_accuracy is not None:
+        technician.location_accuracy = request.location_accuracy
+    
+    # Update specialties if provided
+    if request.specialty_ids is not None:
+        # Remove existing specialties
+        await session.execute(
+            delete(TechnicianEspecialidad)
+            .where(TechnicianEspecialidad.technician_id == technician_id)
         )
-    elif request.current_latitude is not None and request.current_longitude is not None:
-        technician = await technician_service.update_technician_location(
-            technician_id, request.current_latitude, request.current_longitude
-        )
-    else:
-        technician = await technician_service.get_technician_by_id(technician_id)
+        
+        # Add new specialties
+        for specialty_id in request.specialty_ids:
+            new_assignment = TechnicianEspecialidad(
+                technician_id=technician_id,
+                especialidad_id=specialty_id
+            )
+            session.add(new_assignment)
+    
+    await session.commit()
+    
+    # Reload with specialties
+    result = await session.execute(
+        select(Technician)
+        .where(Technician.id == technician_id)
+        .options(selectinload(Technician.especialidades))
+    )
+    technician = result.scalar_one()
+    
+    # 🔔 Emit WebSocket event to workshop owner
+    from ...core.websocket_events import emit_to_user, EventTypes
+    from datetime import datetime
+    await emit_to_user(
+        user_id=technician.workshop_id,
+        event_type=EventTypes.TECHNICIAN_UPDATED,
+        data={
+            "technician_id": technician.id,
+            "workshop_id": technician.workshop_id,
+            "first_name": technician.first_name,
+            "last_name": technician.last_name,
+            "is_available": technician.is_available,
+            "is_on_duty": technician.is_on_duty,
+            "phone": technician.phone,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+    )
+    
+    # Build response
+    technician_data = {
+        "id": technician.id,
+        "email": technician.email,
+        "user_type": technician.user_type,
+        "is_active": technician.is_active,
+        "two_factor_enabled": technician.two_factor_enabled,
+        "created_at": technician.created_at,
+        "updated_at": technician.updated_at,
+        "workshop_id": technician.workshop_id,
+        "current_latitude": float(technician.current_latitude) if technician.current_latitude else None,
+        "current_longitude": float(technician.current_longitude) if technician.current_longitude else None,
+        "location_updated_at": technician.location_updated_at,
+        "location_accuracy": float(technician.location_accuracy) if technician.location_accuracy else None,
+        "is_available": technician.is_available,
+        "is_on_duty": technician.is_on_duty,
+        "is_online": technician.is_online,
+        "last_seen_at": technician.last_seen_at,
+        "especialidades": [
+            {
+                "id": te.especialidad.id,
+                "nombre": te.especialidad.nombre,
+                "descripcion": te.especialidad.descripcion
+            }
+            for te in technician.especialidades
+        ] if technician.especialidades else []
+    }
     
     return create_success_response(
-        data=technician,
+        data=technician_data,
         message="Técnico actualizado exitosamente",
     )

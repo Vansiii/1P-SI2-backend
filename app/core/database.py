@@ -85,6 +85,9 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
 # Alias para uso en tareas programadas
 async_session_maker = get_session_factory
 
+# Alias para compatibilidad con código existente
+get_db = get_db_session
+
 
 async def test_database_connection(max_retries: int = 3) -> None:
     """Test database connection with retry logic."""

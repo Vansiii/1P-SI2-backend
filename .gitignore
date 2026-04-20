@@ -15,12 +15,15 @@ venv/
 env/
 ENV/
 
-# Environment variables
+# Environment variables (archivos con datos sensibles)
 .env
 .env.local
 .env.*.local
-.env.example
 .env.railway
+
+# Firebase credentials (archivos con credenciales reales)
+firebase-service-account.json
+mecanicoya-*.json
 
 # IDE
 .vscode/
@@ -59,3 +62,6 @@ Thumbs.db
 
 # Alembic
 alembic/versions/__pycache__/
+
+# Scripts con datos sensibles
+scripts/USUARIOS_CREADOS.md

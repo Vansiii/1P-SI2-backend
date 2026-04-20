@@ -9,6 +9,7 @@ from fastapi import Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...core import get_logger
+from ...core.websocket_events import emit_to_admins, EventTypes
 from ...models.audit_log import AuditLog
 from .repository import AuditRepository
 
@@ -78,6 +79,27 @@ class AuditService:
             resource_type=resource_type,
             resource_id=resource_id,
         )
+        
+        # Emit WebSocket event to all connected admins — wrapped so WS failure never breaks audit
+        try:
+            await emit_to_admins(
+                event_type=EventTypes.AUDIT_LOG_CREATED,
+                data={
+                    "log_id": audit_log.id,
+                    "user_id": audit_log.user_id,
+                    "action": audit_log.action,
+                    "entity_type": audit_log.resource_type,
+                    "entity_id": audit_log.resource_id,
+                    "ip_address": audit_log.ip_address,
+                    "timestamp": audit_log.timestamp.isoformat() if audit_log.timestamp else datetime.utcnow().isoformat(),
+                }
+            )
+        except Exception as ws_error:
+            logger.warning(
+                "Failed to emit audit_log_created WebSocket event",
+                error=str(ws_error),
+                log_id=audit_log.id,
+            )
         
         return audit_log
     

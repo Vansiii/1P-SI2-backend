@@ -2,8 +2,8 @@ from datetime import datetime, timezone
 from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.refresh_token import RefreshToken
-from app.schemas.session import SessionResponse
+from ...models.refresh_token import RefreshToken
+from .schemas import SessionResponse
 
 
 class SessionService:

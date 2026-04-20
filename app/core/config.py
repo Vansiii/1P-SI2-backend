@@ -104,6 +104,57 @@ class Settings(BaseSettings):
     gemini_max_media_bytes: int = Field(default=4_000_000, alias="GEMINI_MAX_MEDIA_BYTES")
     gemini_prompt_version: str = Field(default="v1", alias="GEMINI_PROMPT_VERSION")
     
+    # Firebase Configuration
+    firebase_service_account_path: str = Field(
+        default="firebase-service-account.json",
+        alias="FIREBASE_SERVICE_ACCOUNT_PATH",
+        description="Path to Firebase service account JSON file"
+    )
+    firebase_project_id: str = Field(
+        default="",
+        alias="FIREBASE_PROJECT_ID",
+        description="Firebase project ID"
+    )
+    
+    # Push Notifications
+    push_notifications_enabled: bool = Field(
+        default=True,
+        alias="PUSH_NOTIFICATIONS_ENABLED",
+        description="Enable/disable push notifications"
+    )
+    
+    # Assignment and Reassignment Configuration
+    assignment_timeout_minutes: int = Field(
+        default=5,
+        alias="ASSIGNMENT_TIMEOUT_MINUTES",
+        description="Timeout in minutes for workshop to respond to assignment"
+    )
+    assignment_max_attempts: int = Field(
+        default=5,
+        alias="ASSIGNMENT_MAX_ATTEMPTS",
+        description="Maximum number of workshops to try before escalating to admin"
+    )
+    assignment_retry_delay_seconds: int = Field(
+        default=10,
+        alias="ASSIGNMENT_RETRY_DELAY_SECONDS",
+        description="Delay in seconds before retrying assignment after rejection"
+    )
+    assignment_timeout_high_priority: int = Field(
+        default=3,
+        alias="ASSIGNMENT_TIMEOUT_HIGH_PRIORITY",
+        description="Timeout in minutes for high priority incidents"
+    )
+    assignment_timeout_medium_priority: int = Field(
+        default=5,
+        alias="ASSIGNMENT_TIMEOUT_MEDIUM_PRIORITY",
+        description="Timeout in minutes for medium priority incidents"
+    )
+    assignment_timeout_low_priority: int = Field(
+        default=10,
+        alias="ASSIGNMENT_TIMEOUT_LOW_PRIORITY",
+        description="Timeout in minutes for low priority incidents"
+    )
+    
     # Logging
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     log_format: Literal["json", "text"] = Field(default="text", alias="LOG_FORMAT")
@@ -182,6 +233,24 @@ class Settings(BaseSettings):
         """Validate Gemini fallback model list format."""
         normalized_models = [model.strip() for model in value.split(",") if model.strip()]
         return ",".join(normalized_models)
+    
+    @field_validator("assignment_timeout_minutes", "assignment_max_attempts", "assignment_retry_delay_seconds")
+    @classmethod
+    def validate_assignment_config(cls, value: int) -> int:
+        """Validate assignment configuration values."""
+        if value <= 0:
+            raise ValueError("Assignment configuration values must be positive")
+        return value
+    
+    @field_validator("assignment_timeout_high_priority", "assignment_timeout_medium_priority", "assignment_timeout_low_priority")
+    @classmethod
+    def validate_assignment_timeouts(cls, value: int) -> int:
+        """Validate assignment timeout values."""
+        if value <= 0:
+            raise ValueError("Assignment timeout values must be positive")
+        if value > 60:
+            raise ValueError("Assignment timeout values should not exceed 60 minutes")
+        return value
     
     @field_validator("supabase_url")
     @classmethod
@@ -296,8 +365,22 @@ class Settings(BaseSettings):
         """Check whether Gemini integration is enabled."""
         return bool(self.gemini_api_key and self.gemini_api_key.strip())
 
+    @property
+    def is_firebase_enabled(self) -> bool:
+        """Check whether Firebase integration is enabled."""
+        return bool(
+            self.firebase_project_id and 
+            self.firebase_project_id.strip() and
+            self.push_notifications_enabled
+        )
+
 
 @lru_cache
 def get_settings() -> Settings:
     """Get cached settings instance."""
     return Settings()
+    return Settings()
+
+
+# Alias for backward compatibility
+settings = get_settings()
