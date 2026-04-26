@@ -1,5 +1,5 @@
 ﻿from sqlalchemy import ForeignKey, UniqueConstraint
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base
 
@@ -21,6 +21,6 @@ class TechnicianEspecialidad(Base):
     especialidad_id: Mapped[int] = mapped_column(ForeignKey("especialidades.id"), nullable=False, index=True)
     
     # Relaciones
-    # technician = relationship("Technician", back_populates="especialidades")
-    # especialidad = relationship("Especialidad", back_populates="technicians")
+    technician = relationship("Technician", back_populates="especialidades")
+    especialidad = relationship("Especialidad", back_populates="technicians")
 

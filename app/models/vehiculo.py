@@ -1,7 +1,7 @@
 ﻿from datetime import datetime
 
 from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Integer, String, func
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base
 
@@ -28,6 +28,10 @@ class Vehiculo(Base):
     color: Mapped[str | None] = mapped_column(String(50), nullable=True)
     imagen: Mapped[str | None] = mapped_column(String(500), nullable=True)  # URL de la imagen del vehículo
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    
+    # Relaciones
+    client = relationship("Client", back_populates="vehiculos")
+    incidentes = relationship("Incidente", back_populates="vehiculo")
     
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

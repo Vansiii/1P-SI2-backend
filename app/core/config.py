@@ -21,9 +21,10 @@ class Settings(BaseSettings):
     
     # Database
     database_url: str | None = Field(default=None, alias="DATABASE_URL")
-    db_pool_size: int = Field(default=5, alias="DB_POOL_SIZE")
-    db_max_overflow: int = Field(default=10, alias="DB_MAX_OVERFLOW")
+    db_pool_size: int = Field(default=100, alias="DB_POOL_SIZE")
+    db_max_overflow: int = Field(default=20, alias="DB_MAX_OVERFLOW")
     db_pool_timeout: int = Field(default=30, alias="DB_POOL_TIMEOUT")
+    db_pool_recycle: int = Field(default=3600, alias="DB_POOL_RECYCLE")  # Recycle connections every hour
     
     # JWT and Security
     jwt_secret_key: str = Field(
@@ -104,6 +105,86 @@ class Settings(BaseSettings):
     gemini_max_media_bytes: int = Field(default=4_000_000, alias="GEMINI_MAX_MEDIA_BYTES")
     gemini_prompt_version: str = Field(default="v1", alias="GEMINI_PROMPT_VERSION")
     
+    # AI Analysis Slow Detection
+    ai_slow_threshold_seconds: int = Field(
+        default=15,
+        alias="AI_SLOW_THRESHOLD_SECONDS",
+        description="Threshold in seconds to detect slow AI analysis and emit warning event"
+    )
+    
+    # AI Analysis Timeout Configuration
+    ai_max_processing_seconds: int = Field(
+        default=60,
+        alias="AI_MAX_PROCESSING_SECONDS",
+        description="Maximum time in seconds for AI analysis processing before timeout"
+    )
+    
+    ai_assignment_wait_timeout_seconds: int = Field(
+        default=120,
+        alias="AI_ASSIGNMENT_WAIT_TIMEOUT_SECONDS",
+        description="Maximum time in seconds to wait for AI analysis before proceeding with assignment"
+    )
+    
+    # Firebase Configuration
+    # Option 1: JSON string (recommended for Railway/production)
+    firebase_credentials_json: str = Field(
+        default="",
+        alias="FIREBASE_CREDENTIALS_JSON",
+        description="Firebase service account JSON as string (for Railway/production)"
+    )
+    
+    # Option 2: File path (for local development)
+    firebase_service_account_path: str = Field(
+        default="firebase-service-account.json",
+        alias="FIREBASE_SERVICE_ACCOUNT_PATH",
+        description="Path to Firebase service account JSON file (for local development)"
+    )
+    
+    firebase_project_id: str = Field(
+        default="",
+        alias="FIREBASE_PROJECT_ID",
+        description="Firebase project ID"
+    )
+    
+    # Push Notifications
+    push_notifications_enabled: bool = Field(
+        default=True,
+        alias="PUSH_NOTIFICATIONS_ENABLED",
+        description="Enable/disable push notifications"
+    )
+    
+    # Assignment and Reassignment Configuration
+    assignment_timeout_minutes: int = Field(
+        default=5,
+        alias="ASSIGNMENT_TIMEOUT_MINUTES",
+        description="Timeout in minutes for workshop to respond to assignment"
+    )
+    assignment_max_attempts: int = Field(
+        default=5,
+        alias="ASSIGNMENT_MAX_ATTEMPTS",
+        description="Maximum number of workshops to try before escalating to admin"
+    )
+    assignment_retry_delay_seconds: int = Field(
+        default=10,
+        alias="ASSIGNMENT_RETRY_DELAY_SECONDS",
+        description="Delay in seconds before retrying assignment after rejection"
+    )
+    assignment_timeout_high_priority: int = Field(
+        default=3,
+        alias="ASSIGNMENT_TIMEOUT_HIGH_PRIORITY",
+        description="Timeout in minutes for high priority incidents"
+    )
+    assignment_timeout_medium_priority: int = Field(
+        default=5,
+        alias="ASSIGNMENT_TIMEOUT_MEDIUM_PRIORITY",
+        description="Timeout in minutes for medium priority incidents"
+    )
+    assignment_timeout_low_priority: int = Field(
+        default=10,
+        alias="ASSIGNMENT_TIMEOUT_LOW_PRIORITY",
+        description="Timeout in minutes for low priority incidents"
+    )
+    
     # Logging
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     log_format: Literal["json", "text"] = Field(default="text", alias="LOG_FORMAT")
@@ -151,7 +232,7 @@ class Settings(BaseSettings):
             raise ValueError("EMAIL_FROM_ADDRESS debe tener formato de email válido")
         return value
     
-    @field_validator("db_pool_size", "db_max_overflow", "db_pool_timeout")
+    @field_validator("db_pool_size", "db_max_overflow", "db_pool_timeout", "db_pool_recycle")
     @classmethod
     def validate_positive_int(cls, value: int) -> int:
         """Validate positive integers."""
@@ -182,6 +263,24 @@ class Settings(BaseSettings):
         """Validate Gemini fallback model list format."""
         normalized_models = [model.strip() for model in value.split(",") if model.strip()]
         return ",".join(normalized_models)
+    
+    @field_validator("assignment_timeout_minutes", "assignment_max_attempts", "assignment_retry_delay_seconds")
+    @classmethod
+    def validate_assignment_config(cls, value: int) -> int:
+        """Validate assignment configuration values."""
+        if value <= 0:
+            raise ValueError("Assignment configuration values must be positive")
+        return value
+    
+    @field_validator("assignment_timeout_high_priority", "assignment_timeout_medium_priority", "assignment_timeout_low_priority")
+    @classmethod
+    def validate_assignment_timeouts(cls, value: int) -> int:
+        """Validate assignment timeout values."""
+        if value <= 0:
+            raise ValueError("Assignment timeout values must be positive")
+        if value > 60:
+            raise ValueError("Assignment timeout values should not exceed 60 minutes")
+        return value
     
     @field_validator("supabase_url")
     @classmethod
@@ -296,8 +395,22 @@ class Settings(BaseSettings):
         """Check whether Gemini integration is enabled."""
         return bool(self.gemini_api_key and self.gemini_api_key.strip())
 
+    @property
+    def is_firebase_enabled(self) -> bool:
+        """Check whether Firebase integration is enabled."""
+        return bool(
+            self.firebase_project_id and 
+            self.firebase_project_id.strip() and
+            self.push_notifications_enabled
+        )
+
 
 @lru_cache
 def get_settings() -> Settings:
     """Get cached settings instance."""
     return Settings()
+    return Settings()
+
+
+# Alias for backward compatibility
+settings = get_settings()

@@ -3,7 +3,7 @@ Router para gestión de incidentes/emergencias vehiculares.
 """
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Query, status, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...core import NotFoundException, get_db_session, get_logger
@@ -20,6 +20,7 @@ from .schemas import (
     EvidenciaResponse,
     EvidenciaImagenResponse,
     EvidenciaAudioResponse,
+    SuggestedTechnicianInfo,
 )
 from .service import IncidenteService
 from .ai_service import IncidentAIService
@@ -27,7 +28,10 @@ from pydantic import BaseModel, Field
 
 class AcceptIncidenteRequest(BaseModel):
     """Request para aceptar un incidente."""
-    pass  # Por ahora no necesita parámetros adicionales
+    accept_suggested_technician: bool = Field(
+        default=False,
+        description="Si es True, acepta el técnico sugerido por la IA y cambia el estado a 'en_proceso'. Si es False, solo asigna el taller y deja el estado en 'asignado' para asignación manual."
+    )
 
 class RejectIncidenteRequest(BaseModel):
     """Request para rechazar un incidente."""
@@ -76,6 +80,7 @@ async def create_incidente(
 )
 async def list_incidentes(
     estado: Optional[str] = Query(None, description="Filtrar por estado"),
+    tecnico_id: Optional[str] = Query(None, description="Filtrar por técnico (usar 'me' para el técnico actual)"),
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ):
@@ -84,8 +89,31 @@ async def list_incidentes(
     
     if current_user.user_type == "client":
         incidentes = await service.get_client_incidentes(current_user.id, estado)
+    elif current_user.user_type == "technician":
+        # Técnico puede ver sus incidentes asignados
+        if tecnico_id == "me" or tecnico_id is None:
+            # Obtener incidentes asignados al técnico actual
+            incidentes = await service.get_technician_incidentes(current_user.id, estado)
+        else:
+            from ...core import ForbiddenException
+            raise ForbiddenException("No puedes ver incidentes de otros técnicos")
     elif current_user.user_type == "workshop":
-        incidentes = await service.get_taller_incidentes(current_user.id, estado)
+        # Si el taller pide estado "pendiente", mostrar solicitudes entrantes
+        if estado == "pendiente":
+            incidentes = await service.get_pending_incidentes(current_user.id)
+        elif estado is None:
+            # "Todos": combinar solicitudes pendientes + incidencias asignadas
+            pendientes = await service.get_pending_incidentes(current_user.id)
+            asignadas = await service.get_taller_incidentes(current_user.id, None)
+            # Combinar y eliminar duplicados por ID
+            incidentes_dict = {inc.id: inc for inc in asignadas}
+            for inc in pendientes:
+                if inc.id not in incidentes_dict:
+                    incidentes_dict[inc.id] = inc
+            # Ordenar por fecha de creación descendente
+            incidentes = sorted(incidentes_dict.values(), key=lambda x: x.created_at, reverse=True)
+        else:
+            incidentes = await service.get_taller_incidentes(current_user.id, estado)
     elif current_user.user_type == "admin":
         # Admin puede ver todos los incidentes
         if estado:
@@ -129,6 +157,27 @@ async def get_incidente(
     response_data.imagenes = [EvidenciaImagenResponse.model_validate(i) for i in imagenes]
     response_data.audios = [EvidenciaAudioResponse.model_validate(a) for a in audios]
     
+    # ✅ Poblar suggested_technician si el usuario es taller y el incidente está pendiente/asignado
+    # Esto permite que el modal "Aceptar Solicitud" muestre la recomendación de IA y técnico sugerido
+    if current_user.user_type == "workshop" and incidente.estado_actual in ["pendiente", "asignado"]:
+        try:
+            suggested_tech_info = await service.get_suggested_technician_info(
+                incidente_id=incidente_id,
+                taller_id=current_user.id
+            )
+            if suggested_tech_info:
+                response_data.suggested_technician = SuggestedTechnicianInfo(**suggested_tech_info)
+                logger.debug(
+                    f"✅ Suggested technician populated for incident {incidente_id}: "
+                    f"{suggested_tech_info['first_name']} {suggested_tech_info['last_name']} "
+                    f"(score: {suggested_tech_info['final_score']:.2f})"
+                )
+        except Exception as e:
+            # No fallar si no se puede obtener el técnico sugerido
+            logger.warning(
+                f"Could not populate suggested_technician for incident {incidente_id}: {str(e)}"
+            )
+    
     return create_success_response(
         data=response_data.model_dump(mode='json'),
         message="Incidente obtenido exitosamente",
@@ -151,12 +200,47 @@ async def update_incidente_estado(
     """Actualizar el estado de un incidente."""
     service = IncidenteService(session)
     
+    # Get old status before update
+    incidente_before = await service.get_incidente(incidente_id, current_user.id, current_user.user_type)
+    old_status = incidente_before.estado_actual
+    
     incidente = await service.update_estado(
         incidente_id,
         request.estado,
         current_user.id,
         current_user.user_type
     )
+    
+    # ═══════════════════════════════════════════════════════════════════════
+    # ✅ EMIT WEBSOCKET EVENT FOR REAL-TIME UPDATE
+    # ═══════════════════════════════════════════════════════════════════════
+    try:
+        from ...core.websocket_events import emit_to_all, EventTypes
+        from datetime import datetime, UTC
+        
+        await emit_to_all(
+            event_type=EventTypes.INCIDENT_STATUS_CHANGED,
+            data={
+                "incident_id": incidente_id,
+                "old_status": old_status,
+                "new_status": request.estado,
+                "estado_actual": request.estado,
+                "changed_by": current_user.id,
+                "changed_by_role": current_user.user_type,
+                "timestamp": datetime.now(UTC).isoformat()
+            }
+        )
+        
+        logger.info(
+            f"✅ WebSocket event emitted: incident {incidente_id} status changed {old_status} → {request.estado}"
+        )
+        
+    except Exception as ws_err:
+        # ⚠️ NO fallar la operación si WebSocket falla
+        logger.error(
+            f"❌ Failed to emit WebSocket event for incident {incidente_id}: {str(ws_err)}"
+        )
+    # ═══════════════════════════════════════════════════════════════════════
     
     return create_success_response(
         data=IncidenteResponse.model_validate(incidente).model_dump(mode='json'),
@@ -166,7 +250,6 @@ async def update_incidente_estado(
 
 @router.get(
     "/pendientes/asignacion",
-    response_model=List[IncidenteResponse],
     summary="Obtener incidentes pendientes",
     description="Obtener lista de incidentes pendientes de asignación",
     dependencies=[Depends(require_permission(Permission.REQUEST_VIEW_INCOMING))],
@@ -182,8 +265,56 @@ async def get_pending_incidentes(
     taller_id = current_user.id if current_user.user_type == "workshop" else None
     incidentes = await service.get_pending_incidentes(taller_id)
     
+    # Construir respuestas con información del técnico sugerido
+    response_data = []
+    
+    # Si es un taller, obtener todos los técnicos sugeridos en una sola consulta
+    suggested_technicians_map = {}
+    if taller_id and incidentes:
+        from ...models.assignment_attempt import AssignmentAttempt
+        from ...models.technician import Technician
+        from sqlalchemy import select, and_
+        
+        incident_ids = [inc.id for inc in incidentes]
+        
+        result = await session.execute(
+            select(AssignmentAttempt, Technician)
+            .join(Technician, AssignmentAttempt.technician_id == Technician.id, isouter=True)
+            .where(
+                and_(
+                    AssignmentAttempt.incident_id.in_(incident_ids),
+                    AssignmentAttempt.workshop_id == taller_id,
+                    AssignmentAttempt.status.in_(['pending', 'timeout'])
+                )
+            )
+        )
+        
+        for assignment_attempt, technician in result:
+            if technician:
+                suggested_technicians_map[assignment_attempt.incident_id] = {
+                    "technician_id": technician.id,
+                    "first_name": technician.first_name,
+                    "last_name": technician.last_name,
+                    "phone": technician.phone,
+                    "final_score": float(assignment_attempt.final_score),
+                    "distance_km": float(assignment_attempt.distance_km),
+                    "ai_reasoning": assignment_attempt.ai_reasoning,
+                    "assignment_strategy": assignment_attempt.assignment_strategy,
+                    "status": assignment_attempt.status,  # pending, timeout, rejected, accepted
+                    "timeout_at": assignment_attempt.timeout_at.isoformat() if assignment_attempt.timeout_at else None  # ✅ Timestamp cuando expira
+                }
+    
+    for incidente in incidentes:
+        incidente_dict = IncidenteResponse.model_validate(incidente).model_dump(mode='json')
+        
+        # Agregar información del técnico sugerido si existe
+        if incidente.id in suggested_technicians_map:
+            incidente_dict["suggested_technician"] = suggested_technicians_map[incidente.id]
+        
+        response_data.append(incidente_dict)
+    
     return create_success_response(
-        data=[IncidenteResponse.model_validate(i).model_dump(mode='json') for i in incidentes],
+        data=response_data,
         message=f"Se encontraron {len(incidentes)} incidentes pendientes",
     )
 
@@ -207,7 +338,11 @@ async def accept_incidente(
         raise ForbiddenException("Solo los talleres pueden aceptar solicitudes")
     
     service = IncidenteService(session)
-    incidente = await service.accept_incidente(incidente_id, current_user.id)
+    incidente = await service.accept_incidente(
+        incidente_id, 
+        current_user.id,
+        accept_suggested_technician=request.accept_suggested_technician
+    )
     
     return create_success_response(
         data=IncidenteResponse.model_validate(incidente).model_dump(mode='json'),
@@ -219,7 +354,7 @@ async def accept_incidente(
     "/{incidente_id}/rechazar",
     response_model=IncidenteResponse,
     summary="Rechazar solicitud de incidente",
-    description="El taller rechaza la solicitud y el sistema busca otro taller",
+    description="El taller rechaza la solicitud y el sistema busca otro taller automáticamente",
     dependencies=[Depends(require_permission(Permission.REQUEST_REJECT))],
 )
 async def reject_incidente(
@@ -228,18 +363,357 @@ async def reject_incidente(
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Rechazar una solicitud de incidente."""
+    """
+    Rechazar una solicitud de incidente y activar reasignación automática.
+    
+    Flow:
+    1. Registrar rechazo del taller
+    2. Marcar assignment_attempt como 'rejected'
+    3. Activar reasignación automática con recálculo dinámico
+    4. Retornar resultado (nuevo taller o requiere intervención manual)
+    """
     if current_user.user_type != "workshop":
         from ...core import ForbiddenException
         raise ForbiddenException("Solo los talleres pueden rechazar solicitudes")
     
+    # 1. Registrar rechazo
     service = IncidenteService(session)
     incidente = await service.reject_incidente(incidente_id, current_user.id, request.motivo)
     
+    # 2. Activar reasignación automática
+    from ..assignment.reassignment_service import ReassignmentService
+    
+    reassignment_service = ReassignmentService(session)
+    result = await reassignment_service.handle_rejection(
+        incident_id=incidente_id,
+        workshop_id=current_user.id,
+        rejection_reason=request.motivo
+    )
+    
+    # 3. Preparar respuesta según resultado
+    if result.success:
+        message = (
+            f"Solicitud rechazada y reasignada automáticamente a "
+            f"{result.assigned_workshop.workshop_name if result.assigned_workshop else 'otro taller'}."
+        )
+    else:
+        if "Max attempts" in result.error_message or "No workshops available" in result.error_message:
+            message = (
+                "Solicitud rechazada. No hay más talleres disponibles. "
+                "Se ha notificado al administrador para intervención manual."
+            )
+        else:
+            message = f"Solicitud rechazada. Error en reasignación: {result.error_message}"
+    
     return create_success_response(
         data=IncidenteResponse.model_validate(incidente).model_dump(mode='json'),
-        message="Solicitud rechazada. El sistema buscará otro taller disponible.",
+        message=message,
     )
+
+
+@router.post(
+    "/{incidente_id}/timeout",
+    status_code=status.HTTP_200_OK,
+    summary="Notificar timeout de asignación",
+    description="El frontend notifica que un incidente ha excedido el tiempo de respuesta y debe reasignarse",
+    dependencies=[Depends(require_permission(Permission.REQUEST_VIEW_INCOMING))],
+)
+async def notify_assignment_timeout(
+    incidente_id: int,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """
+    Notificar timeout de asignación y disparar reasignación automática.
+    
+    Este endpoint es llamado por el frontend cuando detecta que un incidente
+    ha excedido el tiempo de respuesta del taller asignado.
+    
+    Flow:
+    1. Verificar que el incidente existe y está pendiente
+    2. Marcar el assignment_attempt actual como 'timeout'
+    3. Disparar reasignación automática al siguiente taller
+    4. Emitir evento WebSocket de timeout
+    
+    Nota: El backend también tiene su propio sistema de verificación de timeouts
+    que se ejecuta cada 30 segundos. Este endpoint es un complemento para
+    notificaciones inmediatas desde el frontend.
+    """
+    logger.info(f"⏰ Timeout notification received for incident {incidente_id} from user {current_user.id}")
+    
+    # Importar servicios necesarios
+    from ..assignment.reassignment_service import ReassignmentService
+    from ...models.incidente import Incidente
+    from ...models.assignment_attempt import AssignmentAttempt
+    from sqlalchemy import select
+    
+    # 1. Verificar que el incidente existe
+    result = await session.execute(
+        select(Incidente).where(Incidente.id == incidente_id)
+    )
+    incidente = result.scalar_one_or_none()
+    
+    if not incidente:
+        raise NotFoundException(f"Incidente {incidente_id} no encontrado")
+    
+    # 2. Verificar que el incidente está en estado pendiente
+    if incidente.estado_actual != "pendiente":
+        logger.warning(
+            f"⚠️ Timeout notification for incident {incidente_id} but status is {incidente.estado_actual}"
+        )
+        return create_success_response(
+            data={"incident_id": incidente_id, "status": incidente.estado_actual},
+            message=f"El incidente ya no está pendiente (estado: {incidente.estado_actual})",
+        )
+    
+    # 3. Buscar el assignment_attempt pendiente más reciente
+    result = await session.execute(
+        select(AssignmentAttempt)
+        .where(
+            AssignmentAttempt.incident_id == incidente_id,
+            AssignmentAttempt.status == "pending"
+        )
+        .order_by(AssignmentAttempt.attempted_at.desc())
+    )
+    pending_attempt = result.scalar_one_or_none()
+    
+    if not pending_attempt:
+        logger.warning(f"⚠️ No pending assignment attempt found for incident {incidente_id}")
+        return create_success_response(
+            data={"incident_id": incidente_id},
+            message="No hay intentos de asignación pendientes para este incidente",
+        )
+    
+    # 4. Marcar el intento como timeout
+    pending_attempt.status = "timeout"
+    pending_attempt.responded_at = None  # No hubo respuesta
+    await session.commit()
+    
+    logger.info(
+        f"✅ Assignment attempt {pending_attempt.id} marked as timeout for incident {incidente_id}"
+    )
+    
+    # 5. Disparar reasignación automática
+    reassignment_service = ReassignmentService(session)
+    result = await reassignment_service.handle_timeout(
+        incident_id=incidente_id,
+        workshop_id=pending_attempt.workshop_id
+    )
+    
+    # 6. Preparar respuesta según resultado
+    if result.success:
+        message = (
+            f"Timeout procesado. Incidente reasignado automáticamente a "
+            f"{result.assigned_workshop.workshop_name if result.assigned_workshop else 'otro taller'}."
+        )
+        logger.info(f"✅ {message}")
+    else:
+        if "Max attempts" in result.error_message or "No workshops available" in result.error_message:
+            message = (
+                "Timeout procesado. No hay más talleres disponibles. "
+                "Se ha notificado al administrador para intervención manual."
+            )
+        else:
+            message = f"Timeout procesado. Error en reasignación: {result.error_message}"
+        logger.warning(f"⚠️ {message}")
+    
+    return create_success_response(
+        data={
+            "incident_id": incidente_id,
+            "timeout_processed": True,
+            "reassignment_success": result.success,
+            "new_workshop_id": result.assigned_workshop.id if result.assigned_workshop else None,
+            "new_workshop_name": result.assigned_workshop.workshop_name if result.assigned_workshop else None,
+        },
+        message=message,
+    )
+
+
+@router.post(
+    "/{incidente_id}/anular-asignacion",
+    response_model=IncidenteResponse,
+    summary="Anular asignación de caso ambiguo",
+    description="El taller anula la asignación de un caso ambiguo después de chatear con el cliente (CU11)",
+    dependencies=[Depends(require_permission(Permission.REQUEST_REJECT))],
+)
+async def anular_asignacion_ambigua(
+    incidente_id: int,
+    request: RejectIncidenteRequest,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """
+    Anular asignación de un caso ambiguo después de chatear con el cliente.
+    
+    Este endpoint es específico para el CU11 Gestionar Caso Ambiguo:
+    - Solo funciona si el incidente es ambiguo (es_ambiguo = True)
+    - Solo funciona si el taller ya está asignado
+    - Solo funciona si ya hay mensajes de chat entre taller y cliente
+    - Después de anular, el sistema busca otro taller automáticamente
+    
+    Flow:
+    1. Validar que el incidente sea ambiguo
+    2. Validar que el taller esté asignado
+    3. Validar que haya al menos un mensaje de chat
+    4. Anular la asignación (volver a pendiente)
+    5. Activar reasignación automática
+    """
+    if current_user.user_type != "workshop":
+        from ...core import ForbiddenException
+        raise ForbiddenException("Solo los talleres pueden anular asignaciones")
+    
+    # 1. Anular asignación con validaciones
+    service = IncidenteService(session)
+    incidente = await service.anular_asignacion_ambigua(
+        incidente_id=incidente_id,
+        taller_id=current_user.id,
+        motivo=request.motivo
+    )
+    
+    # 2. Activar reasignación automática
+    from ..assignment.reassignment_service import ReassignmentService
+    
+    reassignment_service = ReassignmentService(session)
+    result = await reassignment_service.handle_rejection(
+        incident_id=incidente_id,
+        workshop_id=current_user.id,
+        rejection_reason=f"Caso ambiguo anulado: {request.motivo}"
+    )
+    
+    # 3. Preparar respuesta según resultado
+    if result.success:
+        message = (
+            f"Asignación anulada. El incidente ha sido reasignado automáticamente a "
+            f"{result.assigned_workshop.workshop_name if result.assigned_workshop else 'otro taller'}."
+        )
+    else:
+        if "Max attempts" in result.error_message or "No workshops available" in result.error_message:
+            message = (
+                "Asignación anulada. No hay más talleres disponibles. "
+                "Se ha notificado al administrador para intervención manual."
+            )
+        else:
+            message = f"Asignación anulada. Error en reasignación: {result.error_message}"
+    
+    return create_success_response(
+        data=IncidenteResponse.model_validate(incidente).model_dump(mode='json'),
+        message=message,
+    )
+
+
+@router.post(
+    "/{incidente_id}/cancelar",
+    response_model=IncidenteResponse,
+    summary="Cancelar incidente",
+    description="Cancelar un incidente (cliente puede cancelar sus propios incidentes, admin puede cancelar cualquiera)",
+    dependencies=[Depends(require_any_permission(
+        Permission.EMERGENCY_CANCEL_OWN,
+        Permission.ADMIN_MANUAL_INTERVENTION
+    ))],
+)
+async def cancel_incidente(
+    incidente_id: int,
+    motivo: Optional[str] = Query(None, description="Motivo de la cancelación"),
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """
+    Cancelar un incidente.
+    
+    Casos de uso:
+    - Cliente cancela porque solucionó el problema por su cuenta
+    - Cliente cancela porque ya no necesita el servicio
+    - Admin cancela por razones administrativas
+    
+    El incidente debe estar en estado pendiente, asignado o en_proceso.
+    No se pueden cancelar incidentes ya resueltos o cancelados.
+    """
+    service = IncidenteService(session)
+    
+    incidente = await service.cancel_incidente(
+        incidente_id=incidente_id,
+        user_id=current_user.id,
+        user_type=current_user.user_type,
+        motivo=motivo
+    )
+    
+    return create_success_response(
+        data=IncidenteResponse.model_validate(incidente).model_dump(mode='json'),
+        message="Incidente cancelado exitosamente",
+    )
+
+
+@router.post(
+    "/{incidente_id}/completar",
+    response_model=IncidenteResponse,
+    summary="Completar incidente",
+    description="Marcar un incidente como completado (cliente puede completar sus propios incidentes cuando el servicio ha sido satisfactorio)",
+    dependencies=[Depends(require_any_permission(
+        Permission.EMERGENCY_CANCEL_OWN,  # Reutilizamos el mismo permiso que para cancelar
+        Permission.ADMIN_MANUAL_INTERVENTION
+    ))],
+)
+async def complete_incidente(
+    incidente_id: int,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """
+    Marcar un incidente como completado.
+    
+    Casos de uso:
+    - Cliente confirma que el problema fue resuelto satisfactoriamente
+    - Cliente marca como completado después de que el técnico terminó el trabajo
+    
+    El incidente debe estar en estado 'en_proceso' o 'en_sitio'.
+    Solo el cliente propietario del incidente puede marcarlo como completado.
+    """
+    service = IncidenteService(session)
+    
+    # Verificar que el incidente existe y pertenece al cliente
+    incidente = await service.repository.find_by_id(incidente_id)
+    if not incidente:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Incidente no encontrado"
+        )
+    
+    # Verificar permisos: solo el cliente propietario puede completar
+    if current_user.user_type == "client" and incidente.client_id != current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="No tienes permiso para completar este incidente"
+        )
+    
+    # Verificar que el incidente esté en un estado que permita completarlo
+    if incidente.estado_actual not in ["en_proceso", "en_sitio"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"No se puede completar un incidente en estado '{incidente.estado_actual}'. Debe estar 'en_proceso' o 'en_sitio'."
+        )
+    
+    # Usar el servicio de estados para transicionar a 'resuelto'
+    from ..incident_states.services import IncidentStateService
+    state_service = IncidentStateService(session)
+    
+    try:
+        incidente = await state_service.resolve_incident(
+            incident_id=incidente_id,
+            resolved_by=current_user.id,
+            resolution_notes="Marcado como completado por el cliente"
+        )
+        
+        return create_success_response(
+            data=IncidenteResponse.model_validate(incidente).model_dump(mode='json'),
+            message="Incidente marcado como completado exitosamente",
+        )
+        
+    except Exception as e:
+        logger.error(f"Error al completar incidente {incidente_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error interno al completar el incidente"
+        )
 
 
 @router.post(
@@ -435,3 +909,52 @@ async def get_incidente_rechazos(
         data=rechazos_data,
         message=f"Se encontraron {len(rechazos_data)} rechazos para este incidente",
     )
+
+
+class UploadPhotosRequest(BaseModel):
+    """Request para subir fotos adicionales a un incidente."""
+    photo_urls: List[str] = Field(..., min_items=1, max_items=10, description="Lista de URLs de fotos subidas")
+
+
+@router.post(
+    "/{incidente_id}/upload-photos",
+    response_model=IncidenteResponse,
+    summary="Subir fotos adicionales a un incidente",
+    description="Subir fotos adicionales a un incidente existente (cliente, técnico, taller o admin)",
+    dependencies=[Depends(require_permission(Permission.EMERGENCY_VIEW_OWN))],
+)
+async def upload_incident_photos(
+    incidente_id: int,
+    request: UploadPhotosRequest,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """
+    Subir fotos adicionales a un incidente.
+    
+    Las fotos deben ser subidas primero usando el endpoint /incidentes/upload/image
+    y luego las URLs resultantes se envían aquí para asociarlas al incidente.
+    """
+    service = IncidenteService(session)
+    
+    try:
+        incidente = await service.upload_photos(
+            incidente_id=incidente_id,
+            photo_urls=request.photo_urls,
+            user_id=current_user.id,
+            user_type=current_user.user_type
+        )
+        
+        return create_success_response(
+            data=IncidenteResponse.model_validate(incidente),
+            message=f"{len(request.photo_urls)} foto(s) subida(s) exitosamente al incidente",
+        )
+    
+    except NotFoundException as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error al subir fotos al incidente {incidente_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al subir fotos: {str(e)}"
+        )

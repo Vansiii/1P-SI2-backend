@@ -156,6 +156,194 @@ class WorkshopService:
         logger.info("Workshop location updated", workshop_id=workshop_id)
         return updated_workshop
 
+    async def toggle_availability(
+        self,
+        workshop_id: int,
+        is_available: bool,
+    ) -> Workshop:
+        """
+        Toggle workshop availability and emit `workshop_availability_changed` to all admins.
+
+        Args:
+            workshop_id: ID of the workshop
+            is_available: New availability status
+
+        Returns:
+            Updated Workshop instance
+        """
+        from ...core.websocket_events import emit_to_admins, EventTypes
+        from datetime import datetime
+
+        workshop = await self.get_workshop_by_id(workshop_id)
+        updated_workshop = await self.workshop_repo.update(
+            workshop_id,
+            {"is_available": is_available},
+        )
+        logger.info(
+            "Workshop availability toggled",
+            workshop_id=workshop_id,
+            is_available=is_available,
+        )
+
+        # 🔔 Emit to all admins
+        await emit_to_admins(
+            event_type=EventTypes.WORKSHOP_AVAILABILITY_CHANGED,
+            data={
+                "workshop_id": updated_workshop.id,
+                "workshop_name": updated_workshop.workshop_name,
+                "is_available": updated_workshop.is_available,
+                "is_verified": updated_workshop.is_verified,
+                "timestamp": datetime.utcnow().isoformat(),
+            },
+        )
+
+        return updated_workshop
+
+    async def verify_workshop(
+        self,
+        workshop_id: int,
+        is_verified: bool,
+    ) -> Workshop:
+        """
+        Update workshop verification status and emit `workshop_verified` to the workshop owner.
+
+        Args:
+            workshop_id: ID of the workshop
+            is_verified: New verification status
+
+        Returns:
+            Updated Workshop instance
+        """
+        from ...core.websocket_events import emit_to_user, EventTypes
+        from datetime import datetime
+
+        workshop = await self.get_workshop_by_id(workshop_id)
+        updated_workshop = await self.workshop_repo.update(
+            workshop_id,
+            {"is_verified": is_verified},
+        )
+        logger.info(
+            "Workshop verification status updated",
+            workshop_id=workshop_id,
+            is_verified=is_verified,
+        )
+
+        # 🔔 Emit personal message to workshop owner
+        await emit_to_user(
+            user_id=updated_workshop.id,
+            event_type=EventTypes.WORKSHOP_VERIFIED,
+            data={
+                "workshop_id": updated_workshop.id,
+                "workshop_name": updated_workshop.workshop_name,
+                "is_available": updated_workshop.is_available,
+                "is_verified": updated_workshop.is_verified,
+                "timestamp": datetime.utcnow().isoformat(),
+            },
+        )
+
+        return updated_workshop
+
+    async def update_workshop(
+        self,
+        workshop_id: int,
+        update_data: dict,
+    ) -> Workshop:
+        """
+        Update workshop profile fields and emit `workshop_updated` to the workshop owner.
+
+        Args:
+            workshop_id: ID of the workshop
+            update_data: Dictionary of fields to update
+
+        Returns:
+            Updated Workshop instance
+        """
+        from ...core.websocket_events import emit_to_user, EventTypes
+        from datetime import datetime
+
+        workshop = await self.get_workshop_by_id(workshop_id)
+        updated_workshop = await self.workshop_repo.update(workshop_id, update_data)
+        logger.info("Workshop profile updated", workshop_id=workshop_id)
+
+        # 🔔 Emit personal message to workshop owner
+        await emit_to_user(
+            user_id=updated_workshop.id,
+            event_type=EventTypes.WORKSHOP_UPDATED,
+            data={
+                "workshop_id": updated_workshop.id,
+                "workshop_name": updated_workshop.workshop_name,
+                "is_available": updated_workshop.is_available,
+                "is_verified": updated_workshop.is_verified,
+                "timestamp": datetime.utcnow().isoformat(),
+            },
+        )
+
+        return updated_workshop
+
+    async def update_balance(
+        self,
+        workshop_id: int,
+        balance_data: dict,
+    ) -> dict:
+        """
+        Update workshop balance and emit `workshop_balance_updated` to the workshop owner.
+
+        Args:
+            workshop_id: ID of the workshop
+            balance_data: Dictionary with balance fields to update
+
+        Returns:
+            Updated balance data as a dict
+        """
+        from ...core.websocket_events import emit_to_user, EventTypes
+        from ...models.workshop_balance import WorkshopBalance
+        from sqlalchemy import select
+        from datetime import datetime
+
+        # Ensure the workshop exists
+        workshop = await self.get_workshop_by_id(workshop_id)
+
+        # Fetch or create the balance record
+        result = await self.session.execute(
+            select(WorkshopBalance).where(WorkshopBalance.workshop_id == workshop_id)
+        )
+        balance = result.scalar_one_or_none()
+
+        if balance is None:
+            balance = WorkshopBalance(workshop_id=workshop_id)
+            self.session.add(balance)
+
+        # Apply updates
+        for field, value in balance_data.items():
+            if hasattr(balance, field):
+                setattr(balance, field, value)
+
+        await self.session.commit()
+        await self.session.refresh(balance)
+
+        logger.info("Workshop balance updated", workshop_id=workshop_id)
+
+        balance_dict = balance.to_dict()
+
+        # 🔔 Emit personal message to workshop owner
+        await emit_to_user(
+            user_id=workshop_id,
+            event_type=EventTypes.WORKSHOP_BALANCE_UPDATED,
+            data={
+                "workshop_id": workshop_id,
+                "workshop_name": workshop.workshop_name,
+                "is_available": workshop.is_available,
+                "is_verified": workshop.is_verified,
+                "available_balance": balance_dict.get("available_balance"),
+                "pending_balance": balance_dict.get("pending_balance"),
+                "total_earned": balance_dict.get("total_earned"),
+                "total_withdrawn": balance_dict.get("total_withdrawn"),
+                "timestamp": datetime.utcnow().isoformat(),
+            },
+        )
+
+        return balance_dict
+
 
 class TechnicianService:
     """Service for technician-specific operations."""
@@ -185,6 +373,9 @@ class TechnicianService:
         is_available: bool
     ) -> Technician:
         """Update technician availability."""
+        from ...core.websocket_events import emit_to_user, EventTypes
+        from datetime import datetime
+        
         technician = await self.get_technician_by_id(technician_id)
         updated_technician = await self.technician_repo.update(
             technician_id, 
@@ -195,6 +386,22 @@ class TechnicianService:
             technician_id=technician_id, 
             is_available=is_available
         )
+        
+        # 🔔 Emit WebSocket event to workshop owner
+        await emit_to_user(
+            user_id=updated_technician.workshop_id,
+            event_type=EventTypes.TECHNICIAN_AVAILABILITY_CHANGED,
+            data={
+                "technician_id": updated_technician.id,
+                "workshop_id": updated_technician.workshop_id,
+                "first_name": updated_technician.first_name,
+                "last_name": updated_technician.last_name,
+                "is_available": updated_technician.is_available,
+                "is_on_duty": updated_technician.is_on_duty,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        )
+        
         return updated_technician
     
     async def update_technician_location(
@@ -213,6 +420,59 @@ class TechnicianService:
             }
         )
         logger.info("Technician location updated", technician_id=technician_id)
+        return updated_technician
+    
+    async def update_duty_status(
+        self,
+        technician_id: int,
+        is_on_duty: bool,
+        is_available: bool = None
+    ) -> Technician:
+        """
+        Update technician duty status and emit WebSocket event.
+        
+        Args:
+            technician_id: ID of the technician
+            is_on_duty: Whether technician is on duty
+            is_available: Optional availability status (defaults based on duty status)
+        """
+        from ...core.websocket_events import emit_to_user, EventTypes
+        
+        technician = await self.get_technician_by_id(technician_id)
+        
+        # Default availability based on duty status if not specified
+        if is_available is None:
+            is_available = not is_on_duty
+        
+        update_data = {
+            "is_on_duty": is_on_duty,
+            "is_available": is_available
+        }
+        
+        updated_technician = await self.technician_repo.update(technician_id, update_data)
+        
+        logger.info(
+            f"Technician duty status updated: technician_id={technician_id}, "
+            f"is_on_duty={is_on_duty}, is_available={is_available}"
+        )
+        
+        # 🔔 Emit WebSocket event to workshop owner
+        event_type = EventTypes.TECHNICIAN_DUTY_STARTED if is_on_duty else EventTypes.TECHNICIAN_DUTY_ENDED
+        
+        await emit_to_user(
+            user_id=updated_technician.workshop_id,
+            event_type=event_type,
+            data={
+                "technician_id": updated_technician.id,
+                "workshop_id": updated_technician.workshop_id,
+                "first_name": updated_technician.first_name,
+                "last_name": updated_technician.last_name,
+                "is_on_duty": updated_technician.is_on_duty,
+                "is_available": updated_technician.is_available,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        )
+        
         return updated_technician
 
 

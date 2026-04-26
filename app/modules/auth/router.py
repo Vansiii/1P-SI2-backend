@@ -2,13 +2,18 @@
 Consolidated authentication router with improved organization.
 """
 from datetime import datetime
-from fastapi import APIRouter, Depends, Request, status
+from fastapi import APIRouter, Depends, Request, status, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...core import get_db_session, get_logger
 from ...core.responses import create_success_response
 from ...core.permissions import Permission
 from ...core.dependencies import require_permission, CurrentUser
+from ...core.exceptions import (
+    EmailAlreadyExistsException,
+    UserNotFoundException,
+    WeakPasswordException,
+)
 from ...shared.dependencies.auth import get_current_user
 from ...models.user import User
 from .schemas import (
@@ -104,25 +109,60 @@ async def register_technician(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Register a new technician user."""
-    registration_service = RegistrationService(session)
-    technician, token_response = await registration_service.register_technician(request)
-    
-    return create_success_response(
-        data={
-            "user": {
-                "id": technician.id,
-                "email": technician.email,
-                "user_type": technician.user_type,
-                "workshop_id": technician.workshop_id,
-                "current_latitude": technician.current_latitude,
-                "current_longitude": technician.current_longitude,
-                "is_available": technician.is_available,
+    try:
+        registration_service = RegistrationService(session)
+        technician, token_response = await registration_service.register_technician(request)
+        
+        return create_success_response(
+            data={
+                "user": {
+                    "id": technician.id,
+                    "email": technician.email,
+                    "first_name": technician.first_name,
+                    "last_name": technician.last_name,
+                    "phone": technician.phone,
+                    "user_type": technician.user_type,
+                    "workshop_id": technician.workshop_id,
+                    "current_latitude": technician.current_latitude,
+                    "current_longitude": technician.current_longitude,
+                    "is_available": technician.is_available,
+                    "is_active": technician.is_active,
+                },
+                "tokens": token_response.model_dump(),
             },
-            "tokens": token_response.model_dump(),
-        },
-        message="Técnico registrado exitosamente",
-        status_code=status.HTTP_201_CREATED,
-    )
+            message="Técnico registrado exitosamente",
+            status_code=status.HTTP_201_CREATED,
+        )
+    except UserNotFoundException as e:
+        logger.error("Workshop not found during technician registration", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(e)
+        )
+    except EmailAlreadyExistsException as e:
+        logger.error("Email already exists during technician registration", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"El email {e.email} ya está registrado"
+        )
+    except WeakPasswordException as e:
+        logger.error("Weak password during technician registration", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Contraseña débil: {e.message}"
+        )
+    except ValueError as e:
+        logger.error("Validation error during technician registration", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except Exception as e:
+        logger.error("Unexpected error during technician registration", error=str(e))
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Error interno del servidor al registrar técnico"
+        )
 
 
 @router.post(
@@ -152,6 +192,78 @@ async def register_administrator(
         message="Administrador registrado exitosamente",
         status_code=status.HTTP_201_CREATED,
     )
+
+
+@router.post(
+    "/validate/technician",
+    summary="Validate technician registration data",
+    description="Validate technician registration data before actual registration",
+)
+async def validate_technician_registration(
+    request: TechnicianRegistrationRequest,
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Validate technician registration data without creating the user."""
+    try:
+        registration_service = RegistrationService(session)
+        
+        # Check if email already exists
+        if await registration_service.user_repo.email_exists(request.email):
+            return create_success_response(
+                data={"valid": False, "errors": [f"El email {request.email} ya está registrado"]},
+                message="Datos de validación procesados",
+            )
+        
+        # Verify workshop exists and is active
+        workshop = await registration_service.workshop_repo.find_by_id(request.workshop_id)
+        if not workshop:
+            return create_success_response(
+                data={"valid": False, "errors": [f"Taller con ID {request.workshop_id} no encontrado"]},
+                message="Datos de validación procesados",
+            )
+        
+        if not workshop.is_active:
+            return create_success_response(
+                data={"valid": False, "errors": [f"El taller {workshop.business_name} no está activo"]},
+                message="Datos de validación procesados",
+            )
+        
+        # Verify specialties exist if provided
+        errors = []
+        if request.specialty_ids:
+            from sqlalchemy import select
+            from ...models.especialidad import Especialidad
+            
+            existing_specialties = await session.scalars(
+                select(Especialidad.id).where(Especialidad.id.in_(request.specialty_ids))
+            )
+            existing_ids = set(existing_specialties.all())
+            missing_ids = set(request.specialty_ids) - existing_ids
+            
+            if missing_ids:
+                errors.append(f"Especialidades no encontradas: {list(missing_ids)}")
+        
+        if errors:
+            return create_success_response(
+                data={"valid": False, "errors": errors},
+                message="Datos de validación procesados",
+            )
+        
+        return create_success_response(
+            data={
+                "valid": True, 
+                "workshop_name": workshop.business_name,
+                "message": "Todos los datos son válidos para el registro"
+            },
+            message="Validación exitosa",
+        )
+        
+    except Exception as e:
+        logger.error("Error during technician validation", error=str(e))
+        return create_success_response(
+            data={"valid": False, "errors": [f"Error de validación: {str(e)}"]},
+            message="Error en validación",
+        )
 
 
 # Authentication endpoints
@@ -334,11 +446,27 @@ async def get_profile(
             )
             technician = result.scalar_one_or_none()
             if technician:
+                # Obtener el nombre del taller si existe
+                workshop_name = None
+                if technician.workshop_id:
+                    workshop_result = await session.execute(
+                        select(Workshop).where(Workshop.id == technician.workshop_id)
+                    )
+                    workshop = workshop_result.scalar_one_or_none()
+                    if workshop:
+                        workshop_name = workshop.workshop_name
+                
                 user_data.update({
                     "workshop_id": technician.workshop_id,
+                    "workshop_name": workshop_name,
                     "current_latitude": float(technician.current_latitude) if technician.current_latitude else None,
                     "current_longitude": float(technician.current_longitude) if technician.current_longitude else None,
+                    "location_updated_at": technician.location_updated_at.isoformat() if technician.location_updated_at else None,
+                    "location_accuracy": float(technician.location_accuracy) if technician.location_accuracy else None,
                     "is_available": technician.is_available,
+                    "is_on_duty": technician.is_on_duty,
+                    "is_online": technician.is_online,
+                    "last_seen_at": technician.last_seen_at.isoformat() if technician.last_seen_at else None,
                 })
                 
         elif current_user.user_type == "admin":

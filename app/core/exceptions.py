@@ -261,3 +261,11 @@ class WeakPasswordException(ValidationException):
 
 # Alias for backward compatibility
 ForbiddenException = AuthorizationException
+
+# Aliases for backward compatibility
+NotFoundError = NotFoundException
+ValidationError = ValidationException
+AuthenticationError = AuthenticationException
+AuthorizationError = AuthorizationException
+ConflictError = ConflictException
+ForbiddenError = AuthorizationException

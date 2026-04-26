@@ -6,11 +6,24 @@ from typing import List
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...core import get_logger, ConflictException, NotFoundException
+from ...core.websocket_events import emit_to_user, EventTypes
 from ...models.vehiculo import Vehiculo
 from .repository import VehiculoRepository
 from .schemas import VehiculoCreateRequest, VehiculoUpdateRequest
 
 logger = get_logger(__name__)
+
+
+def _vehicle_payload(vehiculo: Vehiculo) -> dict:
+    """Build standardized vehicle event payload."""
+    return {
+        "vehicle_id": vehiculo.id,
+        "client_id": vehiculo.client_id,
+        "marca": vehiculo.marca,
+        "modelo": vehiculo.modelo,
+        "anio": vehiculo.anio,
+        "matricula": vehiculo.matricula,
+    }
 
 
 class VehiculoService:
@@ -55,7 +68,13 @@ class VehiculoService:
             client_id=client_id,
             matricula=vehiculo.matricula
         )
-        
+
+        await emit_to_user(
+            user_id=client_id,
+            event_type=EventTypes.VEHICLE_CREATED,
+            data=_vehicle_payload(vehiculo),
+        )
+
         return vehiculo
     
     async def get_vehiculo(self, vehiculo_id: int, client_id: int) -> Vehiculo:
@@ -115,21 +134,65 @@ class VehiculoService:
             vehiculo_id=vehiculo.id,
             client_id=client_id
         )
-        
+
+        await emit_to_user(
+            user_id=client_id,
+            event_type=EventTypes.VEHICLE_UPDATED,
+            data=_vehicle_payload(vehiculo),
+        )
+
         return vehiculo
     
     async def delete_vehiculo(self, vehiculo_id: int, client_id: int) -> None:
         """Eliminar un vehículo (soft delete)."""
         vehiculo = await self.get_vehiculo(vehiculo_id, client_id)
-        
+
         # Soft delete usando el método del repositorio
         await self.repository.soft_delete(vehiculo.id)
-        
+
         logger.info(
             "Vehículo eliminado",
             vehiculo_id=vehiculo_id,
             client_id=client_id
         )
+
+        await emit_to_user(
+            user_id=client_id,
+            event_type=EventTypes.VEHICLE_DELETED,
+            data=_vehicle_payload(vehiculo),
+        )
+
+    async def update_vehicle_image(
+        self,
+        vehiculo_id: int,
+        client_id: int,
+        image_url: str,
+    ) -> Vehiculo:
+        """Actualizar la imagen de un vehículo y emitir evento WebSocket."""
+        vehiculo = await self.get_vehiculo(vehiculo_id, client_id)
+
+        vehiculo.imagen = image_url
+
+        await self.session.commit()
+        await self.session.refresh(vehiculo)
+
+        logger.info(
+            "Imagen de vehículo actualizada",
+            vehiculo_id=vehiculo_id,
+            client_id=client_id,
+        )
+
+        await emit_to_user(
+            user_id=client_id,
+            event_type=EventTypes.VEHICLE_IMAGE_UPLOADED,
+            data={
+                "vehicle_id": vehiculo.id,
+                "client_id": vehiculo.client_id,
+                "image_url": image_url,
+            },
+        )
+
+        return vehiculo
     
     async def get_vehiculo_historial(self, vehiculo_id: int, client_id: int) -> dict:
         """Obtener historial de incidentes del vehículo."""

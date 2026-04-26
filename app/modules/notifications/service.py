@@ -282,3 +282,211 @@ class NotificationService:
 
 # Backward compatibility - alias for existing EmailService
 EmailService = NotificationService
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# In-App Notification Service (WebSocket-backed)
+# ─────────────────────────────────────────────────────────────────────────────
+
+from datetime import datetime
+from typing import List, Optional
+
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ...core.websocket_events import EventTypes, emit_to_user
+from ...models.notification import Notification
+
+
+class InAppNotificationService:
+    """
+    Service for in-app notifications backed by the Notification model.
+
+    All mutating operations persist to the database and then emit a
+    WebSocket event to the recipient user so the frontend can update
+    its state without polling.
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self.session = session
+
+    # ── Create ────────────────────────────────────────────────────────────────
+
+    async def create_notification(
+        self,
+        user_id: int,
+        notification_type: str,
+        title: str,
+        message: str,
+        data_json: Optional[str] = None,
+    ) -> Notification:
+        """
+        Persist a new in-app notification and emit ``notification_created``
+        to the recipient user via WebSocket.
+
+        Args:
+            user_id: Recipient user ID.
+            notification_type: Logical type string (e.g. ``incident_assigned``).
+            title: Short notification title.
+            message: Full notification body.
+            data_json: Optional JSON string with extra context data.
+
+        Returns:
+            The newly created :class:`Notification` instance.
+        """
+        notification = Notification(
+            user_id=user_id,
+            type=notification_type,
+            title=title,
+            message=message,
+            data_json=data_json,
+            is_read=False,
+            created_at=datetime.utcnow(),
+        )
+        self.session.add(notification)
+        await self.session.commit()
+        await self.session.refresh(notification)
+
+        await emit_to_user(
+            user_id=user_id,
+            event_type=EventTypes.NOTIFICATION_CREATED,
+            data={
+                "notification_id": notification.id,
+                "user_id": user_id,
+                "notification_type": notification_type,
+                "title": title,
+                "message": message,
+                "is_read": False,
+                "timestamp": notification.created_at.isoformat(),
+            },
+        )
+
+        logger.info(
+            "In-app notification created",
+            notification_id=notification.id,
+            user_id=user_id,
+            notification_type=notification_type,
+        )
+        return notification
+
+    # ── Mark single as read ───────────────────────────────────────────────────
+
+    async def mark_as_read(
+        self,
+        notification_id: int,
+        user_id: int,
+    ) -> Optional[Notification]:
+        """
+        Mark a single notification as read and emit ``notification_read``.
+
+        Args:
+            notification_id: ID of the notification to mark.
+            user_id: Owner of the notification (used for authorisation and WS routing).
+
+        Returns:
+            The updated :class:`Notification`, or ``None`` if not found.
+        """
+        notification = await self.session.scalar(
+            select(Notification).where(
+                Notification.id == notification_id,
+                Notification.user_id == user_id,
+            )
+        )
+
+        if notification is None:
+            logger.warning(
+                "Notification not found for mark_as_read",
+                notification_id=notification_id,
+                user_id=user_id,
+            )
+            return None
+
+        notification.is_read = True
+        await self.session.commit()
+        await self.session.refresh(notification)
+
+        await emit_to_user(
+            user_id=user_id,
+            event_type=EventTypes.NOTIFICATION_READ,
+            data={
+                "notification_id": notification_id,
+                "user_id": user_id,
+                "is_read": True,
+                "timestamp": datetime.utcnow().isoformat(),
+            },
+        )
+
+        logger.info(
+            "Notification marked as read",
+            notification_id=notification_id,
+            user_id=user_id,
+        )
+        return notification
+
+    # ── Mark all as read ──────────────────────────────────────────────────────
+
+    async def mark_all_as_read(self, user_id: int) -> int:
+        """
+        Mark every unread notification for *user_id* as read and emit
+        ``notifications_all_read``.
+
+        Args:
+            user_id: The user whose notifications should be marked.
+
+        Returns:
+            Number of rows updated.
+        """
+        result = await self.session.execute(
+            update(Notification)
+            .where(
+                Notification.user_id == user_id,
+                Notification.is_read == False,  # noqa: E712
+            )
+            .values(is_read=True)
+        )
+        await self.session.commit()
+
+        updated_count: int = result.rowcount  # type: ignore[assignment]
+
+        await emit_to_user(
+            user_id=user_id,
+            event_type=EventTypes.NOTIFICATIONS_ALL_READ,
+            data={
+                "user_id": user_id,
+                "timestamp": datetime.utcnow().isoformat(),
+            },
+        )
+
+        logger.info(
+            "All notifications marked as read",
+            user_id=user_id,
+            updated_count=updated_count,
+        )
+        return updated_count
+
+    # ── Query ─────────────────────────────────────────────────────────────────
+
+    async def get_user_notifications(
+        self,
+        user_id: int,
+        unread_only: bool = False,
+    ) -> List[Notification]:
+        """
+        Return notifications for a user, ordered newest-first.
+
+        Args:
+            user_id: The user whose notifications to fetch.
+            unread_only: When ``True``, only return unread notifications.
+
+        Returns:
+            List of :class:`Notification` instances.
+        """
+        query = select(Notification).where(Notification.user_id == user_id)
+
+        if unread_only:
+            query = query.where(Notification.is_read == False)  # noqa: E712
+
+        query = query.order_by(Notification.created_at.desc())
+
+        result = await self.session.scalars(query)
+        return list(result)

@@ -9,8 +9,8 @@ from ...core.permissions import Permission
 from ...core.dependencies import require_permission
 from ...shared.dependencies.auth import get_current_user
 from ...models.user import User
-from ...schemas.session import SessionListResponse
-from ...services.session_service import SessionService
+from .schemas import SessionListResponse
+from .services import SessionService
 
 router = APIRouter()
 

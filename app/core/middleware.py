@@ -24,6 +24,10 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
     
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         """Add request ID to request state and response headers."""
+        # Skip WebSocket connections - BaseHTTPMiddleware doesn't support them
+        if request.headers.get("upgrade", "").lower() == "websocket":
+            return await call_next(request)
+
         request_id = str(uuid4())
         request.state.request_id = request_id
         
@@ -48,6 +52,10 @@ class LoggingMiddleware(BaseHTTPMiddleware):
     
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         """Log request and response information."""
+        # Skip WebSocket connections - BaseHTTPMiddleware doesn't support them
+        if request.headers.get("upgrade", "").lower() == "websocket":
+            return await call_next(request)
+
         if request.url.path in self.EXCLUDED_PATHS:
             return await call_next(request)
         
@@ -119,6 +127,10 @@ class ErrorHandlingMiddleware(BaseHTTPMiddleware):
     
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         """Handle exceptions and return standardized error responses."""
+        # Skip WebSocket connections - BaseHTTPMiddleware doesn't support them
+        if request.headers.get("upgrade", "").lower() == "websocket":
+            return await call_next(request)
+
         try:
             return await call_next(request)
         except AppException as exc:
@@ -211,6 +223,10 @@ class AuditMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         """Process request and log to audit."""
         if not self._should_audit(request):
+            return await call_next(request)
+        
+        # Skip WebSocket connections - BaseHTTPMiddleware doesn't support them
+        if request.headers.get("upgrade", "").lower() == "websocket":
             return await call_next(request)
         
         start_time = time.time()
@@ -325,7 +341,11 @@ class AuditMiddleware(BaseHTTPMiddleware):
         from ..models.audit_log import AuditLog
         
         try:
-            async with get_async_session() as session:
+            # get_async_session is an async generator, not a context manager
+            async_gen = get_async_session()
+            session = await anext(async_gen)
+            
+            try:
                 action = self._determine_action(method, path, status_code)
                 
                 details = {
@@ -353,6 +373,12 @@ class AuditMiddleware(BaseHTTPMiddleware):
                 
                 session.add(audit_log)
                 await session.commit()
+            finally:
+                # Close the generator
+                try:
+                    await anext(async_gen)
+                except StopAsyncIteration:
+                    pass
                 
         except Exception as e:
             logger.error(

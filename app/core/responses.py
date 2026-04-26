@@ -131,3 +131,9 @@ def create_paginated_response(
 def get_request_id(request: Request) -> str:
     """Get request ID from request state or generate new one."""
     return getattr(request.state, "request_id", str(uuid4()))
+
+
+# Aliases for backward compatibility
+success_response = create_success_response
+error_response = create_error_response
+paginated_response = create_paginated_response

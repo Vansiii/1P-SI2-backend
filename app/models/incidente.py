@@ -1,7 +1,8 @@
 ﻿from datetime import datetime
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Numeric, String, Text, func
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Numeric, String, Text, func, Index
+import sqlalchemy as sa
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base
 
@@ -19,8 +20,28 @@ class Incidente(Base):
             name="check_prioridad_ia_valid"
         ),
         CheckConstraint(
-            "estado_actual IN ('pendiente', 'asignado', 'en_proceso', 'resuelto', 'cancelado')",
+            "estado_actual IN ('pendiente', 'asignado', 'en_proceso', 'resuelto', 'cancelado', 'sin_taller_disponible')",
             name="check_estado_actual_valid"
+        ),
+        # Performance indexes for real-time queries
+        Index(
+            'idx_incidentes_estado_fecha',
+            'estado_actual', sa.text('created_at DESC'),
+            postgresql_where=sa.text("((estado_actual)::text = ANY ((ARRAY['pendiente'::character varying, 'asignado'::character varying, 'aceptado'::character varying, 'en_camino'::character varying, 'en_proceso'::character varying])::text[]))")
+        ),
+        Index(
+            'idx_incidentes_taller_estado',
+            'taller_id', 'estado_actual',
+            postgresql_where=sa.text("taller_id IS NOT NULL")
+        ),
+        Index(
+            'idx_incidentes_tecnico_estado',
+            'tecnico_id', 'estado_actual',
+            postgresql_where=sa.text("tecnico_id IS NOT NULL")
+        ),
+        Index(
+            'idx_incidentes_client_fecha',
+            'client_id', sa.text('created_at DESC')
         ),
     )
 
@@ -31,6 +52,19 @@ class Incidente(Base):
     vehiculo_id: Mapped[int] = mapped_column(ForeignKey("vehiculos.id"), nullable=False, index=True)
     taller_id: Mapped[int | None] = mapped_column(ForeignKey("workshops.id"), nullable=True, index=True)
     tecnico_id: Mapped[int | None] = mapped_column(ForeignKey("technicians.id"), nullable=True, index=True)
+    
+    # Relaciones ORM
+    client = relationship("Client", back_populates="incidentes")
+    vehiculo = relationship("Vehiculo", back_populates="incidentes")
+    workshop = relationship("Workshop", back_populates="incidentes")
+    technician = relationship("Technician", back_populates="incidentes")
+    
+    # Sesiones de tracking asociadas al incidente
+    tracking_sessions = relationship(
+        "TrackingSession",
+        back_populates="incidente",
+        cascade="all, delete-orphan"
+    )
     
     # Ubicación del incidente
     latitude: Mapped[float] = mapped_column(Numeric(10, 8), nullable=False, index=True)

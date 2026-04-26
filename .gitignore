@@ -15,12 +15,31 @@ venv/
 env/
 ENV/
 
-# Environment variables
+# Environment variables (archivos con datos sensibles)
 .env
+.env.*
+!.env.example
+!.env.*.example
+!.env.*.template
 .env.local
-.env.*.local
-.env.example
+.env.development
+.env.production
+.env.staging
 .env.railway
+.env.test
+
+# Firebase credentials (archivos con credenciales reales)
+firebase-service-account.json
+firebase-adminsdk-*.json
+*firebase-adminsdk*.json
+mecanicoya-*.json
+!firebase-service-account.json.example
+
+# Google Cloud credentials
+*-service-account.json
+!*-service-account.json.example
+gcloud-credentials.json
+google-credentials.json
 
 # IDE
 .vscode/
@@ -59,3 +78,51 @@ Thumbs.db
 
 # Alembic
 alembic/versions/__pycache__/
+
+# Scripts con datos sensibles
+scripts/USUARIOS_CREADOS.md
+scripts/*credentials*
+scripts/*.env
+scripts/*.json
+!scripts/*.example
+!scripts/*.template
+
+# Coverage reports
+.coverage
+htmlcov/
+coverage.xml
+*.cover
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*~
+
+# Alembic compiled files
+alembic/__pycache__/
+alembic/versions/__pycache__/
+
+# Additional Python cache
+*.pyc
+__pycache__/
+
+# Secrets and API Keys
+*.key
+*.pem
+*.p12
+*.pfx
+secrets/
+credentials/
+
+# Backup files
+*.backup
+*.bak.env
+*.env.backup
+
+# Railway specific
+.railway/
+
+# Docker secrets (if using Docker in future)
+docker-compose.override.yml
+.dockerignore.local

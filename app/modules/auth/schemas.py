@@ -110,6 +110,9 @@ class WorkshopRegistrationRequest(BaseUserRegistrationRequest):
 class TechnicianRegistrationRequest(BaseUserRegistrationRequest):
     """Technician registration request schema."""
     
+    first_name: str = Field(..., max_length=60, description="First name")
+    last_name: str = Field(..., max_length=60, description="Last name")
+    phone: str = Field(..., max_length=20, description="Phone number")
     workshop_id: int = Field(..., description="Workshop ID")
     current_latitude: float | None = Field(
         None, ge=-90, le=90, description="Current latitude"
@@ -118,6 +121,17 @@ class TechnicianRegistrationRequest(BaseUserRegistrationRequest):
         None, ge=-180, le=180, description="Current longitude"
     )
     is_available: bool = Field(default=True, description="Is available for work")
+    specialty_ids: list[int] | None = Field(None, description="List of specialty IDs")
+    
+    @field_validator("first_name", "last_name", mode="before")
+    @classmethod
+    def strip_names(cls, value: Any) -> str:
+        return strip_text_validator(cls, value)
+    
+    @field_validator("phone", mode="before")
+    @classmethod
+    def normalize_phone(cls, value: Any) -> str:
+        return normalize_phone_validator(cls, value)
 
 
 class AdministratorRegistrationRequest(BaseUserRegistrationRequest):

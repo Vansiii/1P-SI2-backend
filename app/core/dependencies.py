@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.permissions import Permission, UserRole, check_permission
 from app.core.database import get_db_session
 from app.shared.dependencies.auth import get_current_token_payload as _get_current_token_payload
+from app.shared.dependencies.auth import get_current_user  # Export for modules
 from app.modules.auth.schemas import TokenPayload
 
 

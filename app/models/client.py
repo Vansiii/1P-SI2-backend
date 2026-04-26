@@ -1,7 +1,7 @@
 ﻿from datetime import date, datetime
 
 from sqlalchemy import Date, DateTime, ForeignKey, String, func
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .user import User
 
@@ -21,6 +21,10 @@ class Client(User):
     direccion: Mapped[str | None] = mapped_column(String(255), nullable=True)
     ci: Mapped[str | None] = mapped_column(String(20), nullable=True, unique=True, index=True)
     fecha_nacimiento: Mapped[date | None] = mapped_column(Date, nullable=True)
+    
+    # Relaciones
+    incidentes = relationship("Incidente", back_populates="client")
+    vehiculos = relationship("Vehiculo", back_populates="client")
 
     __mapper_args__ = {
         "polymorphic_identity": "client",
