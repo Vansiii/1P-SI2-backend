@@ -162,7 +162,7 @@ async def authenticate_websocket(token: str, session: AsyncSession) -> Optional[
 async def websocket_tracking_endpoint(
     websocket: WebSocket,
     user_id: int,
-    token: str = Query(..., description="JWT token for authentication"),
+    token: Optional[str] = Query(None, description="JWT token for authentication"),
 ):
     """
     WebSocket endpoint for general user tracking and notifications.
@@ -180,9 +180,25 @@ async def websocket_tracking_endpoint(
     NOTE: Database session is created per-message, not per-connection,
     to avoid holding a connection for the entire WebSocket lifetime.
     """
-    # ✅ IMPORTANT: Accept connection FIRST, then authenticate
-    # This prevents Uvicorn from rejecting the connection with 403
-    await websocket.accept()
+    # ✅ CRITICAL: Accept connection FIRST before ANY other operation
+    # This MUST be the first line to prevent Uvicorn 403 errors
+    try:
+        await websocket.accept()
+        logger.info(f"✅ WebSocket connection accepted for user {user_id}")
+    except Exception as accept_error:
+        logger.error(f"❌ Failed to accept WebSocket connection for user {user_id}: {str(accept_error)}")
+        return
+    
+    # Check if token was provided
+    if not token:
+        logger.warning(f"❌ No token provided for user {user_id}")
+        await websocket.send_json({
+            "type": "error",
+            "code": "missing_token",
+            "message": "Token de autenticación requerido."
+        })
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
     
     # Check rate limiting AFTER accepting connection
     is_allowed, seconds_remaining = check_rate_limit(user_id)
@@ -352,7 +368,7 @@ async def websocket_tracking_endpoint(
 async def websocket_incident_endpoint(
     websocket: WebSocket,
     incident_id: int,
-    token: str = Query(..., description="JWT token for authentication"),
+    token: Optional[str] = Query(None, description="JWT token for authentication"),
 ):
     """
     WebSocket endpoint for incident-specific communication.
@@ -370,12 +386,29 @@ async def websocket_incident_endpoint(
     NOTE: Database session is created per-message, not per-connection,
     to avoid holding a connection for the entire WebSocket lifetime.
     """
-    logger.info(f"WebSocket connection attempt for incident {incident_id}")
-    logger.info(f"Token received: {token[:20] if token else 'NO TOKEN'}...")
+    logger.info(f"🔌 WebSocket connection attempt for incident {incident_id}")
     
-    # ✅ IMPORTANT: Accept connection FIRST, then authenticate
-    # This prevents Uvicorn from rejecting the connection with 403
-    await websocket.accept()
+    # ✅ CRITICAL: Accept connection FIRST before ANY other operation
+    # This MUST be done immediately to prevent Uvicorn 403 errors
+    try:
+        await websocket.accept()
+        logger.info(f"✅ WebSocket connection accepted for incident {incident_id}")
+    except Exception as accept_error:
+        logger.error(f"❌ Failed to accept WebSocket connection for incident {incident_id}: {str(accept_error)}")
+        return
+    
+    # Check if token was provided
+    if not token:
+        logger.warning(f"❌ No token provided for incident {incident_id}")
+        await websocket.send_json({
+            "type": "error",
+            "code": "missing_token",
+            "message": "Token de autenticación requerido."
+        })
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+    
+    logger.info(f"🔑 Token received for incident {incident_id}: {token[:20]}...")
     
     # Create a temporary session just for authentication and authorization
     async for session in get_db_session():
