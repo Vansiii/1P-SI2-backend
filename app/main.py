@@ -9,6 +9,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
 from .api.v1.router import api_router
+from .api.v1 import websocket as websocket_v1
 from .core import (
     close_database_connection,
     create_database_tables,
@@ -174,6 +175,10 @@ app.add_middleware(AuditMiddleware, audit_all_methods=False)  # Only audit POST,
 
 # Include API router
 app.include_router(api_router)
+
+# Backward compatibility for clients that still connect to /ws/* without /api/v1.
+# Keep both paths active while frontend deployments converge on /api/v1/ws/*.
+app.include_router(websocket_v1.router)
 
 
 # Root endpoint
