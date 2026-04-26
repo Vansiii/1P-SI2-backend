@@ -163,3 +163,68 @@ async def liveness_probe():
         data={"alive": True},
         message="Service is alive",
     )
+
+
+@router.get(
+    "/outbox",
+    summary="Outbox Processor health check",
+    description="Check health status of the Outbox Processor for event delivery",
+)
+async def outbox_health_check(
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Outbox Processor health check endpoint."""
+    try:
+        # Import here to avoid circular imports
+        from ...main import get_outbox_processor
+        
+        outbox_processor = get_outbox_processor()
+        
+        if not outbox_processor:
+            return create_success_response(
+                data={
+                    "status": "unhealthy",
+                    "error": "OutboxProcessor not initialized",
+                    "timestamp": datetime.now(UTC).isoformat(),
+                },
+                message="OutboxProcessor not available",
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        
+        # Get health status
+        health_status = outbox_processor.get_health_status()
+        
+        # Get pending events count
+        pending_stats = await outbox_processor.get_pending_events_count()
+        
+        # Combine health data
+        health_data = {
+            "processor": health_status,
+            "pending_events": pending_stats,
+            "timestamp": datetime.now(UTC).isoformat(),
+        }
+        
+        # Determine overall status
+        is_healthy = (
+            health_status.get("status") == "healthy" and
+            pending_stats.get("is_backlog_healthy", False) and
+            not pending_stats.get("error")
+        )
+        
+        return create_success_response(
+            data=health_data,
+            message=f"OutboxProcessor is {'healthy' if is_healthy else 'unhealthy'}",
+            status_code=status.HTTP_200_OK if is_healthy else status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+        
+    except Exception as e:
+        logger.error("OutboxProcessor health check failed", error=str(e))
+        return create_success_response(
+            data={
+                "status": "unhealthy",
+                "error": str(e),
+                "timestamp": datetime.now(UTC).isoformat(),
+            },
+            message="OutboxProcessor health check failed",
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )

@@ -3,7 +3,8 @@ Modelo para sesiones de tracking de técnicos.
 """
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Numeric, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Numeric, func, Index
+import sqlalchemy as sa
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base
@@ -16,6 +17,19 @@ class TrackingSession(Base):
     """
 
     __tablename__ = "tracking_sessions"
+    __table_args__ = (
+        # Performance indexes for tracking queries
+        Index(
+            'idx_tracking_sessions_active',
+            'is_active', 'started_at',
+            postgresql_where=sa.text("is_active = true")
+        ),
+        Index(
+            'idx_tracking_sessions_incident_started',
+            'incidente_id', sa.text('started_at DESC'),
+            postgresql_where=sa.text("incidente_id IS NOT NULL")
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     technician_id: Mapped[int] = mapped_column(ForeignKey("technicians.id"), nullable=False, index=True)

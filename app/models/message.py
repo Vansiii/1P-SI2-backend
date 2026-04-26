@@ -2,7 +2,8 @@
 Modelo para mensajes de chat.
 """
 from datetime import datetime
-from sqlalchemy import DateTime, ForeignKey, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, String, Text, func, Index
+import sqlalchemy as sa
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base
@@ -14,6 +15,18 @@ class Message(Base):
     """
 
     __tablename__ = "messages"
+    __table_args__ = (
+        # Performance indexes for chat queries
+        Index(
+            'idx_messages_incident_created',
+            'incident_id', sa.text('created_at DESC')
+        ),
+        Index(
+            'idx_messages_unread',
+            'is_read', 'created_at',
+            postgresql_where=sa.text("is_read = false")
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     incident_id: Mapped[int] = mapped_column(ForeignKey("incidentes.id"), nullable=False, index=True)

@@ -3,7 +3,8 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import DateTime, ForeignKey, Numeric, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, Numeric, String, Text, func, Index
+import sqlalchemy as sa
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base
@@ -16,6 +17,22 @@ class AssignmentAttempt(Base):
     """
 
     __tablename__ = "assignment_attempts"
+    __table_args__ = (
+        # Performance indexes for assignment queries
+        Index(
+            'idx_assignment_attempts_pending',
+            'status', 'attempted_at',
+            postgresql_where=sa.text("((status)::text = 'pending'::text)")
+        ),
+        Index(
+            'idx_assignment_attempts_incident_created',
+            'incident_id', sa.text('created_at DESC')
+        ),
+        Index(
+            'idx_assignment_attempts_workshop_status',
+            'workshop_id', 'status', 'created_at'
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     

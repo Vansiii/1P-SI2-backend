@@ -54,7 +54,7 @@ class ConnectionManager:
         self.active_connections[user_id] = websocket
         
         # Track admin users for admin-only broadcasts
-        if user_type == 'admin':
+        if user_type in ('admin', 'administrator'):  # ✅ Corregido: aceptar ambos tipos
             self.admin_user_ids.add(user_id)
         
         # Iniciar heartbeat
@@ -63,19 +63,6 @@ class ConnectionManager:
         )
         
         logger.info(f"WebSocket connected: user_id={user_id}, user_type={user_type}")
-        
-        # Enviar confirmación de conexión con manejo de errores
-        try:
-            # Pequeño delay para asegurar que la conexión esté completamente establecida
-            await asyncio.sleep(0.1)
-            await self.send_personal_message(user_id, {
-                "type": "connection_established",
-                "user_id": user_id,
-                "timestamp": datetime.utcnow().isoformat()
-            })
-        except Exception as e:
-            logger.warning(f"Could not send connection confirmation to user {user_id}: {str(e)}")
-            # No desconectar por este error, la conexión puede seguir funcionando
 
     def disconnect(self, user_id: int):
         """
@@ -123,17 +110,6 @@ class ConnectionManager:
         self.incident_rooms[incident_id].add(user_id)
         
         logger.info(f"User {user_id} joined incident room {incident_id}")
-        
-        # Notificar al usuario con manejo de errores
-        try:
-            await self.send_personal_message(user_id, {
-                "type": "room_joined",
-                "incident_id": incident_id,
-                "timestamp": datetime.utcnow().isoformat()
-            })
-        except Exception as e:
-            logger.warning(f"Could not send room_joined confirmation to user {user_id}: {str(e)}")
-            # No es crítico, el usuario ya está en el room
 
     async def leave_incident_room(self, user_id: int, incident_id: int):
         """
@@ -158,21 +134,37 @@ class ConnectionManager:
             user_id: ID del usuario
             message: Diccionario con el mensaje
         """
-        if user_id in self.active_connections:
-            try:
-                websocket = self.active_connections[user_id]
-                # Verificar que el WebSocket esté en estado correcto
-                if websocket.client_state.name == 'CONNECTED':
-                    await websocket.send_json(message)
-                else:
-                    logger.warning(f"WebSocket for user {user_id} is not in CONNECTED state: {websocket.client_state.name}")
-                    # No desconectar inmediatamente, puede ser temporal
-            except Exception as e:
-                logger.error(f"Error sending message to user {user_id}: {str(e)}")
-                # Solo desconectar si es un error crítico
-                if "not connected" in str(e).lower() or "closed" in str(e).lower():
-                    self.disconnect(user_id)
-                # Para otros errores, mantener la conexión y reintentar después
+        if user_id not in self.active_connections:
+            logger.debug(f"User {user_id} not connected, skipping message")
+            return
+            
+        try:
+            websocket = self.active_connections[user_id]
+            # Verificar que el WebSocket esté en estado correcto
+            if websocket.client_state.name == 'CONNECTED':
+                logger.debug(f"📤 Sending message to user {user_id}: type={message.get('type')}")
+                await websocket.send_json(message)
+                logger.debug(f"✅ Message sent successfully to user {user_id}")
+            else:
+                logger.warning(f"⚠️ WebSocket for user {user_id} is not in CONNECTED state: {websocket.client_state.name}")
+                # Don't disconnect immediately - the connection might recover
+        except Exception as e:
+            logger.error(f"❌ Error sending message to user {user_id}: {type(e).__name__}: {str(e)}")
+            # Solo desconectar si es un error crítico de conexión cerrada
+            error_msg = str(e).lower()
+            if "not connected" in error_msg or "closed" in error_msg or "disconnected" in error_msg:
+                logger.info(f"🔌 Disconnecting user {user_id} due to connection error")
+                self.disconnect(user_id)
+
+    async def send_to_user(self, user_id: int, message: dict):
+        """
+        Alias for send_personal_message for compatibility with OutboxProcessor.
+        
+        Args:
+            user_id: ID del usuario
+            message: Diccionario con el mensaje
+        """
+        await self.send_personal_message(user_id, message)
 
     async def broadcast_to_incident(self, incident_id: int, message: dict, exclude_user: int = None):
         """
@@ -363,7 +355,9 @@ class ConnectionManager:
         incident_id: int,
         sender_id: int,
         sender_name: str,
-        message_text: str
+        message_text: str,
+        message_id: int = None,
+        sender_role: str = None
     ):
         """
         Notificar nuevo mensaje en chat.
@@ -373,15 +367,25 @@ class ConnectionManager:
             sender_id: ID del remitente
             sender_name: Nombre del remitente
             message_text: Texto del mensaje
+            message_id: ID del mensaje (opcional)
+            sender_role: Rol del remitente (opcional)
         """
         message = {
             "type": "new_message",
             "incident_id": incident_id,
-            "sender": {
-                "id": sender_id,
-                "name": sender_name
+            "message": {
+                "id": message_id,
+                "incident_id": incident_id,
+                "sender_id": sender_id,
+                "sender_name": sender_name,
+                "sender_role": sender_role,
+                "message": message_text,
+                "message_type": "text",
+                "is_read": False,
+                "read_at": None,
+                "created_at": datetime.utcnow().isoformat(),
+                "updated_at": None
             },
-            "message": message_text,
             "timestamp": datetime.utcnow().isoformat()
         }
         
@@ -399,10 +403,24 @@ class ConnectionManager:
             while True:
                 await asyncio.sleep(30)  # Ping cada 30 segundos
                 try:
+                    # Check if user is still in active connections
+                    if user_id not in self.active_connections:
+                        logger.debug(f"🛑 User {user_id} no longer in active connections, stopping heartbeat")
+                        break
+                    
+                    if websocket.client_state.name != 'CONNECTED':
+                        logger.warning(f"⚠️ Heartbeat: WebSocket for user {user_id} not in CONNECTED state: {websocket.client_state.name}")
+                        break
+                    
+                    logger.debug(f"💓 Sending heartbeat ping to user {user_id}")
                     await websocket.send_json({"type": "ping"})
-                except Exception:
+                    logger.debug(f"✅ Heartbeat ping sent to user {user_id}")
+                except Exception as ping_error:
+                    logger.error(f"❌ Heartbeat error for user {user_id}: {type(ping_error).__name__}: {str(ping_error)}")
+                    # Don't disconnect here - let the main loop handle it
                     break
         except asyncio.CancelledError:
+            logger.debug(f"🛑 Heartbeat cancelled for user {user_id}")
             pass
 
     def get_connected_users_count(self) -> int:

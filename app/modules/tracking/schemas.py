@@ -77,3 +77,18 @@ class LocationHistoryRequest(BaseModel):
     start_time: Optional[datetime] = Field(None, description="Start time filter")
     end_time: Optional[datetime] = Field(None, description="End time filter")
     limit: int = Field(100, ge=1, le=1000, description="Maximum number of records")
+
+
+class BatchLocationUpdate(BaseModel):
+    """Schema for batch location updates from technician."""
+    locations: list[LocationUpdate] = Field(..., min_length=1, max_length=10, description="Batch of location updates (max 10)")
+    
+    @field_validator('locations')
+    @classmethod
+    def validate_batch_size(cls, v):
+        """Validate batch size."""
+        if len(v) > 10:
+            raise ValueError("Batch size cannot exceed 10 locations")
+        if len(v) == 0:
+            raise ValueError("Batch must contain at least 1 location")
+        return v

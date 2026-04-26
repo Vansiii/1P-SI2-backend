@@ -20,6 +20,7 @@ from .schemas import (
     EvidenciaResponse,
     EvidenciaImagenResponse,
     EvidenciaAudioResponse,
+    SuggestedTechnicianInfo,
 )
 from .service import IncidenteService
 from .ai_service import IncidentAIService
@@ -156,6 +157,27 @@ async def get_incidente(
     response_data.imagenes = [EvidenciaImagenResponse.model_validate(i) for i in imagenes]
     response_data.audios = [EvidenciaAudioResponse.model_validate(a) for a in audios]
     
+    # ✅ Poblar suggested_technician si el usuario es taller y el incidente está pendiente/asignado
+    # Esto permite que el modal "Aceptar Solicitud" muestre la recomendación de IA y técnico sugerido
+    if current_user.user_type == "workshop" and incidente.estado_actual in ["pendiente", "asignado"]:
+        try:
+            suggested_tech_info = await service.get_suggested_technician_info(
+                incidente_id=incidente_id,
+                taller_id=current_user.id
+            )
+            if suggested_tech_info:
+                response_data.suggested_technician = SuggestedTechnicianInfo(**suggested_tech_info)
+                logger.debug(
+                    f"✅ Suggested technician populated for incident {incidente_id}: "
+                    f"{suggested_tech_info['first_name']} {suggested_tech_info['last_name']} "
+                    f"(score: {suggested_tech_info['final_score']:.2f})"
+                )
+        except Exception as e:
+            # No fallar si no se puede obtener el técnico sugerido
+            logger.warning(
+                f"Could not populate suggested_technician for incident {incidente_id}: {str(e)}"
+            )
+    
     return create_success_response(
         data=response_data.model_dump(mode='json'),
         message="Incidente obtenido exitosamente",
@@ -178,12 +200,47 @@ async def update_incidente_estado(
     """Actualizar el estado de un incidente."""
     service = IncidenteService(session)
     
+    # Get old status before update
+    incidente_before = await service.get_incidente(incidente_id, current_user.id, current_user.user_type)
+    old_status = incidente_before.estado_actual
+    
     incidente = await service.update_estado(
         incidente_id,
         request.estado,
         current_user.id,
         current_user.user_type
     )
+    
+    # ═══════════════════════════════════════════════════════════════════════
+    # ✅ EMIT WEBSOCKET EVENT FOR REAL-TIME UPDATE
+    # ═══════════════════════════════════════════════════════════════════════
+    try:
+        from ...core.websocket_events import emit_to_all, EventTypes
+        from datetime import datetime, UTC
+        
+        await emit_to_all(
+            event_type=EventTypes.INCIDENT_STATUS_CHANGED,
+            data={
+                "incident_id": incidente_id,
+                "old_status": old_status,
+                "new_status": request.estado,
+                "estado_actual": request.estado,
+                "changed_by": current_user.id,
+                "changed_by_role": current_user.user_type,
+                "timestamp": datetime.now(UTC).isoformat()
+            }
+        )
+        
+        logger.info(
+            f"✅ WebSocket event emitted: incident {incidente_id} status changed {old_status} → {request.estado}"
+        )
+        
+    except Exception as ws_err:
+        # ⚠️ NO fallar la operación si WebSocket falla
+        logger.error(
+            f"❌ Failed to emit WebSocket event for incident {incidente_id}: {str(ws_err)}"
+        )
+    # ═══════════════════════════════════════════════════════════════════════
     
     return create_success_response(
         data=IncidenteResponse.model_validate(incidente).model_dump(mode='json'),
@@ -324,7 +381,7 @@ async def reject_incidente(
     incidente = await service.reject_incidente(incidente_id, current_user.id, request.motivo)
     
     # 2. Activar reasignación automática
-    from ...services.reassignment_service import ReassignmentService
+    from ..assignment.reassignment_service import ReassignmentService
     
     reassignment_service = ReassignmentService(session)
     result = await reassignment_service.handle_rejection(
@@ -350,6 +407,124 @@ async def reject_incidente(
     
     return create_success_response(
         data=IncidenteResponse.model_validate(incidente).model_dump(mode='json'),
+        message=message,
+    )
+
+
+@router.post(
+    "/{incidente_id}/timeout",
+    status_code=status.HTTP_200_OK,
+    summary="Notificar timeout de asignación",
+    description="El frontend notifica que un incidente ha excedido el tiempo de respuesta y debe reasignarse",
+    dependencies=[Depends(require_permission(Permission.REQUEST_VIEW_INCOMING))],
+)
+async def notify_assignment_timeout(
+    incidente_id: int,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """
+    Notificar timeout de asignación y disparar reasignación automática.
+    
+    Este endpoint es llamado por el frontend cuando detecta que un incidente
+    ha excedido el tiempo de respuesta del taller asignado.
+    
+    Flow:
+    1. Verificar que el incidente existe y está pendiente
+    2. Marcar el assignment_attempt actual como 'timeout'
+    3. Disparar reasignación automática al siguiente taller
+    4. Emitir evento WebSocket de timeout
+    
+    Nota: El backend también tiene su propio sistema de verificación de timeouts
+    que se ejecuta cada 30 segundos. Este endpoint es un complemento para
+    notificaciones inmediatas desde el frontend.
+    """
+    logger.info(f"⏰ Timeout notification received for incident {incidente_id} from user {current_user.id}")
+    
+    # Importar servicios necesarios
+    from ..assignment.reassignment_service import ReassignmentService
+    from ...models.incidente import Incidente
+    from ...models.assignment_attempt import AssignmentAttempt
+    from sqlalchemy import select
+    
+    # 1. Verificar que el incidente existe
+    result = await session.execute(
+        select(Incidente).where(Incidente.id == incidente_id)
+    )
+    incidente = result.scalar_one_or_none()
+    
+    if not incidente:
+        raise NotFoundException(f"Incidente {incidente_id} no encontrado")
+    
+    # 2. Verificar que el incidente está en estado pendiente
+    if incidente.estado_actual != "pendiente":
+        logger.warning(
+            f"⚠️ Timeout notification for incident {incidente_id} but status is {incidente.estado_actual}"
+        )
+        return create_success_response(
+            data={"incident_id": incidente_id, "status": incidente.estado_actual},
+            message=f"El incidente ya no está pendiente (estado: {incidente.estado_actual})",
+        )
+    
+    # 3. Buscar el assignment_attempt pendiente más reciente
+    result = await session.execute(
+        select(AssignmentAttempt)
+        .where(
+            AssignmentAttempt.incident_id == incidente_id,
+            AssignmentAttempt.status == "pending"
+        )
+        .order_by(AssignmentAttempt.attempted_at.desc())
+    )
+    pending_attempt = result.scalar_one_or_none()
+    
+    if not pending_attempt:
+        logger.warning(f"⚠️ No pending assignment attempt found for incident {incidente_id}")
+        return create_success_response(
+            data={"incident_id": incidente_id},
+            message="No hay intentos de asignación pendientes para este incidente",
+        )
+    
+    # 4. Marcar el intento como timeout
+    pending_attempt.status = "timeout"
+    pending_attempt.responded_at = None  # No hubo respuesta
+    await session.commit()
+    
+    logger.info(
+        f"✅ Assignment attempt {pending_attempt.id} marked as timeout for incident {incidente_id}"
+    )
+    
+    # 5. Disparar reasignación automática
+    reassignment_service = ReassignmentService(session)
+    result = await reassignment_service.handle_timeout(
+        incident_id=incidente_id,
+        workshop_id=pending_attempt.workshop_id
+    )
+    
+    # 6. Preparar respuesta según resultado
+    if result.success:
+        message = (
+            f"Timeout procesado. Incidente reasignado automáticamente a "
+            f"{result.assigned_workshop.workshop_name if result.assigned_workshop else 'otro taller'}."
+        )
+        logger.info(f"✅ {message}")
+    else:
+        if "Max attempts" in result.error_message or "No workshops available" in result.error_message:
+            message = (
+                "Timeout procesado. No hay más talleres disponibles. "
+                "Se ha notificado al administrador para intervención manual."
+            )
+        else:
+            message = f"Timeout procesado. Error en reasignación: {result.error_message}"
+        logger.warning(f"⚠️ {message}")
+    
+    return create_success_response(
+        data={
+            "incident_id": incidente_id,
+            "timeout_processed": True,
+            "reassignment_success": result.success,
+            "new_workshop_id": result.assigned_workshop.id if result.assigned_workshop else None,
+            "new_workshop_name": result.assigned_workshop.workshop_name if result.assigned_workshop else None,
+        },
         message=message,
     )
 
@@ -396,7 +571,7 @@ async def anular_asignacion_ambigua(
     )
     
     # 2. Activar reasignación automática
-    from ...services.reassignment_service import ReassignmentService
+    from ..assignment.reassignment_service import ReassignmentService
     
     reassignment_service = ReassignmentService(session)
     result = await reassignment_service.handle_rejection(
@@ -734,3 +909,52 @@ async def get_incidente_rechazos(
         data=rechazos_data,
         message=f"Se encontraron {len(rechazos_data)} rechazos para este incidente",
     )
+
+
+class UploadPhotosRequest(BaseModel):
+    """Request para subir fotos adicionales a un incidente."""
+    photo_urls: List[str] = Field(..., min_items=1, max_items=10, description="Lista de URLs de fotos subidas")
+
+
+@router.post(
+    "/{incidente_id}/upload-photos",
+    response_model=IncidenteResponse,
+    summary="Subir fotos adicionales a un incidente",
+    description="Subir fotos adicionales a un incidente existente (cliente, técnico, taller o admin)",
+    dependencies=[Depends(require_permission(Permission.EMERGENCY_VIEW_OWN))],
+)
+async def upload_incident_photos(
+    incidente_id: int,
+    request: UploadPhotosRequest,
+    current_user: User = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """
+    Subir fotos adicionales a un incidente.
+    
+    Las fotos deben ser subidas primero usando el endpoint /incidentes/upload/image
+    y luego las URLs resultantes se envían aquí para asociarlas al incidente.
+    """
+    service = IncidenteService(session)
+    
+    try:
+        incidente = await service.upload_photos(
+            incidente_id=incidente_id,
+            photo_urls=request.photo_urls,
+            user_id=current_user.id,
+            user_type=current_user.user_type
+        )
+        
+        return create_success_response(
+            data=IncidenteResponse.model_validate(incidente),
+            message=f"{len(request.photo_urls)} foto(s) subida(s) exitosamente al incidente",
+        )
+    
+    except NotFoundException as e:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error al subir fotos al incidente {incidente_id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al subir fotos: {str(e)}"
+        )

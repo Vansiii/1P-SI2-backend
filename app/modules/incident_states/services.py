@@ -123,7 +123,7 @@ class IncidentStateService:
         )
 
         # Emit standardized service status WebSocket events (Task 16)
-        from ...core.websocket_events import emit_to_incident_room, EventTypes
+        from ...core.websocket_events import emit_to_incident_room, emit_to_all, EventTypes
         
         service_event_map = {
             "en_proceso": EventTypes.SERVICE_STARTED,
@@ -141,8 +141,15 @@ class IncidentStateService:
                 "timestamp": datetime.utcnow().isoformat()
             }
             
+            # Emit to incident room
             await emit_to_incident_room(
                 incident_id=incident_id,
+                event_type=service_event_type,
+                data=service_payload
+            )
+            
+            # ✅ Emit to ALL users
+            await emit_to_all(
                 event_type=service_event_type,
                 data=service_payload
             )
@@ -151,6 +158,18 @@ class IncidentStateService:
                 f"WebSocket event '{service_event_type}' emitted for incident {incident_id} "
                 f"(state: {new_state})"
             )
+        
+        # ✅ Always emit status change event to all users
+        await emit_to_all(
+            event_type=EventTypes.INCIDENT_STATUS_CHANGED,
+            data={
+                "incident_id": incident_id,
+                "estado_actual": new_state,
+                "new_status": new_state,
+                "changed_by": changed_by,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        )
 
         # Send push notification
         if self.push_service.is_enabled():
@@ -217,10 +236,170 @@ class IncidentStateService:
         elif new_state == "resuelto":
             # Set resolution timestamp
             incident.resolved_at = datetime.utcnow()
+            
+            # ✅ FREE TECHNICIAN: Mark as available again
+            if incident.tecnico_id:
+                from ...models.technician import Technician
+                technician = await self.session.get(Technician, incident.tecnico_id)
+                if technician:
+                    technician.is_on_duty = False
+                    technician.is_available = True
+                    technician.updated_at = datetime.utcnow()
+                    
+                    logger.info(
+                        f"✅ Técnico {incident.tecnico_id} liberado (is_on_duty=False, is_available=True) "
+                        f"por resolución de incidente {incident.id}"
+                    )
+                    
+                    # Broadcast technician status change to workshop
+                    from ...core.websocket import manager
+                    if technician.workshop_id:
+                        await manager.send_personal_message(technician.workshop_id, {
+                            "type": "technician_status_update",
+                            "data": {
+                                "technician_id": incident.tecnico_id,
+                                "is_available": True,
+                                "is_on_duty": False,
+                                "timestamp": datetime.utcnow().isoformat()
+                            }
+                        })
+                        
+                        logger.info(
+                            f"✅ WebSocket event 'technician_status_update' sent to workshop {technician.workshop_id} "
+                            f"for technician {incident.tecnico_id}"
+                        )
+                    
+                    # ✅ Publish dashboard event for active technicians count change
+                    from ...core.event_publisher import EventPublisher
+                    from ...shared.schemas.events.dashboard import DashboardActiveTechniciansChangedEvent
+                    from sqlalchemy import func, select
+                    
+                    # Recalculate active technicians count
+                    active_count = await self.session.scalar(
+                        select(func.count(Technician.id)).where(
+                            Technician.is_on_duty == True
+                        )
+                    ) or 0
+                    
+                    available_count = await self.session.scalar(
+                        select(func.count(Technician.id)).where(
+                            Technician.is_available == True
+                        )
+                    ) or 0
+                    
+                    dashboard_event = DashboardActiveTechniciansChangedEvent(
+                        active_count=active_count,
+                        available_count=available_count,
+                        on_duty_count=active_count
+                    )
+                    
+                    await EventPublisher.publish(self.session, dashboard_event)
+                    
+                    logger.info(
+                        f"✅ Dashboard event published: active={active_count}, available={available_count}"
+                    )
+            
+            # Close active tracking session
+            from ...models.tracking_session import TrackingSession
+            from sqlalchemy import select
+            result = await self.session.execute(
+                select(TrackingSession).where(
+                    TrackingSession.incidente_id == incident.id,
+                    TrackingSession.is_active == True
+                )
+            )
+            active_session = result.scalar_one_or_none()
+            
+            if active_session:
+                active_session.is_active = False
+                active_session.ended_at = datetime.utcnow()
+                logger.info(
+                    f"✅ Tracking session {active_session.id} closed for incident {incident.id}"
+                )
 
         elif new_state == "cancelado":
             # Set cancellation timestamp
             incident.cancelled_at = datetime.utcnow()
+            
+            # ✅ FREE TECHNICIAN: Mark as available again
+            if incident.tecnico_id:
+                from ...models.technician import Technician
+                technician = await self.session.get(Technician, incident.tecnico_id)
+                if technician:
+                    technician.is_on_duty = False
+                    technician.is_available = True
+                    technician.updated_at = datetime.utcnow()
+                    
+                    logger.info(
+                        f"✅ Técnico {incident.tecnico_id} liberado (is_on_duty=False, is_available=True) "
+                        f"por cancelación de incidente {incident.id}"
+                    )
+                    
+                    # Broadcast technician status change to workshop
+                    from ...core.websocket import manager
+                    if technician.workshop_id:
+                        await manager.send_personal_message(technician.workshop_id, {
+                            "type": "technician_status_update",
+                            "data": {
+                                "technician_id": incident.tecnico_id,
+                                "is_available": True,
+                                "is_on_duty": False,
+                                "timestamp": datetime.utcnow().isoformat()
+                            }
+                        })
+                        
+                        logger.info(
+                            f"✅ WebSocket event 'technician_status_update' sent to workshop {technician.workshop_id} "
+                            f"for technician {incident.tecnico_id}"
+                        )
+                    
+                    # ✅ Publish dashboard event for active technicians count change
+                    from ...core.event_publisher import EventPublisher
+                    from ...shared.schemas.events.dashboard import DashboardActiveTechniciansChangedEvent
+                    from sqlalchemy import func, select
+                    
+                    # Recalculate active technicians count
+                    active_count = await self.session.scalar(
+                        select(func.count(Technician.id)).where(
+                            Technician.is_on_duty == True
+                        )
+                    ) or 0
+                    
+                    available_count = await self.session.scalar(
+                        select(func.count(Technician.id)).where(
+                            Technician.is_available == True
+                        )
+                    ) or 0
+                    
+                    dashboard_event = DashboardActiveTechniciansChangedEvent(
+                        active_count=active_count,
+                        available_count=available_count,
+                        on_duty_count=active_count
+                    )
+                    
+                    await EventPublisher.publish(self.session, dashboard_event)
+                    
+                    logger.info(
+                        f"✅ Dashboard event published: active={active_count}, available={available_count}"
+                    )
+            
+            # Close active tracking session
+            from ...models.tracking_session import TrackingSession
+            from sqlalchemy import select
+            result = await self.session.execute(
+                select(TrackingSession).where(
+                    TrackingSession.incidente_id == incident.id,
+                    TrackingSession.is_active == True
+                )
+            )
+            active_session = result.scalar_one_or_none()
+            
+            if active_session:
+                active_session.is_active = False
+                active_session.ended_at = datetime.utcnow()
+                logger.info(
+                    f"✅ Tracking session {active_session.id} closed for incident {incident.id}"
+                )
 
     async def _send_state_notification(
         self,
@@ -247,14 +426,12 @@ class IncidentStateService:
             f"Estado del incidente actualizado a: {new_state}"
         )
 
-        await self.push_service.send_incident_notification(
-            user_id=incident.client_id,
-            incident_id=incident.id,
-            notification_type="incident_status_change",
-            title="Estado del incidente actualizado",
-            body=message,
-            additional_data={"new_state": new_state}
-        )
+        # ═══════════════════════════════════════════════════════════════════════
+        # ✅ NOTIFICACIONES MANEJADAS POR OUTBOX PROCESSOR
+        # El OutboxProcessor maneja todas las notificaciones automáticamente
+        # via EventPublisher → OutboxEvent → Delivery Strategies
+        # NO enviar notificaciones duplicadas aquí
+        # ═══════════════════════════════════════════════════════════════════════
 
     async def get_state_history(
         self,

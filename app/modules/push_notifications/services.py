@@ -51,7 +51,7 @@ class PushNotificationService:
         self._initialize_firebase()
 
     def _initialize_firebase(self):
-        """Initialize Firebase Admin SDK."""
+        """Initialize Firebase Admin SDK with support for both JSON string and file path."""
         try:
             # Check if Firebase is already initialized
             if firebase_admin._apps:
@@ -59,7 +59,19 @@ class PushNotificationService:
                 logger.info("Using existing Firebase app")
                 return
 
-            # Path to Firebase service account key
+            # Option 1: Try to load from JSON string (Railway/production)
+            if settings.firebase_credentials_json:
+                try:
+                    credentials_dict = json.loads(settings.firebase_credentials_json)
+                    cred = credentials.Certificate(credentials_dict)
+                    self._firebase_app = firebase_admin.initialize_app(cred)
+                    logger.info("Firebase Admin SDK initialized from JSON string (production mode)")
+                    return
+                except json.JSONDecodeError as e:
+                    logger.error(f"Invalid Firebase credentials JSON: {str(e)}")
+                    logger.warning("Falling back to file path method")
+
+            # Option 2: Try to load from file path (local development)
             service_account_path = Path(settings.firebase_service_account_path)
             
             if not service_account_path.exists():
@@ -67,10 +79,10 @@ class PushNotificationService:
                 logger.info("Push notifications will be disabled")
                 return
 
-            # Initialize Firebase
+            # Initialize Firebase from file
             cred = credentials.Certificate(str(service_account_path))
             self._firebase_app = firebase_admin.initialize_app(cred)
-            logger.info("Firebase Admin SDK initialized successfully")
+            logger.info("Firebase Admin SDK initialized from file (development mode)")
 
         except Exception as e:
             logger.error(f"Failed to initialize Firebase: {str(e)}")
@@ -406,7 +418,7 @@ class PushNotificationService:
         notification_data: PushNotificationData
     ):
         """
-        Save notification to database for history.
+        Save notification to database for history and emit WebSocket event.
         
         Args:
             user_id: ID of the user
@@ -414,6 +426,7 @@ class PushNotificationService:
         """
         try:
             import json
+            from datetime import datetime, UTC
             
             notification = Notification(
                 user_id=user_id,
@@ -421,11 +434,28 @@ class PushNotificationService:
                 title=notification_data.title,
                 message=notification_data.body,
                 data_json=json.dumps(notification_data.data or {}),  # Convertir dict a JSON string
-                created_at=datetime.utcnow()
+                created_at=datetime.now(UTC)
             )
             
             self.session.add(notification)
             await self.session.commit()
+            await self.session.refresh(notification)
+            
+            # 🔔 Emit WebSocket event to notify client about new notification
+            from ...core.websocket_events import emit_to_user, EventTypes
+            await emit_to_user(
+                user_id=user_id,
+                event_type=EventTypes.NOTIFICATION_CREATED,
+                data={
+                    "notification_id": notification.id,
+                    "user_id": user_id,
+                    "title": notification_data.title,
+                    "body": notification_data.body,
+                    "priority": "normal",
+                    "created_at": notification.created_at.isoformat(),
+                }
+            )
+            logger.info(f"✅ Notification saved and WebSocket event emitted for user {user_id}")
 
         except Exception as e:
             logger.error(f"Error saving notification to database: {str(e)}")

@@ -119,7 +119,7 @@ El parámetro `--host 0.0.0.0` permite que el servidor sea accesible desde otros
 La API estará disponible en:
 
 - Localhost: http://127.0.0.1:8000
-- Red local: http://TU_IP_LOCAL:8000 (ejemplo: http://192.168.1.2:8000)
+- Red local: http://TU_IP_LOCAL:8000 (ejemplo: http://192.168.1.4:8000)
 - Documentación Swagger: http://127.0.0.1:8000/docs
 - Documentación ReDoc: http://127.0.0.1:8000/redoc
 
@@ -221,6 +221,29 @@ ruff check .
 
 ## Producción
 
+### Despliegue en Railway
+
+Para desplegar en Railway, consulta la [Guía de Despliegue en Railway](docs/RAILWAY_DEPLOYMENT.md).
+
+**Resumen rápido:**
+
+1. **Credenciales de Firebase:** Usa el script helper para convertir el JSON:
+   ```bash
+   python scripts/prepare_firebase_for_railway.py firebase-service-account.json
+   ```
+   Luego copia la salida y pégala en Railway como variable `FIREBASE_CREDENTIALS_JSON`
+
+2. **Variables de entorno críticas en Railway:**
+   - `DATABASE_URL`: URL de Supabase con `?sslmode=require`
+   - `JWT_SECRET_KEY`: Clave segura única (32+ caracteres)
+   - `CORS_ORIGINS`: URLs de tu frontend
+   - `FIREBASE_CREDENTIALS_JSON`: JSON de Firebase en una línea
+   - `ENVIRONMENT=production`
+   - `DEBUG=false`
+
+3. **Build Command:** `pip install -r requirements.txt`
+4. **Start Command:** `uvicorn app.main:app --host 0.0.0.0 --port $PORT`
+
 ### Checklist de Seguridad
 
 - [ ] Cambiar `JWT_SECRET_KEY` a valor fuerte y único
@@ -236,13 +259,31 @@ ruff check .
 Asegúrate de configurar estas variables en producción:
 
 ```env
+# Seguridad
 JWT_SECRET_KEY=<clave-super-segura-minimo-32-caracteres>
-DATABASE_URL=<url-de-produccion>
+ENVIRONMENT=production
+DEBUG=false
+
+# Base de datos
+DATABASE_URL=<url-de-produccion-con-sslmode-require>
+
+# CORS
 CORS_ORIGINS=https://tu-dominio.com
+
+# Email
 EMAIL_FROM_ADDRESS=<email-verificado>
 BREVO_SMTP_USER=<credenciales-reales>
 BREVO_SMTP_PASSWORD=<credenciales-reales>
+
+# Firebase (Railway)
+FIREBASE_CREDENTIALS_JSON=<json-minificado-en-una-linea>
+FIREBASE_PROJECT_ID=<tu-project-id>
 ```
+
+## 📚 Documentación Adicional
+
+- [Guía de Despliegue en Railway](docs/RAILWAY_DEPLOYMENT.md)
+- [Scripts de Utilidad](scripts/README.md)
 
 ## Soporte
 

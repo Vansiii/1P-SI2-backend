@@ -8,7 +8,16 @@ from sqlalchemy import select, update, and_, func
 from sqlalchemy.orm import selectinload
 
 from ...core.logging import get_logger
-from ...core.websocket_events import emit_to_incident_room, EventTypes
+from ...core.event_publisher import EventPublisher
+from ...shared.schemas.events.tracking import (
+    TrackingSessionStartedEvent,
+    TrackingSessionEndedEvent
+)
+from ...shared.schemas.events.incident import (
+    IncidentTechnicianOnWayEvent,
+    IncidentTechnicianArrivedEvent,
+    IncidentWorkStartedEvent
+)
 from ...models.tracking_session import TrackingSession
 from ...models.technician_location_history import TechnicianLocationHistory
 from ...models.technician import Technician
@@ -59,6 +68,37 @@ class TrackingService:
             )
             if not incident:
                 raise NotFoundError(f"Incident {incident_id} not found")
+            
+            # ✅ VALIDAR TRANSICIÓN DE ESTADO CON STATE MACHINE
+            # When technician starts journey: ACEPTADO → EN_CAMINO
+            from ...core import IncidentStateMachine, ValidationException
+            
+            target_state = "en_camino"
+            
+            is_valid, error_message = IncidentStateMachine.can_transition(
+                from_state=incident.estado_actual,
+                to_state=target_state,
+                user_role="technician",
+                incident=incident
+            )
+            
+            if not is_valid:
+                logger.error(
+                    f"State Machine validation failed: Technician {technician_id} cannot start journey for "
+                    f"incident {incident_id} in state '{incident.estado_actual}': {error_message}"
+                )
+                raise ValidationError(error_message)
+            
+            # Save old status before update
+            old_status = incident.estado_actual
+            
+            # Update incident state to EN_CAMINO
+            incident.estado_actual = "en_camino"
+            incident.updated_at = datetime.utcnow()
+            
+            logger.info(
+                f"✅ Incident {incident_id} state changed to EN_CAMINO (technician starting journey)"
+            )
 
         # Check for existing active session
         existing_session = await self.session.scalar(
@@ -92,20 +132,104 @@ class TrackingService:
             f"Started tracking session {tracking_session.id} for technician {technician_id}"
         )
         
-        # Emit tracking_started event to incident room if incident is associated
+        # ═══════════════════════════════════════════════════════════════════════
+        # ✅ EMIT WEBSOCKET EVENT FOR REAL-TIME UPDATE (EN_CAMINO)
+        # ═══════════════════════════════════════════════════════════════════════
         if incident_id:
-            await emit_to_incident_room(
-                incident_id=incident_id,
-                event_type=EventTypes.TRACKING_STARTED,
-                data={
-                    "tracking_session_id": tracking_session.id,
-                    "technician_id": technician_id,
-                    "incident_id": incident_id,
-                    "started_at": tracking_session.started_at.isoformat(),
-                    "timestamp": datetime.utcnow().isoformat()
-                }
+            try:
+                from ...core.websocket_events import emit_to_all, EventTypes
+                from datetime import datetime, UTC
+                
+                await emit_to_all(
+                    event_type=EventTypes.INCIDENT_STATUS_CHANGED,
+                    data={
+                        "incident_id": incident_id,
+                        "old_status": old_status,
+                        "new_status": "en_camino",
+                        "estado_actual": "en_camino",
+                        "technician_id": technician_id,
+                        "changed_by": technician_id,
+                        "changed_by_role": "technician",
+                        "timestamp": datetime.now(UTC).isoformat()
+                    }
+                )
+                
+                logger.info(
+                    f"✅ WebSocket event emitted: incident {incident_id} status changed {old_status} → en_camino"
+                )
+                
+            except Exception as ws_err:
+                # ⚠️ NO fallar la operación si WebSocket falla
+                logger.error(
+                    f"❌ Failed to emit WebSocket event for incident {incident_id}: {str(ws_err)}"
+                )
+        # ═══════════════════════════════════════════════════════════════════════
+        
+        # Publish TrackingSessionStartedEvent to outbox for reliable delivery
+        if incident_id:
+            tracking_event = TrackingSessionStartedEvent(
+                tracking_session_id=tracking_session.id,
+                technician_id=technician_id,
+                incident_id=incident_id
             )
-            logger.info(f"Emitted tracking_started event for session {tracking_session.id}")
+            await EventPublisher.publish(self.session, tracking_event)
+            await self.session.commit()
+            logger.info(f"Published tracking_started event for session {tracking_session.id}")
+            
+            # ═══════════════════════════════════════════════════════════════════════
+            # ✅ PUBLICAR EVENTO DE TÉCNICO EN CAMINO
+            # ═══════════════════════════════════════════════════════════════════════
+            try:
+                # Get technician's current location if available
+                latest_location = await self.session.scalar(
+                    select(TechnicianLocationHistory)
+                    .where(TechnicianLocationHistory.technician_id == technician_id)
+                    .order_by(TechnicianLocationHistory.recorded_at.desc())
+                    .limit(1)
+                )
+                
+                current_location = {
+                    "latitude": float(latest_location.latitude) if latest_location else 0.0,
+                    "longitude": float(latest_location.longitude) if latest_location else 0.0
+                }
+                
+                # Calculate ETA and distance if we have location
+                eta_minutes = None
+                distance_km = None
+                if latest_location and incident:
+                    distance_km = self._haversine_distance(
+                        float(latest_location.latitude),
+                        float(latest_location.longitude),
+                        float(incident.latitude),
+                        float(incident.longitude)
+                    )
+                    # Estimate ETA: assume 40 km/h average speed in city
+                    eta_minutes = int((distance_km / 40) * 60)
+                
+                technician_on_way_event = IncidentTechnicianOnWayEvent(
+                    incident_id=incident_id,
+                    technician_id=technician_id,
+                    technician_name=f"{technician.first_name} {technician.last_name}",
+                    current_location=current_location,
+                    eta=eta_minutes,
+                    distance_km=distance_km
+                )
+                
+                await EventPublisher.publish(self.session, technician_on_way_event)
+                await self.session.commit()
+                
+                logger.info(
+                    f"✅ Evento TECHNICIAN_ON_WAY publicado para incidente {incident_id}",
+                    technician_id=technician_id,
+                    eta_minutes=eta_minutes
+                )
+                
+            except Exception as e:
+                logger.error(
+                    f"❌ Error publicando evento TECHNICIAN_ON_WAY: {str(e)}",
+                    exc_info=True
+                )
+            # ═══════════════════════════════════════════════════════════════════════
         
         return tracking_session
 
@@ -160,22 +284,17 @@ class TrackingService:
             f"distance: {tracking_session.total_distance_km} km"
         )
         
-        # Emit tracking_ended event to incident room if incident is associated
+        # Publish TrackingSessionEndedEvent to outbox for reliable delivery
         if tracking_session.incidente_id:
-            await emit_to_incident_room(
+            tracking_event = TrackingSessionEndedEvent(
+                tracking_session_id=tracking_session.id,
+                technician_id=tracking_session.technician_id,
                 incident_id=tracking_session.incidente_id,
-                event_type=EventTypes.TRACKING_ENDED,
-                data={
-                    "tracking_session_id": tracking_session.id,
-                    "technician_id": tracking_session.technician_id,
-                    "incident_id": tracking_session.incidente_id,
-                    "started_at": tracking_session.started_at.isoformat(),
-                    "ended_at": tracking_session.ended_at.isoformat(),
-                    "total_distance_km": float(tracking_session.total_distance_km or 0),
-                    "timestamp": datetime.utcnow().isoformat()
-                }
+                total_distance_km=float(tracking_session.total_distance_km or 0)
             )
-            logger.info(f"Emitted tracking_ended event for session {session_id}")
+            await EventPublisher.publish(self.session, tracking_event)
+            await self.session.commit()
+            logger.info(f"Published tracking_ended event for session {session_id}")
         
         return tracking_session
 
@@ -472,3 +591,164 @@ class TrackingService:
             "average_distance_km": round(avg_distance, 2),
             "average_duration_minutes": round(avg_duration_minutes, 2)
         }
+
+
+    async def mark_technician_arrived(
+        self,
+        incident_id: int,
+        technician_id: int,
+        arrival_latitude: float,
+        arrival_longitude: float
+    ) -> Incidente:
+        """
+        Mark that a technician has arrived at the incident location.
+        
+        This method:
+        1. Validates the state transition (EN_CAMINO → EN_PROCESO)
+        2. Updates the incident state
+        3. Records the arrival in tracking session
+        4. Publishes IncidentTechnicianArrivedEvent
+        
+        Args:
+            incident_id: ID of the incident
+            technician_id: ID of the technician
+            arrival_latitude: Latitude where technician arrived
+            arrival_longitude: Longitude where technician arrived
+            
+        Returns:
+            Updated incident
+            
+        Raises:
+            NotFoundError: If incident or technician not found
+            ValidationError: If state transition is invalid
+        """
+        # Get incident
+        incident = await self.session.scalar(
+            select(Incidente).where(Incidente.id == incident_id)
+        )
+        if not incident:
+            raise NotFoundError(f"Incident {incident_id} not found")
+        
+        # Get technician
+        technician = await self.session.scalar(
+            select(Technician).where(Technician.id == technician_id)
+        )
+        if not technician:
+            raise NotFoundError(f"Technician {technician_id} not found")
+        
+        # ✅ VALIDAR TRANSICIÓN DE ESTADO CON STATE MACHINE
+        # When technician arrives: EN_CAMINO → EN_PROCESO
+        from ...core import IncidentStateMachine, ValidationException
+        
+        target_state = "en_proceso"
+        
+        is_valid, error_message = IncidentStateMachine.can_transition(
+            from_state=incident.estado_actual,
+            to_state=target_state,
+            user_role="technician",
+            incident=incident
+        )
+        
+        if not is_valid:
+            logger.error(
+                f"State Machine validation failed: Technician {technician_id} cannot mark arrival for "
+                f"incident {incident_id} in state '{incident.estado_actual}': {error_message}"
+            )
+            raise ValidationError(error_message)
+        
+        # Save old status before update
+        old_status = incident.estado_actual
+        
+        # Update incident state to EN_PROCESO
+        incident.estado_actual = "en_proceso"
+        incident.updated_at = datetime.utcnow()
+        
+        # Update tracking session with arrival info
+        tracking_session = await self.session.scalar(
+            select(TrackingSession).where(
+                and_(
+                    TrackingSession.incidente_id == incident_id,
+                    TrackingSession.technician_id == technician_id,
+                    TrackingSession.is_active == True
+                )
+            )
+        )
+        
+        if tracking_session:
+            tracking_session.arrived_at = datetime.utcnow()
+        
+        await self.session.commit()
+        await self.session.refresh(incident)
+        
+        logger.info(
+            f"✅ Technician {technician_id} marked as arrived at incident {incident_id}. "
+            f"State changed to EN_PROCESO"
+        )
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # ✅ EMIT WEBSOCKET EVENT FOR REAL-TIME UPDATE (TECHNICIAN ARRIVED)
+        # ═══════════════════════════════════════════════════════════════════════
+        try:
+            from ...core.websocket_events import emit_to_all, EventTypes
+            from datetime import datetime, UTC
+            
+            await emit_to_all(
+                event_type=EventTypes.INCIDENT_STATUS_CHANGED,
+                data={
+                    "incident_id": incident_id,
+                    "old_status": old_status,
+                    "new_status": "en_proceso",
+                    "estado_actual": "en_proceso",
+                    "technician_id": technician_id,
+                    "changed_by": technician_id,
+                    "changed_by_role": "technician",
+                    "arrival_location": {
+                        "latitude": arrival_latitude,
+                        "longitude": arrival_longitude
+                    },
+                    "timestamp": datetime.now(UTC).isoformat()
+                }
+            )
+            
+            logger.info(
+                f"✅ WebSocket event emitted: incident {incident_id} status changed {old_status} → en_proceso (technician arrived)"
+            )
+            
+        except Exception as ws_err:
+            # ⚠️ NO fallar la operación si WebSocket falla
+            logger.error(
+                f"❌ Failed to emit WebSocket event for incident {incident_id}: {str(ws_err)}"
+            )
+        # ═══════════════════════════════════════════════════════════════════════
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # ✅ PUBLICAR EVENTO DE TÉCNICO LLEGÓ
+        # ═══════════════════════════════════════════════════════════════════════
+        try:
+            technician_arrived_event = IncidentTechnicianArrivedEvent(
+                incident_id=incident_id,
+                technician_id=technician_id,
+                technician_name=f"{technician.first_name} {technician.last_name}",
+                arrival_time=datetime.utcnow(),
+                location={
+                    "latitude": arrival_latitude,
+                    "longitude": arrival_longitude
+                }
+            )
+            
+            await EventPublisher.publish(self.session, technician_arrived_event)
+            await self.session.commit()
+            
+            logger.info(
+                f"✅ Evento TECHNICIAN_ARRIVED publicado para incidente {incident_id}",
+                technician_id=technician_id
+            )
+            
+        except Exception as e:
+            logger.error(
+                f"❌ Error publicando evento TECHNICIAN_ARRIVED: {str(e)}",
+                exc_info=True
+            )
+        # ═══════════════════════════════════════════════════════════════════════
+        
+        return incident

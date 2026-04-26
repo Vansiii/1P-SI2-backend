@@ -7,6 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_, or_
 
 from ...core.logging import get_logger
+from ...core.event_publisher import EventPublisher
+from ...shared.schemas.events.dashboard import DashboardMetricsUpdatedEvent
 from ...models.incidente import Incidente
 from ...models.technician import Technician
 from ...models.workshop import Workshop
@@ -434,3 +436,106 @@ class MetricsService:
             {"category": row[0], "count": row[1]}
             for row in result.all()
         ]
+
+    async def calculate_metrics(self) -> Dict:
+        """
+        Calculate current dashboard metrics for real-time updates.
+        
+        Returns:
+            Dictionary with current system metrics
+        """
+        now = datetime.utcnow()
+        today_start = datetime(now.year, now.month, now.day)
+        
+        # Total incidents (all time)
+        total_incidents = await self.session.scalar(
+            select(func.count(Incidente.id))
+        ) or 0
+        
+        # Active incidents (not resolved or cancelled)
+        active_incidents = await self.session.scalar(
+            select(func.count(Incidente.id))
+            .where(
+                Incidente.estado_actual.in_([
+                    "pendiente", "asignado", "en_camino", "en_sitio"
+                ])
+            )
+        ) or 0
+        
+        # Completed today
+        completed_today = await self.session.scalar(
+            select(func.count(Incidente.id))
+            .where(
+                and_(
+                    Incidente.estado_actual == "resuelto",
+                    Incidente.resolved_at >= today_start
+                )
+            )
+        ) or 0
+        
+        # Average response time (last 24 hours)
+        avg_response_time = await self.session.scalar(
+            select(func.avg(
+                func.extract('epoch', Incidente.assigned_at - Incidente.created_at) / 60
+            ))
+            .where(
+                and_(
+                    Incidente.assigned_at.isnot(None),
+                    Incidente.created_at >= now - timedelta(hours=24)
+                )
+            )
+        )
+        
+        # Active technicians (online and available)
+        active_technicians = await self.session.scalar(
+            select(func.count(Technician.id))
+            .where(
+                and_(
+                    Technician.is_available == True,
+                    Technician.is_online == True
+                )
+            )
+        ) or 0
+        
+        return {
+            "total_incidents": total_incidents,
+            "active_incidents": active_incidents,
+            "completed_today": completed_today,
+            "avg_response_time": round(avg_response_time, 2) if avg_response_time else None,
+            "active_technicians": active_technicians
+        }
+    
+    async def publish_metrics_update(self) -> None:
+        """
+        Calculate and publish dashboard metrics update event.
+        
+        This method should be called periodically (e.g., every 1 minute)
+        to update dashboard metrics in real-time.
+        """
+        try:
+            metrics = await self.calculate_metrics()
+            
+            # Create and publish event
+            event = DashboardMetricsUpdatedEvent(
+                total_incidents=metrics["total_incidents"],
+                active_incidents=metrics["active_incidents"],
+                completed_today=metrics["completed_today"],
+                avg_response_time=metrics["avg_response_time"],
+                active_technicians=metrics["active_technicians"]
+            )
+            
+            await EventPublisher.publish(self.session, event)
+            await self.session.commit()
+            
+            logger.debug(
+                f"✅ Dashboard metrics updated: "
+                f"total={metrics['total_incidents']}, "
+                f"active={metrics['active_incidents']}, "
+                f"completed_today={metrics['completed_today']}"
+            )
+            
+        except Exception as e:
+            logger.error(
+                f"❌ Error publishing dashboard metrics: {str(e)}",
+                exc_info=True
+            )

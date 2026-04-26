@@ -3,7 +3,8 @@ Modelo para historial de ubicaciones de técnicos.
 """
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Numeric, func
+from sqlalchemy import DateTime, ForeignKey, Numeric, func, Index
+import sqlalchemy as sa
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base
@@ -16,6 +17,13 @@ class TechnicianLocationHistory(Base):
     """
 
     __tablename__ = "technician_location_history"
+    __table_args__ = (
+        # Performance index for location tracking queries
+        Index(
+            'idx_tech_location_history_tech_recorded',
+            'technician_id', sa.text('recorded_at DESC')
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     technician_id: Mapped[int] = mapped_column(ForeignKey("technicians.id"), nullable=False, index=True)

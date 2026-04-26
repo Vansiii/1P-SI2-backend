@@ -28,11 +28,11 @@ def get_engine() -> AsyncEngine:
         
         engine = create_async_engine(
             database_url,
-            pool_pre_ping=True,
-            pool_size=settings.db_pool_size,
-            max_overflow=settings.db_max_overflow,
-            pool_timeout=settings.db_pool_timeout,
-            pool_recycle=3600,  # Recycle connections every hour
+            pool_pre_ping=True,  # Test connections before using them
+            pool_size=settings.db_pool_size,  # Number of connections to maintain in the pool
+            max_overflow=settings.db_max_overflow,  # Additional connections beyond pool_size
+            pool_timeout=settings.db_pool_timeout,  # Seconds to wait for a connection
+            pool_recycle=settings.db_pool_recycle,  # Recycle connections after this many seconds
             echo=False,  # Disable SQL query logging for cleaner output
             connect_args={
                 "server_settings": {
@@ -41,6 +41,7 @@ def get_engine() -> AsyncEngine:
                 },
                 "command_timeout": 30,  # 30 seconds timeout for commands
                 "timeout": 30,  # Connection timeout
+                "statement_cache_size": 0,  # Disable prepared statements for pgbouncer transaction mode
             },
         )
         
@@ -49,7 +50,8 @@ def get_engine() -> AsyncEngine:
             extra={
                 "pool_size": settings.db_pool_size,
                 "max_overflow": settings.db_max_overflow,
-                "timeout": settings.db_pool_timeout,
+                "pool_timeout": settings.db_pool_timeout,
+                "pool_recycle": settings.db_pool_recycle,
             }
         )
 
@@ -100,21 +102,20 @@ async def test_database_connection(max_retries: int = 3) -> None:
         except Exception as exc:
             if attempt == max_retries - 1:
                 logger.error(
-                    "Failed to connect to database after %d attempts", 
+                    "Failed to connect to database after %d attempts: %s", 
                     max_retries,
-                    exc_info=True
+                    str(exc)
                 )
                 raise RuntimeError(
                     "No se pudo conectar a la base de datos de Supabase. "
                     "Revisa DATABASE_URL en .env"
                 ) from exc
             
-            wait_time = 2 ** attempt  # Exponential backoff
-            logger.warning(
-                "Database connection attempt %d failed, retrying in %d seconds",
+            wait_time = 1  # Fixed 1 second wait
+            logger.info(
+                "Database connection attempt %d failed, retrying in %d second...",
                 attempt + 1,
-                wait_time,
-                exc_info=True
+                wait_time
             )
             await asyncio.sleep(wait_time)
 

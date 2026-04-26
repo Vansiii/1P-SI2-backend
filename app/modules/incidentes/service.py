@@ -4,11 +4,28 @@ Service para gestión de incidentes.
 from datetime import datetime, UTC
 from typing import List, Optional, Tuple
 
-from sqlalchemy import update, select
+from sqlalchemy import update, select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...core import get_logger, NotFoundException, ForbiddenException
-from ...core.websocket_events import emit_to_incident_room, EventTypes
+from ...core.event_publisher import EventPublisher
+from ...shared.schemas.events.incident import (
+    IncidentCreatedEvent,
+    IncidentAssignmentAcceptedEvent,
+    IncidentAssignmentRejectedEvent,
+    IncidentStatusChangedEvent,
+    IncidentCancelledEvent
+)
+from ...shared.schemas.events.evidence import (
+    EvidenceUploadedEvent,
+    EvidenceImageUploadedEvent,
+    EvidenceAudioUploadedEvent,
+    EvidenceDeletedEvent
+)
+from ...shared.schemas.events.dashboard import (
+    DashboardIncidentCountChangedEvent,
+    DashboardActiveTechniciansChangedEvent
+)
 from ...models.incidente import Incidente
 from ...models.evidencia import Evidencia
 from ...models.evidencia_imagen import EvidenciaImagen
@@ -27,6 +44,92 @@ class IncidenteService:
     def __init__(self, session: AsyncSession):
         self.session = session
         self.repository = IncidenteRepository(session)
+    
+    async def _publish_incident_count_changed(
+        self,
+        status: str,
+        delta: int
+    ) -> None:
+        """
+        Publicar evento de cambio en contador de incidentes por estado.
+        
+        Args:
+            status: Estado del incidente
+            delta: Cambio en el contador (+1 para incremento, -1 para decremento)
+        """
+        try:
+            # Calcular el contador actual para este estado
+            count = await self.session.scalar(
+                select(func.count(Incidente.id)).where(
+                    Incidente.estado_actual == status
+                )
+            )
+            
+            # Crear y publicar evento
+            event = DashboardIncidentCountChangedEvent(
+                status=status,
+                count=count or 0,
+                delta=delta
+            )
+            
+            await EventPublisher.publish(self.session, event)
+            
+            logger.info(
+                f"✅ Evento DASHBOARD_INCIDENT_COUNT_CHANGED publicado: status={status}, count={count}, delta={delta}"
+            )
+            
+        except Exception as e:
+            logger.error(
+                f"❌ Error publicando evento DASHBOARD_INCIDENT_COUNT_CHANGED: {str(e)}",
+                exc_info=True
+            )
+    
+    async def _publish_active_technicians_changed(self) -> None:
+        """
+        Publicar evento de cambio en contadores de técnicos activos.
+        
+        Calcula:
+        - active_count: Técnicos con is_on_duty=True
+        - available_count: Técnicos con is_available=True
+        - on_duty_count: Técnicos con is_on_duty=True (mismo que active_count)
+        """
+        try:
+            # Contar técnicos activos (en servicio)
+            active_count = await self.session.scalar(
+                select(func.count(Technician.id)).where(
+                    Technician.is_on_duty == True
+                )
+            ) or 0
+            
+            # Contar técnicos disponibles
+            available_count = await self.session.scalar(
+                select(func.count(Technician.id)).where(
+                    Technician.is_available == True
+                )
+            ) or 0
+            
+            # on_duty_count es lo mismo que active_count
+            on_duty_count = active_count
+            
+            # Crear y publicar evento
+            event = DashboardActiveTechniciansChangedEvent(
+                active_count=active_count,
+                available_count=available_count,
+                on_duty_count=on_duty_count
+            )
+            
+            await EventPublisher.publish(self.session, event)
+            
+            logger.info(
+                f"✅ Evento DASHBOARD_ACTIVE_TECHNICIANS_CHANGED publicado: "
+                f"active={active_count}, available={available_count}, on_duty={on_duty_count}"
+            )
+            
+        except Exception as e:
+            logger.error(
+                f"❌ Error publicando evento DASHBOARD_ACTIVE_TECHNICIANS_CHANGED: {str(e)}",
+                exc_info=True
+            )
     
     async def create_incidente(
         self,
@@ -98,18 +201,22 @@ class IncidenteService:
                     uploaded_by=client_id,
                 )
                 evidencia_imagen_created = await self.repository.create_evidencia_imagen(evidencia_imagen)
-                # Emit image evidence event after each image is saved
-                await emit_to_incident_room(
-                    incident_id=created_incidente.id,
-                    event_type=EventTypes.EVIDENCE_IMAGE_UPLOADED,
-                    data={
-                        "evidence_id": evidencia_img_created.id,
-                        "incident_id": created_incidente.id,
-                        "evidence_type": "image",
-                        "file_url": imagen_url,
-                        "timestamp": datetime.now(UTC).isoformat(),
-                    }
-                )
+                
+                # Publicar evento de imagen subida
+                try:
+                    image_event = EvidenceImageUploadedEvent(
+                        evidence_id=evidencia_img_created.id,
+                        evidence_image_id=evidencia_imagen_created.id,
+                        incident_id=created_incidente.id,
+                        file_url=imagen_url,
+                        file_name="incident_image.jpg",
+                        mime_type="image/jpeg",
+                        file_size=0,
+                        uploaded_by=client_id
+                    )
+                    await EventPublisher.publish(self.session, image_event)
+                except Exception as e:
+                    logger.error(f"Error publicando evento de imagen: {str(e)}", exc_info=True)
         
         # Crear evidencias de audios
         if request.audios:
@@ -132,31 +239,40 @@ class IncidenteService:
                     uploaded_by=client_id,
                 )
                 evidencia_audio_item_created = await self.repository.create_evidencia_audio(evidencia_audio)
-                # Emit audio evidence event after each audio is saved
-                await emit_to_incident_room(
-                    incident_id=created_incidente.id,
-                    event_type=EventTypes.EVIDENCE_AUDIO_UPLOADED,
-                    data={
-                        "evidence_id": evidencia_audio_created.id,
-                        "incident_id": created_incidente.id,
-                        "evidence_type": "audio",
-                        "file_url": audio_url,
-                        "timestamp": datetime.now(UTC).isoformat(),
-                    }
-                )
+                
+                # Publicar evento de audio subido
+                try:
+                    audio_event = EvidenceAudioUploadedEvent(
+                        evidence_id=evidencia_audio_created.id,
+                        evidence_audio_id=evidencia_audio_item_created.id,
+                        incident_id=created_incidente.id,
+                        file_url=audio_url,
+                        file_name="incident_audio.mp3",
+                        mime_type="audio/mpeg",
+                        file_size=0,
+                        duration_seconds=None,
+                        uploaded_by=client_id
+                    )
+                    await EventPublisher.publish(self.session, audio_event)
+                except Exception as e:
+                    logger.error(f"Error publicando evento de audio: {str(e)}", exc_info=True)
         
-        # Emit generic evidence_uploaded for the text evidence
-        await emit_to_incident_room(
-            incident_id=created_incidente.id,
-            event_type=EventTypes.EVIDENCE_UPLOADED,
-            data={
-                "evidence_id": evidencia_texto_created.id,
-                "incident_id": created_incidente.id,
-                "evidence_type": "text",
-                "file_url": None,
-                "timestamp": datetime.now(UTC).isoformat(),
-            }
-        )
+        # Publicar evento genérico de evidencia de texto
+        try:
+            text_evidence_event = EvidenceUploadedEvent(
+                evidence_id=evidencia_texto_created.id,
+                incident_id=created_incidente.id,
+                evidence_type="TEXT",
+                uploaded_by=client_id,
+                uploaded_by_role="client",
+                file_url=None,
+                file_name=None,
+                file_size=None,
+                description=request.descripcion
+            )
+            await EventPublisher.publish(self.session, text_evidence_event)
+        except Exception as e:
+            logger.error(f"Error publicando evento de evidencia de texto: {str(e)}", exc_info=True)
         
         # Commit all changes
         await self.session.commit()
@@ -183,13 +299,25 @@ class IncidenteService:
             async def auto_assign_after_ai():
                 """Background task to assign incident after AI processing completes."""
                 try:
-                    # Wait for AI processing to complete (check every second, max 15 seconds)
+                    # Wait for AI processing to complete with timeout
                     from ...core.database import get_session_factory
+                    from ...core.config import get_settings
                     session_factory = get_session_factory()
+                    settings = get_settings()
                     
-                    max_wait_seconds = 15
-                    for i in range(max_wait_seconds):
-                        await asyncio.sleep(1)
+                    check_interval = 2  # Revisar cada 2 segundos
+                    elapsed_seconds = 0
+                    max_wait_seconds = settings.ai_assignment_wait_timeout_seconds  # ✅ TIMEOUT MÁXIMO
+                    
+                    logger.info(
+                        f"⏳ Waiting for AI analysis to complete for incident {created_incidente.id} "
+                        f"(max wait: {max_wait_seconds}s)..."
+                    )
+                    
+                    # Esperar hasta el timeout máximo
+                    while elapsed_seconds < max_wait_seconds:
+                        await asyncio.sleep(check_interval)
+                        elapsed_seconds += check_interval
                         
                         # Check if AI analysis is complete
                         async with session_factory() as check_session:
@@ -204,39 +332,53 @@ class IncidenteService:
                             # AI is complete if prioridad_ia and categoria_ia are set
                             if incident and incident.prioridad_ia and incident.categoria_ia:
                                 logger.info(
-                                    f"AI analysis complete for incident {created_incidente.id} "
+                                    f"✅ AI analysis complete for incident {created_incidente.id} "
                                     f"(prioridad={incident.prioridad_ia}, categoria={incident.categoria_ia}) "
-                                    f"after {i+1} seconds"
+                                    f"after {elapsed_seconds} seconds"
                                 )
+                                
+                                # Note: AI analysis completion event will be published by the AI service
+                                # when it completes the analysis
+                                
                                 break
-                    else:
-                        logger.warning(
-                            f"AI analysis not complete after {max_wait_seconds} seconds, "
-                            f"proceeding with assignment anyway"
-                        )
+                            
+                            # Log de progreso cada 30 segundos
+                            if elapsed_seconds % 30 == 0:
+                                logger.info(
+                                    f"⏳ Still waiting for AI analysis for incident {created_incidente.id} "
+                                    f"({elapsed_seconds}/{max_wait_seconds} seconds elapsed)..."
+                                )
                     
-                    # Now assign with AI-determined priority
+                    # ✅ TIMEOUT: Si llegamos aquí sin completar, proceder sin IA
+                    if elapsed_seconds >= max_wait_seconds:
+                        logger.warning(
+                            f"⚠️ AI analysis TIMEOUT for incident {created_incidente.id} "
+                            f"after {max_wait_seconds} seconds. Proceeding with assignment without AI priority."
+                        )
+                        # Continuar con asignación usando prioridad por defecto
+                    
+                    # Now assign with AI-determined priority (or default if timeout)
                     async with session_factory() as bg_session:
                         assignment_service = IntelligentAssignmentService(bg_session)
                         result = await assignment_service.assign_incident_automatically(
                             incident_id=created_incidente.id,
-                            force_ai_analysis=False  # AI already ran
+                            force_ai_analysis=False  # AI already ran (or timed out)
                         )
                         
                         if result.success:
                             logger.info(
-                                f"Automatic assignment successful for new incident {created_incidente.id}: "
+                                f"✅ Automatic assignment successful for new incident {created_incidente.id}: "
                                 f"workshop={result.assigned_workshop.workshop_name}, "
                                 f"technician={result.assigned_technician.first_name} {result.assigned_technician.last_name}"
                             )
                         else:
                             logger.warning(
-                                f"Automatic assignment failed for new incident {created_incidente.id}: "
+                                f"⚠️ Automatic assignment failed for new incident {created_incidente.id}: "
                                 f"{result.error_message}"
                             )
                             
                 except Exception as e:
-                    logger.error(f"Background auto-assignment failed for incident {created_incidente.id}: {str(e)}", exc_info=True)
+                    logger.error(f"❌ Background auto-assignment failed for incident {created_incidente.id}: {str(e)}", exc_info=True)
             
             # Schedule the background task using asyncio.create_task
             asyncio.create_task(auto_assign_after_ai())
@@ -248,6 +390,53 @@ class IncidenteService:
                 incidente_id=created_incidente.id,
                 error=str(exc),
             )
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # ✅ PUBLICAR EVENTO DE INCIDENTE CREADO AL OUTBOX
+        # ═══════════════════════════════════════════════════════════════════════
+        # El OutboxProcessor se encargará de entregar el evento a los destinatarios
+        # apropiados (administradores en este caso)
+        # ═══════════════════════════════════════════════════════════════════════
+        
+        try:
+            # Crear evento de incidente creado
+            incident_event = IncidentCreatedEvent(
+                incident_id=created_incidente.id,
+                client_id=client_id,
+                location={
+                    "latitude": float(request.latitude),
+                    "longitude": float(request.longitude),
+                    "address": request.direccion_referencia
+                },
+                description=request.descripcion,
+                photos=[],  # Las imágenes se agregan después si existen
+                vehicle_id=request.vehiculo_id
+            )
+            
+            # Publicar al outbox (se entregará de forma confiable)
+            await EventPublisher.publish(self.session, incident_event)
+            await self.session.commit()
+            
+            logger.info(
+                f"✅ Evento INCIDENT_CREATED publicado al outbox para incidente {created_incidente.id}",
+                incidente_id=created_incidente.id,
+                client_id=client_id
+            )
+            
+        except Exception as e:
+            # No fallar la creación si la publicación del evento falla
+            logger.error(
+                f"❌ Error publicando evento INCIDENT_CREATED para incidente {created_incidente.id}: {str(e)}",
+                exc_info=True
+            )
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # ✅ PUBLICAR EVENTO DE CAMBIO EN CONTADOR DE INCIDENTES (DASHBOARD)
+        # ═══════════════════════════════════════════════════════════════════════
+        # Nuevo incidente creado en estado "pendiente" → incrementar contador
+        await self._publish_incident_count_changed(status="pendiente", delta=+1)
+        await self.session.commit()
+        # ═══════════════════════════════════════════════════════════════════════
         
         return created_incidente
     
@@ -391,10 +580,25 @@ class IncidenteService:
         if not incidente:
             raise NotFoundException(f"Incidente con ID {incidente_id} no encontrado")
         
-        # Verificar que el incidente esté pendiente
-        if incidente.estado_actual != "pendiente":
-            from ...core import ValidationException
-            raise ValidationException(f"El incidente ya no está pendiente (estado actual: {incidente.estado_actual})")
+        # ✅ VALIDAR TRANSICIÓN DE ESTADO CON STATE MACHINE
+        from ...core import IncidentStateMachine, ValidationException
+        
+        # El taller acepta el incidente: transición a "aceptado"
+        target_state = "aceptado"
+        
+        is_valid, error_message = IncidentStateMachine.can_transition(
+            from_state=incidente.estado_actual,
+            to_state=target_state,
+            user_role="workshop",
+            incident=incidente
+        )
+        
+        if not is_valid:
+            logger.error(
+                f"State Machine validation failed: Workshop {taller_id} cannot accept "
+                f"incident {incidente_id} in state '{incidente.estado_actual}': {error_message}"
+            )
+            raise ValidationException(error_message)
         
         # Buscar el assignment_attempt para obtener el técnico sugerido
         suggested_technician_id = None
@@ -505,6 +709,10 @@ class IncidenteService:
                 estado="asignado"
             )
         
+        # Guardar el estado anterior para los eventos de dashboard
+        estado_anterior = "pendiente"  # Siempre viene de pendiente cuando se acepta
+        nuevo_estado = incidente.estado_actual
+        
         # Commit changes
         await self.session.commit()
         
@@ -552,94 +760,106 @@ class IncidenteService:
         )
         incidente = result.scalar_one()
         
-        # Emit WebSocket event for assignment_accepted (Task 14)
-        from ...core.websocket_events import emit_to_user, emit_to_incident_room, emit_to_admins, EventTypes
-        
-        # Get workshop name
-        workshop_name = incidente.workshop.workshop_name if incidente.workshop else "Unknown"
-        
-        # Prepare payload
-        assignment_payload = {
-            "attempt_id": assignment_attempt.id if assignment_attempt else None,
-            "incident_id": incidente_id,
-            "workshop_id": taller_id,
-            "workshop_name": workshop_name,
-            "response_status": "accepted",
-            "timestamp": datetime.now(UTC).isoformat()
-        }
-        
-        # Send to client (personal message)
-        await emit_to_user(
-            user_id=incidente.client_id,
-            event_type=EventTypes.ASSIGNMENT_ACCEPTED,
-            data=assignment_payload
-        )
-        
-        # Broadcast to incident room
-        await emit_to_incident_room(
-            incident_id=incidente_id,
-            event_type=EventTypes.ASSIGNMENT_ACCEPTED,
-            data=assignment_payload
-        )
-        
-        logger.info(
-            f"WebSocket event '{EventTypes.ASSIGNMENT_ACCEPTED}' emitted for incident {incidente_id}"
-        )
-        
-        # Notificar al cliente que su solicitud fue aceptada
-        from ...modules.push_notifications.services import PushNotificationService, PushNotificationData
+        # ═══════════════════════════════════════════════════════════════════════
+        # ✅ PUBLICAR EVENTO DE ASIGNACIÓN ACEPTADA AL OUTBOX
+        # ═══════════════════════════════════════════════════════════════════════
         
         try:
-            push_service = PushNotificationService(self.session)
+            # Obtener el técnico ANTES de crear el evento
+            technician = None
+            technician_name = "Unknown"
             
-            # Notificar al cliente
             if suggested_technician_id:
-                notification_title = "✅ ¡Solicitud aceptada!"
-                notification_body = "Tu solicitud ha sido aceptada y un técnico está en camino."
-            else:
-                notification_title = "✅ ¡Solicitud aceptada!"
-                notification_body = "Tu solicitud ha sido aceptada. Pronto asignaremos un técnico."
+                from ...models.technician import Technician
+                technician = await self.session.get(Technician, suggested_technician_id)
+                if technician:
+                    technician_name = f"{technician.first_name} {technician.last_name}"
+                    logger.info(f"✅ Technician data loaded: {technician_name}")
+                else:
+                    logger.warning(f"⚠️ Technician {suggested_technician_id} not found")
             
-            await push_service.send_to_user(
-                user_id=incidente.client_id,
-                notification_data=PushNotificationData(
-                    title=notification_title,
-                    body=notification_body,
-                    data={
-                        "type": "incident_accepted",
-                        "incident_id": str(incidente_id),
-                        "workshop_id": str(taller_id),
-                        "technician_id": str(suggested_technician_id) if suggested_technician_id else None,
-                        "click_action": f"/incidents/{incidente_id}"  # For mobile apps
-                    },
-                    click_action=None  # Set to None for web push
-                ),
-                save_to_db=True
+            # Crear evento de asignación aceptada con datos correctos
+            assignment_event = IncidentAssignmentAcceptedEvent(
+                incident_id=incidente_id,
+                workshop_id=taller_id,
+                workshop_name=incidente.workshop.workshop_name if incidente.workshop else "Unknown",
+                technician_id=suggested_technician_id if suggested_technician_id else 0,
+                technician_name=technician_name,
+                eta=None  # Could be calculated based on distance
             )
             
-            # Si se asignó técnico, notificar al técnico
-            if suggested_technician_id:
-                await push_service.send_to_user(
-                    user_id=suggested_technician_id,
-                    notification_data=PushNotificationData(
-                        title="🚗 Nueva asignación",
-                        body=f"Has sido asignado a un nuevo servicio. Dirígete al lugar del incidente.",
-                        data={
-                            "type": "technician_assigned",
-                            "incident_id": str(incidente_id),
-                            "workshop_id": str(taller_id),
-                            "click_action": f"/incidents/{incidente_id}"  # For mobile apps
-                        },
-                        click_action=None  # Set to None for web push
-                    ),
-                    save_to_db=True
-                )
+            # Publicar al outbox (se entregará de forma confiable)
+            await EventPublisher.publish(self.session, assignment_event)
+            await self.session.commit()
             
-            logger.info(f"Notificaciones push enviadas para incidente {incidente_id}")
+            logger.info(
+                f"✅ Evento ASSIGNMENT_ACCEPTED publicado al outbox para incidente {incidente_id}",
+                incidente_id=incidente_id,
+                taller_id=taller_id
+            )
             
         except Exception as e:
-            logger.error(f"Error al enviar notificaciones push: {str(e)}", exc_info=True)
-            # No fallar la aceptación si fallan las notificaciones
+            # No fallar la aceptación si la publicación del evento falla
+            logger.error(
+                f"❌ Error publicando evento ASSIGNMENT_ACCEPTED para incidente {incidente_id}: {str(e)}",
+                exc_info=True
+            )
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # ✅ Las notificaciones push se envían automáticamente por el OutboxProcessor
+        # No se necesitan llamadas directas a push_service.send_to_user()
+        # ═══════════════════════════════════════════════════════════════════════
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # ✅ PUBLICAR EVENTOS DE DASHBOARD
+        # ═══════════════════════════════════════════════════════════════════════
+        # Decrementar contador de "pendiente" (estado anterior)
+        await self._publish_incident_count_changed(status=estado_anterior, delta=-1)
+        # Incrementar contador del nuevo estado
+        await self._publish_incident_count_changed(status=nuevo_estado, delta=+1)
+        
+        # Si se asignó un técnico, publicar cambio en técnicos activos
+        if suggested_technician_id:
+            await self._publish_active_technicians_changed()
+        
+        await self.session.commit()
+        # ═══════════════════════════════════════════════════════════════════════
+        
+        # ✅ EMISIÓN INMEDIATA DE EVENTO WEBSOCKET (BUGFIX)
+        # Emitir evento WebSocket para actualización en tiempo real del frontend
+        try:
+            from ...core.websocket_events import emit_to_all, EventTypes
+            
+            # Preparar payload del evento
+            event_data = {
+                "incident_id": incidente_id,
+                "workshop_id": taller_id,
+                "workshop_name": incidente.workshop.workshop_name if incidente.workshop else "Unknown",
+                "technician_id": suggested_technician_id if suggested_technician_id else None,
+                "technician_name": technician_name if suggested_technician_id else None,
+                "old_status": estado_anterior,
+                "new_status": nuevo_estado,
+                "estado_actual": nuevo_estado,
+                "timestamp": datetime.now(UTC).isoformat()
+            }
+            
+            # Emitir evento WebSocket a todos los usuarios
+            await emit_to_all(
+                event_type=EventTypes.ASSIGNMENT_ACCEPTED,
+                data=event_data
+            )
+            
+            logger.info(
+                f"✅ WebSocket event ASSIGNMENT_ACCEPTED emitted for incident {incidente_id} "
+                f"→ workshop {taller_id} (estado: {nuevo_estado})"
+            )
+            
+        except Exception as ws_err:
+            # ⚠️ NO fallar la operación si WebSocket falla
+            logger.error(
+                f"❌ Error emitting WebSocket event ASSIGNMENT_ACCEPTED: {str(ws_err)}", 
+                exc_info=True
+            )
         
         return incidente
     
@@ -656,10 +876,25 @@ class IncidenteService:
         if not incidente:
             raise NotFoundException(f"Incidente con ID {incidente_id} no encontrado")
         
-        # Verificar que el incidente esté pendiente
-        if incidente.estado_actual != "pendiente":
-            from ...core import ValidationException
-            raise ValidationException(f"El incidente ya no está pendiente (estado actual: {incidente.estado_actual})")
+        # ✅ VALIDAR TRANSICIÓN DE ESTADO CON STATE MACHINE
+        from ...core import IncidentStateMachine, ValidationException
+        
+        # El taller rechaza el incidente: transición a "rechazado"
+        target_state = "rechazado"
+        
+        is_valid, error_message = IncidentStateMachine.can_transition(
+            from_state=incidente.estado_actual,
+            to_state=target_state,
+            user_role="workshop",
+            incident=incidente
+        )
+        
+        if not is_valid:
+            logger.error(
+                f"State Machine validation failed: Workshop {taller_id} cannot reject "
+                f"incident {incidente_id} in state '{incidente.estado_actual}': {error_message}"
+            )
+            raise ValidationException(error_message)
         
         # Guardar el rechazo en la base de datos
         from ...models.rechazo_taller import RechazoTaller
@@ -702,32 +937,70 @@ class IncidenteService:
             motivo=motivo
         )
         
-        # Emit WebSocket event for assignment_rejected (Task 14)
-        from ...core.websocket_events import emit_to_admins, EventTypes
-        from ...models.workshop import Workshop
+        # ═══════════════════════════════════════════════════════════════════════
+        # ✅ PUBLICAR EVENTO DE ASIGNACIÓN RECHAZADA AL OUTBOX
+        # ═══════════════════════════════════════════════════════════════════════
         
-        # Get workshop name
-        workshop = await self.session.get(Workshop, taller_id)
-        workshop_name = workshop.workshop_name if workshop else "Unknown"
+        try:
+            from ...models.workshop import Workshop
+            
+            # Get workshop name
+            workshop = await self.session.get(Workshop, taller_id)
+            workshop_name = workshop.workshop_name if workshop else "Unknown"
+            
+            # Crear evento de asignación rechazada
+            rejection_event = IncidentAssignmentRejectedEvent(
+                incident_id=incidente_id,
+                workshop_id=taller_id,
+                workshop_name=workshop_name,
+                reason=motivo
+            )
+            
+            # Publicar al outbox (se entregará de forma confiable)
+            await EventPublisher.publish(self.session, rejection_event)
+            await self.session.commit()
+            
+            logger.info(
+                f"✅ Evento ASSIGNMENT_REJECTED publicado al outbox para incidente {incidente_id}",
+                incidente_id=incidente_id,
+                taller_id=taller_id
+            )
+            
+            # ✅ EMISIÓN INMEDIATA DE EVENTO WEBSOCKET (BUGFIX)
+            # Emitir evento WebSocket para actualización en tiempo real del frontend
+            from ...core.websocket_events import emit_to_all, EventTypes
+            
+            # Preparar payload del evento
+            event_data = {
+                "incident_id": incidente_id,
+                "workshop_id": taller_id,
+                "workshop_name": workshop_name,
+                "rejection_reason": motivo,
+                "old_status": incidente.estado_actual,
+                "new_status": "rechazado",
+                "estado_actual": "rechazado",
+                "timestamp": datetime.now(UTC).isoformat()
+            }
+            
+            # Emitir evento WebSocket a todos los usuarios
+            await emit_to_all(
+                event_type=EventTypes.ASSIGNMENT_REJECTED,
+                data=event_data
+            )
+            
+            logger.info(
+                f"✅ WebSocket event ASSIGNMENT_REJECTED emitted for incident {incidente_id} "
+                f"→ workshop {taller_id}"
+            )
+            
+        except Exception as e:
+            # No fallar el rechazo si la publicación del evento falla
+            logger.error(
+                f"❌ Error publicando evento ASSIGNMENT_REJECTED para incidente {incidente_id}: {str(e)}",
+                exc_info=True
+            )
         
-        rejection_payload = {
-            "attempt_id": assignment_attempt.id if assignment_attempt else None,
-            "incident_id": incidente_id,
-            "workshop_id": taller_id,
-            "workshop_name": workshop_name,
-            "response_status": "rejected",
-            "rejection_reason": motivo,
-            "timestamp": datetime.now(UTC).isoformat()
-        }
-        
-        await emit_to_admins(
-            event_type=EventTypes.ASSIGNMENT_REJECTED,
-            data=rejection_payload
-        )
-        
-        logger.info(
-            f"WebSocket event '{EventTypes.ASSIGNMENT_REJECTED}' emitted for incident {incidente_id}"
-        )
+        # ═══════════════════════════════════════════════════════════════════════
         
         # TODO: El motor de asignación debería buscar otro taller
         # TODO: Notificar al cliente que se está buscando otro proveedor
@@ -772,6 +1045,10 @@ class IncidenteService:
         
         if not incidente:
             raise NotFoundException(f"Incidente con ID {incidente_id} no encontrado")
+        
+        # Guardar estado anterior para eventos de dashboard
+        estado_anterior = incidente.estado_actual
+        technician_freed = bool(incidente.tecnico_id)  # Track if we'll free a technician
         
         # Validación 1: Verificar que el incidente sea ambiguo
         if not incidente.es_ambiguo:
@@ -919,28 +1196,36 @@ class IncidenteService:
             message_count=message_count
         )
         
-        # Notificar al cliente sobre la anulación
-        from ...modules.push_notifications.services import PushNotificationService, PushNotificationData
-        
+        # ✅ Publicar evento de reasignación iniciada
         try:
-            push_service = PushNotificationService(self.session)
-            await push_service.send_to_user(
-                user_id=incidente.client_id,
-                notification_data=PushNotificationData(
-                    title="🔄 Buscando nuevo taller",
-                    body=f"El taller no pudo atender tu solicitud después de revisar el caso. Estamos buscando otro taller disponible.",
-                    data={
-                        "type": "incident_ambiguous_cancelled",
-                        "incident_id": str(incidente_id),
-                        "priority": incidente.prioridad_ia or "media",
-                        "action": "view_incident",
-                        "action_url": f"/incidents/{incidente_id}"
-                    }
-                )
+            from ...shared.schemas.events.incident import IncidentReassignmentStartedEvent
+            
+            reassignment_event = IncidentReassignmentStartedEvent(
+                incident_id=incidente_id,
+                previous_workshop_id=incidente.taller_id,
+                reason="Caso ambiguo - Requiere revisión adicional",
+                message="Buscando un nuevo taller disponible"
             )
-            logger.info(f"✅ Notified client {incidente.client_id} about ambiguous case cancellation")
+            
+            await EventPublisher.publish(self.session, reassignment_event)
+            logger.info(f"✅ Published reassignment_started event for incident {incidente_id}")
         except Exception as e:
-            logger.error(f"Failed to notify client about ambiguous case cancellation: {str(e)}")
+            logger.error(f"Failed to publish reassignment event: {str(e)}")
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # ✅ PUBLICAR EVENTOS DE DASHBOARD
+        # ═══════════════════════════════════════════════════════════════════════
+        # Decrementar contador del estado anterior
+        await self._publish_incident_count_changed(status=estado_anterior, delta=-1)
+        # Incrementar contador de "pendiente" (vuelve a pendiente)
+        await self._publish_incident_count_changed(status="pendiente", delta=+1)
+        
+        # Si se liberó un técnico, publicar cambio en técnicos activos
+        if technician_freed:
+            await self._publish_active_technicians_changed()
+        
+        await self.session.commit()
+        # ═══════════════════════════════════════════════════════════════════════
         
         return incidente
     
@@ -975,6 +1260,10 @@ class IncidenteService:
             from ...core import ValidationException
             raise ValidationException(f"Estado '{nuevo_estado}' no es válido")
         
+        # Guardar estado anterior para eventos de dashboard
+        estado_anterior = incidente.estado_actual
+        technician_freed = False
+        
         # Actualizar estado
         incidente.estado_actual = nuevo_estado
         incidente.updated_at = datetime.now(UTC)
@@ -987,6 +1276,7 @@ class IncidenteService:
                 technician.is_on_duty = False
                 technician.is_available = True  # Marcar como disponible nuevamente
                 technician.updated_at = datetime.now(UTC)
+                technician_freed = True
                 logger.info(
                     f"Técnico {incidente.tecnico_id} liberado (is_on_duty=False, is_available=True) por incidente {incidente_id} en estado '{nuevo_estado}'"
                 )
@@ -1007,12 +1297,66 @@ class IncidenteService:
         await self.session.commit()
         await self.session.refresh(incidente)
         
+        # ═══════════════════════════════════════════════════════════════════════
+        # ✅ PUBLICAR EVENTO DE CAMBIO DE ESTADO AL OUTBOX
+        # ═══════════════════════════════════════════════════════════════════════
+        
+        try:
+            # Determinar el estado anterior (necesitamos guardarlo antes del commit)
+            # Por ahora usamos el estado actual ya que ya se actualizó
+            old_status = "unknown"  # Idealmente esto debería guardarse antes del update
+            
+            # Crear evento de cambio de estado
+            status_event = IncidentStatusChangedEvent(
+                incident_id=incidente_id,
+                old_status=old_status,
+                new_status=nuevo_estado,
+                changed_by=user_id,
+                changed_by_role=user_type,
+                reason=None
+            )
+            
+            # Publicar al outbox (se entregará de forma confiable)
+            await EventPublisher.publish(self.session, status_event)
+            await self.session.commit()
+            
+            logger.info(
+                f"✅ Evento INCIDENT_STATUS_CHANGED publicado al outbox para incidente {incidente_id} → {nuevo_estado}",
+                incidente_id=incidente_id,
+                nuevo_estado=nuevo_estado,
+                user_id=user_id
+            )
+            
+        except Exception as e:
+            # No fallar la operación si la publicación del evento falla
+            logger.error(
+                f"❌ Error publicando evento INCIDENT_STATUS_CHANGED para incidente {incidente_id}: {str(e)}",
+                exc_info=True
+            )
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        
         logger.info(
             f"Estado de incidente actualizado a '{nuevo_estado}'",
             incidente_id=incidente_id,
             user_id=user_id,
             user_type=user_type
         )
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # ✅ PUBLICAR EVENTOS DE DASHBOARD
+        # ═══════════════════════════════════════════════════════════════════════
+        # Decrementar contador del estado anterior
+        await self._publish_incident_count_changed(status=estado_anterior, delta=-1)
+        # Incrementar contador del nuevo estado
+        await self._publish_incident_count_changed(status=nuevo_estado, delta=+1)
+        
+        # Si se liberó un técnico, publicar cambio en técnicos activos
+        if technician_freed:
+            await self._publish_active_technicians_changed()
+        
+        await self.session.commit()
+        # ═══════════════════════════════════════════════════════════════════════
         
         return incidente
     
@@ -1054,24 +1398,32 @@ class IncidenteService:
         elif user_type not in ["admin", "workshop"]:
             raise ForbiddenException("No tienes permiso para cancelar incidentes")
         
-        # Verificar que el incidente se pueda cancelar
-        if incidente.estado_actual in ["resuelto", "cancelado"]:
-            from ...core import ValidationException
-            raise ValidationException(
-                f"No se puede cancelar un incidente en estado '{incidente.estado_actual}'"
-            )
+        # ✅ VALIDAR TRANSICIÓN DE ESTADO CON STATE MACHINE
+        from ...core import IncidentStateMachine, ValidationException
         
-        # Si está en proceso, verificar que sea admin o el cliente
-        if incidente.estado_actual == "en_proceso" and user_type not in ["admin", "client"]:
-            from ...core import ValidationException
-            raise ValidationException(
-                "Solo el cliente o un administrador pueden cancelar un incidente en proceso"
+        # Cancelar incidente: transición a "cancelado"
+        target_state = "cancelado"
+        
+        is_valid, error_message = IncidentStateMachine.can_transition(
+            from_state=incidente.estado_actual,
+            to_state=target_state,
+            user_role=user_type,
+            incident=incidente
+        )
+        
+        if not is_valid:
+            logger.error(
+                f"State Machine validation failed: User {user_id} ({user_type}) cannot cancel "
+                f"incident {incidente_id} in state '{incidente.estado_actual}': {error_message}"
             )
+            raise ValidationException(error_message)
         
         # Actualizar estado a cancelado
         estado_anterior = incidente.estado_actual
         incidente.estado_actual = "cancelado"
         incidente.updated_at = datetime.now(UTC)
+        
+        technician_freed = False
         
         # Guardar en historial
         from ...models.historial_servicio import HistorialServicio
@@ -1120,6 +1472,7 @@ class IncidenteService:
                 technician.is_on_duty = False
                 technician.is_available = True  # Marcar como disponible nuevamente
                 technician.updated_at = datetime.now(UTC)
+                technician_freed = True
                 logger.info(
                     f"Técnico {incidente.tecnico_id} liberado (is_on_duty=False, is_available=True) por cancelación de incidente {incidente_id}"
                 )
@@ -1159,6 +1512,69 @@ class IncidenteService:
         await self.session.commit()
         await self.session.refresh(incidente)
         
+        # ═══════════════════════════════════════════════════════════════════════
+        # ✅ EMIT WEBSOCKET EVENT FOR REAL-TIME UPDATE (CANCELLATION)
+        # ═══════════════════════════════════════════════════════════════════════
+        try:
+            from ...core.websocket_events import emit_to_all, EventTypes
+            
+            await emit_to_all(
+                event_type=EventTypes.INCIDENT_CANCELLED,
+                data={
+                    "incident_id": incidente_id,
+                    "old_status": estado_anterior,
+                    "new_status": "cancelado",
+                    "estado_actual": "cancelado",
+                    "cancelled_by": user_id,
+                    "cancelled_by_role": user_type,
+                    "cancellation_reason": motivo or "Sin motivo especificado",
+                    "timestamp": datetime.now(UTC).isoformat()
+                }
+            )
+            
+            logger.info(
+                f"✅ WebSocket event emitted: incident {incidente_id} cancelled {estado_anterior} → cancelado"
+            )
+            
+        except Exception as ws_err:
+            # ⚠️ NO fallar la operación si WebSocket falla
+            logger.error(
+                f"❌ Failed to emit WebSocket event for incident {incidente_id}: {str(ws_err)}"
+            )
+        # ═══════════════════════════════════════════════════════════════════════
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # ✅ PUBLICAR EVENTO DE CANCELACIÓN AL OUTBOX
+        # ═══════════════════════════════════════════════════════════════════════
+        
+        try:
+            # Crear evento de cancelación
+            cancellation_event = IncidentCancelledEvent(
+                incident_id=incidente_id,
+                cancelled_by=user_id,
+                cancelled_by_role=user_type,
+                reason=motivo or "Sin motivo especificado"
+            )
+            
+            # Publicar al outbox (se entregará de forma confiable)
+            await EventPublisher.publish(self.session, cancellation_event)
+            await self.session.commit()
+            
+            logger.info(
+                f"✅ Evento INCIDENT_CANCELLED publicado al outbox para incidente {incidente_id}",
+                incidente_id=incidente_id,
+                cancelled_by=user_id
+            )
+            
+        except Exception as e:
+            # No fallar la cancelación si la publicación del evento falla
+            logger.error(
+                f"❌ Error publicando evento INCIDENT_CANCELLED para incidente {incidente_id}: {str(e)}",
+                exc_info=True
+            )
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        
         logger.info(
             f"Incidente cancelado",
             incidente_id=incidente_id,
@@ -1167,8 +1583,20 @@ class IncidenteService:
             motivo=motivo or "Sin motivo especificado"
         )
         
-        # TODO: Notificar al taller/técnico asignado si lo había
-        # TODO: Notificar al cliente si fue cancelado por admin
+        # ═══════════════════════════════════════════════════════════════════════
+        # ✅ PUBLICAR EVENTOS DE DASHBOARD
+        # ═══════════════════════════════════════════════════════════════════════
+        # Decrementar contador del estado anterior
+        await self._publish_incident_count_changed(status=estado_anterior, delta=-1)
+        # Incrementar contador de "cancelado"
+        await self._publish_incident_count_changed(status="cancelado", delta=+1)
+        
+        # Si se liberó un técnico, publicar cambio en técnicos activos
+        if technician_freed:
+            await self._publish_active_technicians_changed()
+        
+        await self.session.commit()
+        # ═══════════════════════════════════════════════════════════════════════
         
         return incidente
     
@@ -1239,16 +1667,8 @@ class IncidenteService:
             user_id=user_id,
         )
 
-        # Emit evidence_deleted event to the incident room
-        await emit_to_incident_room(
-            incident_id=incident_id,
-            event_type=EventTypes.EVIDENCE_DELETED,
-            data={
-                "evidence_id": evidencia_id,
-                "incident_id": incident_id,
-                "timestamp": datetime.now(UTC).isoformat(),
-            }
-        )
+        # Note: Evidence deletion events can be added later if needed
+        # For now, we focus on the main incident lifecycle events
 
     async def _cancel_pending_timeouts(self, incidente_id: int) -> None:
         """
@@ -1292,3 +1712,453 @@ class IncidenteService:
         except Exception as e:
             logger.error(f"Error cancelando timeouts para incidente {incidente_id}: {str(e)}")
             # No re-lanzar la excepción para no afectar el flujo principal
+
+    async def upload_photos(
+        self,
+        incidente_id: int,
+        photo_urls: List[str],
+        user_id: int,
+        user_type: str
+    ) -> Incidente:
+        """
+        Subir fotos adicionales a un incidente existente.
+        
+        Args:
+            incidente_id: ID del incidente
+            photo_urls: Lista de URLs de las fotos subidas
+            user_id: ID del usuario que sube las fotos
+            user_type: Tipo de usuario (client, technician, workshop, admin)
+            
+        Returns:
+            Incidente actualizado
+            
+        Raises:
+            NotFoundException: Si el incidente no existe
+            ForbiddenException: Si el usuario no tiene permiso
+        """
+        # Obtener el incidente
+        incidente = await self.repository.find_by_id(incidente_id)
+        
+        if not incidente:
+            raise NotFoundException(f"Incidente con ID {incidente_id} no encontrado")
+        
+        # Verificar permisos
+        if user_type == "client" and incidente.client_id != user_id:
+            raise ForbiddenException("No tienes permiso para subir fotos a este incidente")
+        elif user_type == "technician":
+            # Verificar que el técnico esté asignado al incidente
+            if incidente.tecnico_id != user_id:
+                raise ForbiddenException("No tienes permiso para subir fotos a este incidente")
+        elif user_type == "workshop":
+            # Verificar que el taller esté asignado al incidente
+            if incidente.taller_id != user_id:
+                raise ForbiddenException("No tienes permiso para subir fotos a este incidente")
+        elif user_type not in ["admin"]:
+            raise ForbiddenException("No tienes permiso para subir fotos")
+        
+        # Crear evidencia de imágenes
+        evidencia_imagenes = Evidencia(
+            incidente_id=incidente_id,
+            uploaded_by_user_id=user_id,
+            tipo="IMAGE",
+            descripcion=f"Fotos adicionales subidas por {user_type}",
+        )
+        evidencia_img_created = await self.repository.create_evidencia(evidencia_imagenes)
+        
+        # Crear registros de imágenes individuales
+        for photo_url in photo_urls:
+            evidencia_imagen = EvidenciaImagen(
+                evidencia_id=evidencia_img_created.id,
+                file_url=photo_url,
+                file_name="additional_photo.jpg",
+                file_type="image",
+                mime_type="image/jpeg",
+                size=0,
+                uploaded_by=user_id,
+            )
+            await self.repository.create_evidencia_imagen(evidencia_imagen)
+        
+        await self.session.commit()
+        await self.session.refresh(incidente)
+        
+        logger.info(
+            f"Fotos subidas al incidente {incidente_id}",
+            incidente_id=incidente_id,
+            user_id=user_id,
+            photo_count=len(photo_urls)
+        )
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # ✅ PUBLICAR EVENTO DE FOTOS SUBIDAS AL OUTBOX
+        # ═══════════════════════════════════════════════════════════════════════
+        
+        try:
+            from ...shared.schemas.events.incident import IncidentPhotosUploadedEvent
+            
+            photos_event = IncidentPhotosUploadedEvent(
+                incident_id=incidente_id,
+                photo_urls=photo_urls,
+                uploaded_by=user_id,
+                uploaded_by_role=user_type
+            )
+            
+            await EventPublisher.publish(self.session, photos_event)
+            await self.session.commit()
+            
+            logger.info(
+                f"✅ Evento INCIDENT_PHOTOS_UPLOADED publicado al outbox para incidente {incidente_id}",
+                incidente_id=incidente_id,
+                photo_count=len(photo_urls)
+            )
+            
+        except Exception as e:
+            logger.error(
+                f"❌ Error publicando evento INCIDENT_PHOTOS_UPLOADED para incidente {incidente_id}: {str(e)}",
+                exc_info=True
+            )
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        
+        return incidente
+
+
+    async def start_work(
+        self,
+        incidente_id: int,
+        technician_id: int
+    ) -> Incidente:
+        """
+        Marcar que el técnico ha comenzado a trabajar en el incidente.
+        
+        Este método:
+        1. Valida la transición de estado (EN_CAMINO/ACEPTADO → EN_PROCESO)
+        2. Actualiza el estado del incidente
+        3. Publica IncidentWorkStartedEvent
+        
+        Args:
+            incidente_id: ID del incidente
+            technician_id: ID del técnico
+            
+        Returns:
+            Incidente actualizado
+            
+        Raises:
+            NotFoundException: Si el incidente no existe
+            ValidationException: Si la transición de estado es inválida
+        """
+        # Obtener el incidente
+        incidente = await self.repository.find_by_id(incidente_id)
+        
+        if not incidente:
+            raise NotFoundException(f"Incidente con ID {incidente_id} no encontrado")
+        
+        # Verificar que el técnico está asignado al incidente
+        if incidente.tecnico_id != technician_id:
+            raise ForbiddenException(
+                f"El técnico {technician_id} no está asignado a este incidente"
+            )
+        
+        # ✅ VALIDAR TRANSICIÓN DE ESTADO CON STATE MACHINE
+        from ...core import IncidentStateMachine, ValidationException
+        
+        target_state = "en_proceso"
+        
+        is_valid, error_message = IncidentStateMachine.can_transition(
+            from_state=incidente.estado_actual,
+            to_state=target_state,
+            user_role="technician",
+            incident=incidente
+        )
+        
+        if not is_valid:
+            logger.error(
+                f"State Machine validation failed: Technician {technician_id} cannot start work on "
+                f"incident {incidente_id} in state '{incidente.estado_actual}': {error_message}"
+            )
+            raise ValidationException(error_message)
+        
+        # Guardar estado anterior para eventos de dashboard
+        estado_anterior = incidente.estado_actual
+        
+        # Actualizar estado del incidente
+        incidente.estado_actual = "en_proceso"
+        incidente.updated_at = datetime.now(UTC)
+        
+        await self.session.commit()
+        await self.session.refresh(incidente)
+        
+        logger.info(
+            f"✅ Trabajo iniciado en incidente {incidente_id} por técnico {technician_id}"
+        )
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # ✅ EMIT WEBSOCKET EVENT FOR REAL-TIME UPDATE
+        # ═══════════════════════════════════════════════════════════════════════
+        await self._emit_status_change_event(
+            incident_id=incidente_id,
+            old_status=estado_anterior,
+            new_status="en_proceso",
+            changed_by=technician_id,
+            changed_by_role="technician"
+        )
+        # ═══════════════════════════════════════════════════════════════════════
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # ✅ PUBLICAR EVENTO DE TRABAJO INICIADO
+        # ═══════════════════════════════════════════════════════════════════════
+        try:
+            from ...shared.schemas.events.incident import IncidentWorkStartedEvent
+            from ...models.technician import Technician
+            
+            # Get technician info
+            technician = await self.session.get(Technician, technician_id)
+            technician_name = f"{technician.first_name} {technician.last_name}" if technician else "Unknown"
+            
+            work_started_event = IncidentWorkStartedEvent(
+                incident_id=incidente_id,
+                technician_id=technician_id,
+                technician_name=technician_name,
+                start_time=datetime.now(UTC)
+            )
+            
+            await EventPublisher.publish(self.session, work_started_event)
+            await self.session.commit()
+            
+            logger.info(
+                f"✅ Evento WORK_STARTED publicado para incidente {incidente_id}",
+                technician_id=technician_id
+            )
+            
+        except Exception as e:
+            logger.error(
+                f"❌ Error publicando evento WORK_STARTED: {str(e)}",
+                exc_info=True
+            )
+        # ═══════════════════════════════════════════════════════════════════════
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # ✅ PUBLICAR EVENTOS DE DASHBOARD
+        # ═══════════════════════════════════════════════════════════════════════
+        # Decrementar contador del estado anterior
+        await self._publish_incident_count_changed(status=estado_anterior, delta=-1)
+        # Incrementar contador de "en_proceso"
+        await self._publish_incident_count_changed(status="en_proceso", delta=+1)
+        
+        await self.session.commit()
+        # ═══════════════════════════════════════════════════════════════════════
+        
+        return incidente
+
+    async def complete_work(
+        self,
+        incidente_id: int,
+        technician_id: int,
+        summary: Optional[str] = None
+    ) -> Incidente:
+        """
+        Marcar que el técnico ha completado el trabajo en el incidente.
+        
+        Este método:
+        1. Valida la transición de estado (EN_PROCESO → COMPLETADO)
+        2. Actualiza el estado del incidente
+        3. Libera al técnico (marca como disponible)
+        4. Finaliza la sesión de tracking
+        5. Publica IncidentWorkCompletedEvent
+        
+        Args:
+            incidente_id: ID del incidente
+            technician_id: ID del técnico
+            summary: Resumen opcional del trabajo realizado
+            
+        Returns:
+            Incidente actualizado
+            
+        Raises:
+            NotFoundException: Si el incidente no existe
+            ValidationException: Si la transición de estado es inválida
+        """
+        # Obtener el incidente
+        incidente = await self.repository.find_by_id(incidente_id)
+        
+        if not incidente:
+            raise NotFoundException(f"Incidente con ID {incidente_id} no encontrado")
+        
+        # Verificar que el técnico está asignado al incidente
+        if incidente.tecnico_id != technician_id:
+            raise ForbiddenException(
+                f"El técnico {technician_id} no está asignado a este incidente"
+            )
+        
+        # ✅ VALIDAR TRANSICIÓN DE ESTADO CON STATE MACHINE
+        from ...core import IncidentStateMachine, ValidationException
+        
+        target_state = "completado"
+        
+        is_valid, error_message = IncidentStateMachine.can_transition(
+            from_state=incidente.estado_actual,
+            to_state=target_state,
+            user_role="technician",
+            incident=incidente
+        )
+        
+        if not is_valid:
+            logger.error(
+                f"State Machine validation failed: Technician {technician_id} cannot complete work on "
+                f"incident {incidente_id} in state '{incidente.estado_actual}': {error_message}"
+            )
+            raise ValidationException(error_message)
+        
+        # Calcular duración del trabajo
+        duration_minutes = None
+        if incidente.assigned_at:
+            duration_seconds = (datetime.now(UTC) - incidente.assigned_at).total_seconds()
+            duration_minutes = int(duration_seconds / 60)
+        
+        # Guardar estado anterior para eventos de dashboard
+        estado_anterior = incidente.estado_actual
+        
+        # Actualizar estado del incidente
+        incidente.estado_actual = "completado"
+        incidente.updated_at = datetime.now(UTC)
+        
+        # Liberar al técnico
+        from ...models.technician import Technician
+        technician = await self.session.get(Technician, technician_id)
+        if technician:
+            technician.is_on_duty = False
+            technician.is_available = True
+            technician.updated_at = datetime.now(UTC)
+            logger.info(
+                f"Técnico {technician_id} liberado (is_on_duty=False, is_available=True)"
+            )
+        
+        # Finalizar sesión de tracking
+        from ...models.tracking_session import TrackingSession
+        await self.session.execute(
+            update(TrackingSession)
+            .where(
+                TrackingSession.incidente_id == incidente_id,
+                TrackingSession.is_active == True
+            )
+            .values(
+                is_active=False,
+                ended_at=datetime.now(UTC)
+            )
+        )
+        
+        await self.session.commit()
+        await self.session.refresh(incidente)
+        
+        logger.info(
+            f"✅ Trabajo completado en incidente {incidente_id} por técnico {technician_id}"
+        )
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # ✅ EMIT WEBSOCKET EVENT FOR REAL-TIME UPDATE
+        # ═══════════════════════════════════════════════════════════════════════
+        await self._emit_status_change_event(
+            incident_id=incidente_id,
+            old_status=estado_anterior,
+            new_status="completado",
+            changed_by=technician_id,
+            changed_by_role="technician"
+        )
+        # ═══════════════════════════════════════════════════════════════════════
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # ✅ PUBLICAR EVENTO DE TRABAJO COMPLETADO
+        # ═══════════════════════════════════════════════════════════════════════
+        try:
+            from ...shared.schemas.events.incident import IncidentWorkCompletedEvent
+            
+            technician_name = f"{technician.first_name} {technician.last_name}" if technician else "Unknown"
+            
+            work_completed_event = IncidentWorkCompletedEvent(
+                incident_id=incidente_id,
+                technician_id=technician_id,
+                technician_name=technician_name,
+                completion_time=datetime.now(UTC),
+                summary=summary,
+                duration_minutes=duration_minutes
+            )
+            
+            await EventPublisher.publish(self.session, work_completed_event)
+            await self.session.commit()
+            
+            logger.info(
+                f"✅ Evento WORK_COMPLETED publicado para incidente {incidente_id}",
+                technician_id=technician_id,
+                duration_minutes=duration_minutes
+            )
+            
+        except Exception as e:
+            logger.error(
+                f"❌ Error publicando evento WORK_COMPLETED: {str(e)}",
+                exc_info=True
+            )
+        # ═══════════════════════════════════════════════════════════════════════
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # ✅ PUBLICAR EVENTOS DE DASHBOARD
+        # ═══════════════════════════════════════════════════════════════════════
+        # Decrementar contador del estado anterior
+        await self._publish_incident_count_changed(status=estado_anterior, delta=-1)
+        # Incrementar contador de "completado"
+        await self._publish_incident_count_changed(status="completado", delta=+1)
+        
+        # Publicar cambio en técnicos activos (técnico liberado)
+        await self._publish_active_technicians_changed()
+        
+        await self.session.commit()
+        # ═══════════════════════════════════════════════════════════════════════
+        
+        return incidente
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # ✅ HELPER METHOD FOR WEBSOCKET EVENT EMISSION
+    # ═══════════════════════════════════════════════════════════════════════
+    
+    async def _emit_status_change_event(
+        self,
+        incident_id: int,
+        old_status: str,
+        new_status: str,
+        changed_by: Optional[int] = None,
+        changed_by_role: Optional[str] = None
+    ) -> None:
+        """
+        Helper method to emit WebSocket event for incident status changes.
+        
+        Args:
+            incident_id: ID of the incident
+            old_status: Previous status
+            new_status: New status
+            changed_by: User ID who made the change (optional)
+            changed_by_role: Role of the user who made the change (optional)
+        """
+        try:
+            from ...core.websocket_events import emit_to_all, EventTypes
+            from datetime import datetime, UTC
+            
+            await emit_to_all(
+                event_type=EventTypes.INCIDENT_STATUS_CHANGED,
+                data={
+                    "incident_id": incident_id,
+                    "old_status": old_status,
+                    "new_status": new_status,
+                    "estado_actual": new_status,
+                    "changed_by": changed_by,
+                    "changed_by_role": changed_by_role,
+                    "timestamp": datetime.now(UTC).isoformat()
+                }
+            )
+            
+            logger.info(
+                f"✅ WebSocket event emitted: incident {incident_id} status changed {old_status} → {new_status}"
+            )
+            
+        except Exception as ws_err:
+            # ⚠️ NO fallar la operación si WebSocket falla
+            logger.error(
+                f"❌ Failed to emit WebSocket event for incident {incident_id}: {str(ws_err)}"
+            )

@@ -22,7 +22,7 @@ class IncidentAIAnalysis(Base):
     __tablename__ = "incident_ai_analyses"
     __table_args__ = (
         CheckConstraint(
-            "status IN ('pending', 'processing', 'completed', 'failed')",
+            "status IN ('pending', 'processing', 'completed', 'failed', 'timeout')",
             name="check_incident_ai_analysis_status",
         ),
         CheckConstraint(

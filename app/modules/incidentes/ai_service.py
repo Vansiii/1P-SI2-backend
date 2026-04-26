@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from datetime import datetime, UTC
 
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +16,12 @@ from ...core import (
     get_logger,
     get_session_factory,
     get_settings,
+)
+from ...core.event_publisher import EventPublisher
+from ...shared.schemas.events.incident import (
+    IncidentAnalysisStartedEvent,
+    IncidentAnalysisCompletedEvent,
+    IncidentAnalysisFailedEvent,
 )
 from ...models.incident_ai_analysis import IncidentAIAnalysis
 from .ai_classifier import GeminiIncidentClassification, GeminiIncidentClassifier
@@ -74,7 +81,7 @@ class IncidentAIService:
         return queued_analysis
 
     async def process_analysis_by_id(self, analysis_id: int) -> IncidentAIAnalysis:
-        """Execute AI processing for one queued analysis id."""
+        """Execute AI processing for one queued analysis id with timeout protection."""
         analysis = await self._get_analysis_by_id(analysis_id)
         if not analysis:
             raise NotFoundException(resource_type="Análisis IA", resource_id=analysis_id)
@@ -86,32 +93,209 @@ class IncidentAIService:
         analysis.error_code = None
         analysis.error_message = None
         await self.session.commit()
+        
+        # Get timeout settings
+        settings = get_settings()
+        slow_threshold_seconds = settings.ai_slow_threshold_seconds
+        max_processing_seconds = settings.ai_max_processing_seconds
+        
+        # Track start time for latency calculation
+        start_time = datetime.now(UTC)
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # ✅ PUBLICAR EVENTO DE ANÁLISIS INICIADO
+        # ═══════════════════════════════════════════════════════════════════════
+        try:
+            analysis_started_event = IncidentAnalysisStartedEvent(
+                incident_id=analysis.incident_id,
+                analysis_id=analysis.id
+            )
+            await EventPublisher.publish(self.session, analysis_started_event)
+            await self.session.commit()
+            
+            logger.info(
+                f"✅ Evento ANALYSIS_STARTED publicado para incidente {analysis.incident_id}",
+                analysis_id=analysis.id
+            )
+        except Exception as e:
+            logger.error(
+                f"❌ Error publicando evento ANALYSIS_STARTED: {str(e)}",
+                exc_info=True
+            )
+        # ═══════════════════════════════════════════════════════════════════════
+
+        # Create slow detection task
+        slow_detection_task = asyncio.create_task(
+            self._detect_slow_analysis(analysis, slow_threshold_seconds)
+        )
 
         try:
-            incident = await self.repository.find_by_id(analysis.incident_id)
-            if not incident:
-                raise NotFoundException(resource_type="Incidente", resource_id=analysis.incident_id)
-
-            description, image_urls, audio_urls = await self._load_incident_sources(analysis.incident_id)
-            output = await self.classifier.classify_incident(
-                description=description,
-                image_urls=image_urls,
-                audio_urls=audio_urls,
+            # ✅ EJECUTAR CON TIMEOUT MÁXIMO
+            output = await asyncio.wait_for(
+                self._execute_classification(analysis),
+                timeout=max_processing_seconds
             )
+            
+            # Cancel slow detection task if analysis completed before threshold
+            slow_detection_task.cancel()
+            
+            # Calculate latency
+            end_time = datetime.now(UTC)
+            latency_ms = int((end_time - start_time).total_seconds() * 1000)
 
             self._apply_classification_result(
                 analysis=analysis,
                 classification=output.classification,
                 raw_response_json=output.raw_response_json,
-                latency_ms=output.latency_ms,
+                latency_ms=latency_ms,
                 used_model_name=output.used_model_name,
             )
-            self._sync_incident_fields(incident, output.classification)
+            
+            incident = await self.repository.find_by_id(analysis.incident_id)
+            if incident:
+                self._sync_incident_fields(incident, output.classification)
 
             await self.session.commit()
             await self.session.refresh(analysis)
+            
+            # ═══════════════════════════════════════════════════════════════════════
+            # ✅ PUBLICAR EVENTO DE INCIDENTE ACTUALIZADO AL OUTBOX
+            # ═══════════════════════════════════════════════════════════════════════
+            # Publicar evento incident.updated con los campos de IA actualizados
+            # para que se entregue de manera confiable a través del OutboxProcessor
+            try:
+                from ...shared.schemas.events.incident import IncidentUpdatedEvent
+                
+                incident_updated_event = IncidentUpdatedEvent(
+                    incident_id=incident.id,
+                    updated_fields={
+                        "categoria_ia": incident.categoria_ia,
+                        "prioridad_ia": incident.prioridad_ia,
+                        "resumen_ia": incident.resumen_ia,
+                        "es_ambiguo": incident.es_ambiguo,
+                    }
+                )
+                await EventPublisher.publish(self.session, incident_updated_event)
+                await self.session.commit()
+                
+                logger.info(
+                    f"✅ Evento INCIDENT_UPDATED publicado al outbox para incidente {incident.id} "
+                    f"con campos de IA actualizados"
+                )
+            except Exception as e:
+                logger.error(
+                    f"❌ Error publicando evento INCIDENT_UPDATED: {str(e)}",
+                    exc_info=True
+                )
+            # ═══════════════════════════════════════════════════════════════════════
+            
+            logger.info(
+                f"✅ AI analysis completed for incident {incident.id}. "
+                f"Category: {incident.categoria_ia}, Priority: {incident.prioridad_ia}, "
+                f"Confidence: {output.classification.confidence:.2%}"
+            )
+            
+            # ═══════════════════════════════════════════════════════════════════════
+            # ✅ PUBLICAR EVENTO DE ANÁLISIS COMPLETADO
+            # ═══════════════════════════════════════════════════════════════════════
+            try:
+                analysis_completed_event = IncidentAnalysisCompletedEvent(
+                    incident_id=analysis.incident_id,
+                    analysis_id=analysis.id,
+                    diagnosis=output.classification.summary or "Sin diagnóstico",  # ✅ Usar summary en lugar de diagnosis
+                    severity=output.classification.priority or "media",  # ✅ Usar priority en lugar de severity
+                    category=output.classification.category,
+                    priority_level=output.classification.priority,
+                    recommendations=output.classification.findings or [],  # ✅ Usar findings en lugar de recommendations
+                    confidence=float(output.classification.confidence)
+                )
+                await EventPublisher.publish(self.session, analysis_completed_event)
+                await self.session.commit()
+                
+                logger.info(
+                    f"✅ Evento ANALYSIS_COMPLETED publicado para incidente {analysis.incident_id}",
+                    analysis_id=analysis.id
+                )
+            except Exception as e:
+                logger.error(
+                    f"❌ Error publicando evento ANALYSIS_COMPLETED: {str(e)}",
+                    exc_info=True
+                )
+            # ═══════════════════════════════════════════════════════════════════════
+            
+            # ═══════════════════════════════════════════════════════════════════════
+            # ✅ EMITIR EVENTO WEBSOCKET EN TIEMPO REAL
+            # ═══════════════════════════════════════════════════════════════════════
+            try:
+                from ...core.websocket_events import emit_to_incident_room, EventTypes
+                
+                await emit_to_incident_room(
+                    incident_id=analysis.incident_id,
+                    event_type=EventTypes.INCIDENT_ANALYSIS_COMPLETED,
+                    data={
+                        "incident_id": analysis.incident_id,
+                        "analysis_id": analysis.id,
+                        "categoria_ia": incident.categoria_ia,
+                        "prioridad_ia": incident.prioridad_ia,
+                        "resumen_ia": incident.resumen_ia,
+                        "es_ambiguo": incident.es_ambiguo,
+                        "workshop_recommendation": analysis.workshop_recommendation,
+                        "confidence": float(output.classification.confidence)
+                    }
+                )
+                
+                logger.info(
+                    f"✅ WebSocket event INCIDENT_ANALYSIS_COMPLETED emitido para incidente {analysis.incident_id}"
+                )
+            except Exception as e:
+                logger.error(
+                    f"❌ Error emitiendo WebSocket event INCIDENT_ANALYSIS_COMPLETED: {str(e)}",
+                    exc_info=True
+                )
+            # ═══════════════════════════════════════════════════════════════════════
+            
             return analysis
+            
+        except asyncio.TimeoutError:
+            # ✅ TIMEOUT: Marcar como timeout
+            slow_detection_task.cancel()
+            await self._mark_analysis_timeout(analysis, max_processing_seconds)
+            logger.error(
+                f"❌ AI analysis TIMEOUT after {max_processing_seconds}s",
+                analysis_id=analysis.id,
+                incident_id=analysis.incident_id
+            )
+            
+            # ═══════════════════════════════════════════════════════════════════════
+            # ✅ PUBLICAR EVENTO DE ANÁLISIS TIMEOUT
+            # ═══════════════════════════════════════════════════════════════════════
+            try:
+                from ...shared.schemas.events.incident import IncidentAnalysisTimeoutEvent
+                
+                timeout_event = IncidentAnalysisTimeoutEvent(
+                    incident_id=analysis.incident_id,
+                    analysis_id=analysis.id,
+                    timeout_seconds=max_processing_seconds
+                )
+                await EventPublisher.publish(self.session, timeout_event)
+                await self.session.commit()
+                
+                logger.info(
+                    f"✅ Evento ANALYSIS_TIMEOUT publicado para incidente {analysis.incident_id}",
+                    analysis_id=analysis.id
+                )
+            except Exception as e:
+                logger.error(
+                    f"❌ Error publicando evento ANALYSIS_TIMEOUT: {str(e)}",
+                    exc_info=True
+                )
+            # ═══════════════════════════════════════════════════════════════════════
+            
+            await self.session.refresh(analysis)
+            return analysis
+            
         except Exception as exc:
+            slow_detection_task.cancel()
             await self._mark_analysis_failed(analysis, exc)
             logger.error(
                 "Incident AI analysis failed",
@@ -119,6 +303,31 @@ class IncidentAIService:
                 incident_id=analysis.incident_id,
                 error=str(exc),
             )
+            
+            # ═══════════════════════════════════════════════════════════════════════
+            # ✅ PUBLICAR EVENTO DE ANÁLISIS FALLIDO
+            # ═══════════════════════════════════════════════════════════════════════
+            try:
+                analysis_failed_event = IncidentAnalysisFailedEvent(
+                    incident_id=analysis.incident_id,
+                    analysis_id=analysis.id,
+                    error=str(exc),
+                    error_type=type(exc).__name__
+                )
+                await EventPublisher.publish(self.session, analysis_failed_event)
+                await self.session.commit()
+                
+                logger.info(
+                    f"✅ Evento ANALYSIS_FAILED publicado para incidente {analysis.incident_id}",
+                    analysis_id=analysis.id
+                )
+            except Exception as e:
+                logger.error(
+                    f"❌ Error publicando evento ANALYSIS_FAILED: {str(e)}",
+                    exc_info=True
+                )
+            # ═══════════════════════════════════════════════════════════════════════
+            
             await self.session.refresh(analysis)
             return analysis
 
@@ -403,9 +612,87 @@ class IncidentAIService:
         enriched_summary = "\n\n".join(section for section in summary_sections if section)
         return enriched_summary[:1800]
 
+    async def _detect_slow_analysis(self, analysis: IncidentAIAnalysis, threshold_seconds: int) -> None:
+        """
+        Background task to detect slow AI analysis and emit warning event.
+        
+        Args:
+            analysis: The analysis being processed
+            threshold_seconds: Threshold in seconds to consider analysis as slow
+        """
+        try:
+            # Wait for the threshold
+            await asyncio.sleep(threshold_seconds)
+            
+            # If we reach here, analysis is taking longer than threshold
+            logger.warning(
+                f"⚠️ AI analysis SLOW for incident {analysis.incident_id} "
+                f"(exceeded {threshold_seconds}s threshold)",
+                analysis_id=analysis.id
+            )
+            
+            # Publish slow event
+            try:
+                from ...shared.schemas.events.incident import IncidentAnalysisSlowEvent
+                
+                slow_event = IncidentAnalysisSlowEvent(
+                    incident_id=analysis.incident_id,
+                    analysis_id=analysis.id,
+                    elapsed_seconds=threshold_seconds,
+                    threshold_seconds=threshold_seconds
+                )
+                await EventPublisher.publish(self.session, slow_event)
+                await self.session.commit()
+                
+                logger.info(
+                    f"✅ Evento ANALYSIS_SLOW publicado para incidente {analysis.incident_id}"
+                )
+            except Exception as e:
+                logger.error(
+                    f"❌ Error publicando evento ANALYSIS_SLOW: {str(e)}",
+                    exc_info=True
+                )
+        except asyncio.CancelledError:
+            # Analysis completed before threshold - this is expected
+            logger.debug(
+                f"✅ AI analysis completed before slow threshold for incident {analysis.incident_id}"
+            )
+            pass
+
     async def _mark_analysis_failed(self, analysis: IncidentAIAnalysis, error: Exception) -> None:
         """Persist failed analysis state with truncated error metadata."""
         analysis.status = "failed"
         analysis.error_code = type(error).__name__
         analysis.error_message = str(error)[:1200]
         await self.session.commit()
+
+    async def _mark_analysis_timeout(self, analysis: IncidentAIAnalysis, timeout_seconds: int) -> None:
+        """Mark analysis as timeout."""
+        analysis.status = "timeout"
+        analysis.error_code = "TIMEOUT"
+        analysis.error_message = f"Analysis exceeded maximum processing time of {timeout_seconds} seconds"
+        await self.session.commit()
+        
+        logger.warning(
+            f"⚠️ AI analysis marked as TIMEOUT",
+            analysis_id=analysis.id,
+            incident_id=analysis.incident_id,
+            timeout_seconds=timeout_seconds
+        )
+
+    async def _execute_classification(self, analysis: IncidentAIAnalysis):
+        """Execute classification with all steps."""
+        incident = await self.repository.find_by_id(analysis.incident_id)
+        if not incident:
+            raise NotFoundException(resource_type="Incidente", resource_id=analysis.incident_id)
+
+        description, image_urls, audio_urls = await self._load_incident_sources(analysis.incident_id)
+        
+        # Call AI classifier (it has its own timeout via gemini_timeout_seconds)
+        output = await self.classifier.classify_incident(
+            description=description,
+            image_urls=image_urls,
+            audio_urls=audio_urls,
+        )
+        
+        return output

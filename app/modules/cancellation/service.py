@@ -8,6 +8,13 @@ from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...core import get_logger, NotFoundException, ValidationException, ForbiddenException
+from ...core.state_machine import IncidentStateMachine, IncidentState, UserRole
+from ...core.event_publisher import EventPublisher
+from ...shared.schemas.events.cancellation import (
+    CancellationRequestedEvent,
+    CancellationApprovedEvent,
+    CancellationRejectedEvent
+)
 from ...models.cancellation_request import CancellationRequest
 from ...models.incidente import Incidente
 from ...models.user import User
@@ -61,6 +68,25 @@ class CancellationService:
                 f"No se puede cancelar un incidente en estado '{incident.estado_actual}'"
             )
         
+        # Validate state transition using State Machine
+        state_machine = IncidentStateMachine()
+        current_state = IncidentState(incident.estado_actual)
+        target_state = IncidentState.CANCELADO
+        
+        # Determine user role
+        user_role = UserRole.CLIENTE if user_type == "client" else UserRole.TALLER
+        
+        can_transition, error_message = state_machine.can_transition(
+            from_state=current_state,
+            to_state=target_state,
+            user_role=user_role,
+            incident=incident
+        )
+        
+        if not can_transition:
+            logger.warning(f"State transition validation failed for cancellation request: {error_message}")
+            raise ValidationException(f"Cannot request cancellation: {error_message}")
+        
         # Validar permisos
         if user_type == "client" and incident.client_id != user_id:
             raise ForbiddenException("No tienes permiso para cancelar este incidente")
@@ -103,6 +129,35 @@ class CancellationService:
         logger.info(
             f"Solicitud de cancelación creada para incidente {incident_id} por {user_type} {user_id}"
         )
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # ✅ PUBLICAR EVENTO DE CANCELACIÓN SOLICITADA
+        # ═══════════════════════════════════════════════════════════════════════
+        try:
+            cancellation_requested_event = CancellationRequestedEvent(
+                incident_id=incident_id,
+                cancellation_request_id=cancellation_request.id,
+                requested_by=user_id,
+                requested_by_role=user_type,
+                reason=reason,
+                requested_at=cancellation_request.created_at
+            )
+            
+            await EventPublisher.publish(self.session, cancellation_requested_event)
+            await self.session.commit()
+            
+            logger.info(
+                f"✅ Evento CANCELLATION_REQUESTED publicado para incidente {incident_id}",
+                incident_id=incident_id,
+                request_id=cancellation_request.id
+            )
+            
+        except Exception as e:
+            logger.error(
+                f"❌ Error publicando evento CANCELLATION_REQUESTED: {str(e)}",
+                exc_info=True
+            )
+        # ═══════════════════════════════════════════════════════════════════════
         
         # Enviar notificación push a la otra parte
         await self._send_cancellation_request_notification(
@@ -199,6 +254,53 @@ class CancellationService:
             f"por {user_type} {user_id}"
         )
         
+        # ═══════════════════════════════════════════════════════════════════════
+        # ✅ PUBLICAR EVENTO DE CANCELACIÓN APROBADA O RECHAZADA
+        # ═══════════════════════════════════════════════════════════════════════
+        try:
+            if accept:
+                cancellation_approved_event = CancellationApprovedEvent(
+                    incident_id=cancellation_request.incident_id,
+                    cancellation_request_id=request_id,
+                    approved_by=user_id,
+                    approved_by_role=user_type,
+                    approved_at=cancellation_request.responded_at
+                )
+                
+                await EventPublisher.publish(self.session, cancellation_approved_event)
+                await self.session.commit()
+                
+                logger.info(
+                    f"✅ Evento CANCELLATION_APPROVED publicado para incidente {cancellation_request.incident_id}",
+                    incident_id=cancellation_request.incident_id,
+                    request_id=request_id
+                )
+            else:
+                cancellation_rejected_event = CancellationRejectedEvent(
+                    incident_id=cancellation_request.incident_id,
+                    cancellation_request_id=request_id,
+                    rejected_by=user_id,
+                    rejected_by_role=user_type,
+                    reason=response_message,
+                    rejected_at=cancellation_request.responded_at
+                )
+                
+                await EventPublisher.publish(self.session, cancellation_rejected_event)
+                await self.session.commit()
+                
+                logger.info(
+                    f"✅ Evento CANCELLATION_REJECTED publicado para incidente {cancellation_request.incident_id}",
+                    incident_id=cancellation_request.incident_id,
+                    request_id=request_id
+                )
+                
+        except Exception as e:
+            logger.error(
+                f"❌ Error publicando evento de cancelación: {str(e)}",
+                exc_info=True
+            )
+        # ═══════════════════════════════════════════════════════════════════════
+        
         # Enviar notificación push al solicitante (después del commit exitoso)
         await self._send_cancellation_response_notification(
             incident=incident,
@@ -223,6 +325,22 @@ class CancellationService:
         from ...models.technician import Technician
         from ...models.estados_servicio import EstadosServicio
         from sqlalchemy import update
+        
+        # Validate state transition using State Machine
+        state_machine = IncidentStateMachine()
+        current_state = IncidentState(incident.estado_actual)
+        target_state = IncidentState.PENDIENTE  # Returning to pending for reassignment
+        
+        can_transition, error_message = state_machine.can_transition(
+            from_state=current_state,
+            to_state=target_state,
+            user_role=UserRole.ADMIN,  # System acts as admin for cancellation and reassignment
+            incident=incident
+        )
+        
+        if not can_transition:
+            logger.error(f"State transition validation failed for cancellation: {error_message}")
+            raise ValidationException(f"Cannot cancel and reassign incident: {error_message}")
         
         # Guardar rechazo
         rechazo = RechazoTaller(
@@ -296,6 +414,24 @@ class CancellationService:
         incident.updated_at = datetime.now(UTC)
         
         await self.session.commit()
+        
+        # ✅ Emitir evento WebSocket para actualización en tiempo real
+        from ...core.websocket_events import emit_to_all, EventTypes
+        
+        try:
+            await emit_to_all(
+                event_type=EventTypes.INCIDENT_STATUS_CHANGED,
+                data={
+                    "incident_id": incident.id,
+                    "estado_actual": "pendiente",
+                    "new_status": "pendiente",
+                    "reason": "mutual_cancellation",
+                    "timestamp": datetime.now(UTC).isoformat()
+                }
+            )
+            logger.info(f"✅ WebSocket event emitted: incident {incident.id} → pendiente (mutual cancellation)")
+        except Exception as ws_err:
+            logger.error(f"Failed to emit status change WebSocket event: {str(ws_err)}")
         
         logger.info(
             f"Incidente {incident.id} anulado por cancelación mutua. "
