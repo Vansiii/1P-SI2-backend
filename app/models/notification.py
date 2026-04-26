@@ -3,7 +3,8 @@ Modelo para notificaciones del sistema.
 """
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, func, Index
+import sqlalchemy as sa
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base
@@ -16,6 +17,18 @@ class Notification(Base):
     """
 
     __tablename__ = "notifications"
+    __table_args__ = (
+        # Performance indexes for notification queries
+        Index(
+            'idx_notifications_user_created',
+            'user_id', sa.text('created_at DESC')
+        ),
+        Index(
+            'idx_notifications_user_unread',
+            'user_id', 'created_at',
+            postgresql_where=sa.text("is_read = false")
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)

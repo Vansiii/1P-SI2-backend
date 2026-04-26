@@ -20,9 +20,11 @@ from ...modules.incidentes.admin_router import router as incidentes_admin_router
 from ...modules.files.router import router as files_router
 
 # Import infrastructure endpoints (same level)
-from . import health, metrics, websocket
+from . import health, metrics, websocket, diagnostics
 
 # Import from modules
+from ...modules.events.router import router as events_router
+from ...modules.sync.router import router as sync_router
 from ...modules.chat.router import router as chat_router
 from ...modules.cancellation.router import router as cancellation_router
 from ...modules.tracking.router import router as tracking_router
@@ -36,8 +38,8 @@ from ...modules.metrics.router import router as metrics_endpoints_router
 from ...modules.metrics.timeseries_router import router as metrics_timeseries_router
 from ...modules.especialidades.router import router as especialidades_router
 
-# Import reassignment router
-from .reassignment import router as reassignment_router
+# Import admin routers
+from .admin import ai_analytics_router
 
 # Create main v1 router
 api_router = APIRouter(prefix="/api/v1")
@@ -154,6 +156,24 @@ api_router.include_router(
     tags=["WebSocket"],
 )
 
+# Diagnostics routes (database connection monitoring)
+api_router.include_router(
+    diagnostics.router,
+    tags=["Diagnostics"],
+)
+
+# Events routes (missed events recovery)
+api_router.include_router(
+    events_router,
+    tags=["Events"],
+)
+
+# Sync routes (offline queue synchronization)
+api_router.include_router(
+    sync_router,
+    tags=["Sync"],
+)
+
 # Real-time API routes
 api_router.include_router(
     real_time_router,
@@ -168,7 +188,7 @@ api_router.include_router(
     tags=["Push Notifications"],
 )
 
-# Assignment routes
+# Assignment routes (includes automatic assignment + reassignment/admin endpoints)
 api_router.include_router(
     assignment_router,
     tags=["Assignment"],
@@ -228,10 +248,11 @@ api_router.include_router(
     tags=["Especialidades"],
 )
 
-# Reassignment routes (manual intervention and monitoring)
+# Admin AI Analytics routes
 api_router.include_router(
-    reassignment_router,
-    tags=["Reassignment"],
+    ai_analytics_router,
+    prefix="/admin",
+    tags=["Admin - AI Analytics"],
 )
 
 __all__ = ["api_router"]

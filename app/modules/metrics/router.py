@@ -11,6 +11,7 @@ from ...core.dependencies import get_current_user, require_permission
 from ...core.permissions import Permission
 from ...core.responses import success_response
 from .services import MetricsService
+from .communication_metrics import CommunicationMetricsService
 from ...models.user import User
 
 router = APIRouter(prefix="/metrics", tags=["metrics-reporting"])
@@ -149,4 +150,96 @@ async def get_incidents_by_category(
             "total": sum(c["count"] for c in categories)
         },
         message="Category statistics retrieved successfully"
+    )
+
+
+@router.get("/communication")
+async def get_communication_metrics(
+    start_time: Optional[datetime] = Query(None, description="Start time for metrics (default: 24 hours ago)"),
+    end_time: Optional[datetime] = Query(None, description="End time for metrics (default: now)"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission(Permission.REPORT_VIEW_ALL))
+):
+    """
+    Get comprehensive communication metrics.
+    
+    Returns metrics about:
+    - Event processing and delivery (outbox pattern)
+    - GPS location tracking
+    - WebSocket reconnection attempts
+    
+    **Permissions:** System admin only
+    """
+    comm_metrics_service = CommunicationMetricsService(db)
+    
+    metrics = await comm_metrics_service.get_comprehensive_metrics(
+        start_time=start_time,
+        end_time=end_time
+    )
+    
+    return success_response(
+        data=metrics,
+        message="Communication metrics retrieved successfully"
+    )
+
+
+@router.get("/communication/events")
+async def get_event_metrics(
+    start_time: Optional[datetime] = Query(None, description="Start time for metrics (default: 24 hours ago)"),
+    end_time: Optional[datetime] = Query(None, description="End time for metrics (default: now)"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission(Permission.REPORT_VIEW_ALL))
+):
+    """
+    Get event processing and delivery metrics.
+    
+    Returns:
+    - Total events published
+    - Events processed/pending/failed
+    - Success rate
+    - Delivery rate (WebSocket vs FCM)
+    
+    **Permissions:** System admin only
+    """
+    comm_metrics_service = CommunicationMetricsService(db)
+    
+    metrics = await comm_metrics_service.get_event_metrics(
+        start_time=start_time,
+        end_time=end_time
+    )
+    
+    return success_response(
+        data=metrics,
+        message="Event metrics retrieved successfully"
+    )
+
+
+@router.get("/communication/locations")
+async def get_location_metrics(
+    start_time: Optional[datetime] = Query(None, description="Start time for metrics (default: 24 hours ago)"),
+    end_time: Optional[datetime] = Query(None, description="End time for metrics (default: now)"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission(Permission.REPORT_VIEW_ALL))
+):
+    """
+    Get GPS location tracking metrics.
+    
+    Returns:
+    - Total location updates
+    - Unique technicians tracked
+    - Updates per hour
+    - Average accuracy
+    
+    **Permissions:** System admin only
+    """
+    comm_metrics_service = CommunicationMetricsService(db)
+    
+    metrics = await comm_metrics_service.get_location_metrics(
+        start_time=start_time,
+        end_time=end_time
+    )
+    
+    return success_response(
+        data=metrics,
+        message="Location metrics retrieved successfully"
     )

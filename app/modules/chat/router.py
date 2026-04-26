@@ -324,3 +324,221 @@ async def delete_message(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=str(e)
         )
+
+
+@router.post("/incidents/{incident_id}/typing", status_code=status.HTTP_200_OK)
+async def send_typing_indicator(
+    incident_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Send typing indicator to other participants in the conversation.
+    
+    This endpoint:
+    - Broadcasts "user_typing" event via WebSocket
+    - Does not persist to database (ephemeral event)
+    - Automatically expires after 3 seconds on client side
+    
+    **Permissions:** Client or assigned technician/workshop staff
+    """
+    from ...core.websocket_events import emit_to_incident_room, EventTypes
+    from datetime import datetime
+    
+    # Verify user has access to this incident
+    from ...models.incidente import Incidente
+    from sqlalchemy import select
+    
+    incident = await db.scalar(
+        select(Incidente).where(Incidente.id == incident_id)
+    )
+    
+    if not incident:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Incident {incident_id} not found"
+        )
+    
+    # Check permissions
+    has_access = (
+        (current_user.user_type == "client" and incident.client_id == current_user.id) or
+        (current_user.user_type == "workshop" and incident.taller_id == current_user.id) or
+        (current_user.user_type == "technician" and incident.tecnico_id == current_user.id)
+    )
+    
+    if not has_access:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this incident's conversation"
+        )
+    
+    # Emit typing event (exclude sender)
+    await emit_to_incident_room(
+        incident_id=incident_id,
+        event_type=EventTypes.USER_TYPING,
+        data={
+            "user_id": current_user.id,
+            "user_name": f"{current_user.first_name} {current_user.last_name}",
+            "incident_id": incident_id,
+            "timestamp": datetime.utcnow().isoformat()
+        },
+        exclude_user=current_user.id
+    )
+    
+    return success_response(
+        data={},
+        message="Typing indicator sent"
+    )
+
+
+@router.post("/incidents/{incident_id}/typing/stop", status_code=status.HTTP_200_OK)
+async def send_typing_stop_indicator(
+    incident_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Send typing stop indicator to other participants.
+    
+    This endpoint:
+    - Broadcasts "user_stopped_typing" event via WebSocket
+    - Clears typing indicator on client side
+    
+    **Permissions:** Client or assigned technician/workshop staff
+    """
+    from ...core.websocket_events import emit_to_incident_room, EventTypes
+    from datetime import datetime
+    
+    # Verify user has access to this incident
+    from ...models.incidente import Incidente
+    from sqlalchemy import select
+    
+    incident = await db.scalar(
+        select(Incidente).where(Incidente.id == incident_id)
+    )
+    
+    if not incident:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Incident {incident_id} not found"
+        )
+    
+    # Check permissions
+    has_access = (
+        (current_user.user_type == "client" and incident.client_id == current_user.id) or
+        (current_user.user_type == "workshop" and incident.taller_id == current_user.id) or
+        (current_user.user_type == "technician" and incident.tecnico_id == current_user.id)
+    )
+    
+    if not has_access:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this incident's conversation"
+        )
+    
+    # Emit typing stop event (exclude sender)
+    await emit_to_incident_room(
+        incident_id=incident_id,
+        event_type=EventTypes.USER_STOPPED_TYPING,
+        data={
+            "user_id": current_user.id,
+            "user_name": f"{current_user.first_name} {current_user.last_name}",
+            "incident_id": incident_id,
+            "timestamp": datetime.utcnow().isoformat()
+        },
+        exclude_user=current_user.id
+    )
+    
+    return success_response(
+        data={},
+        message="Typing stop indicator sent"
+    )
+
+
+@router.post("/messages/{message_id}/read", status_code=status.HTTP_200_OK)
+async def mark_message_as_read(
+    message_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Mark a specific message as read and broadcast read receipt.
+    
+    This endpoint:
+    - Updates message read_at timestamp
+    - Broadcasts "message_read" event via WebSocket to sender
+    - Used for individual message read receipts (double check)
+    
+    **Permissions:** Message recipient only
+    """
+    from ...core.websocket_events import emit_to_user, EventTypes
+    from datetime import datetime
+    from ...models.message import Message
+    from sqlalchemy import select
+    
+    # Get message
+    message = await db.scalar(
+        select(Message).where(Message.id == message_id)
+    )
+    
+    if not message:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Message {message_id} not found"
+        )
+    
+    # Verify user is not the sender
+    if message.sender_id == current_user.id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Cannot mark your own message as read"
+        )
+    
+    # Verify user has access to this conversation
+    from ...models.incidente import Incidente
+    incident = await db.scalar(
+        select(Incidente).where(Incidente.id == message.incident_id)
+    )
+    
+    if not incident:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Incident not found"
+        )
+    
+    has_access = (
+        (current_user.user_type == "client" and incident.client_id == current_user.id) or
+        (current_user.user_type == "workshop" and incident.taller_id == current_user.id) or
+        (current_user.user_type == "technician" and incident.tecnico_id == current_user.id)
+    )
+    
+    if not has_access:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this conversation"
+        )
+    
+    # Mark as read
+    if not message.read_at:
+        message.read_at = datetime.utcnow()
+        await db.commit()
+        
+        # Emit read receipt to sender
+        await emit_to_user(
+            user_id=message.sender_id,
+            event_type=EventTypes.MESSAGE_READ,
+            data={
+                "message_id": message_id,
+                "read_by": current_user.id,
+                "read_by_name": f"{current_user.first_name} {current_user.last_name}",
+                "read_at": message.read_at.isoformat(),
+                "incident_id": incident.id,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        )
+    
+    return success_response(
+        data={"read_at": message.read_at.isoformat() if message.read_at else None},
+        message="Message marked as read"
+    )
+

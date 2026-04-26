@@ -9,12 +9,19 @@ from sqlalchemy.orm import selectinload
 
 from ...core.logging import get_logger
 from ...core.exceptions import NotFoundError, ValidationError
+from ...core.event_publisher import EventPublisher
+from ...shared.schemas.events.chat import (
+    ChatMessageSentEvent,
+    ChatMessageReadEvent,
+    ChatUserTypingEvent,
+    ChatUserStoppedTypingEvent,
+    ChatFileUploadedEvent
+)
 from ...models.message import Message
 from ...models.conversation import Conversation
 from ...models.incidente import Incidente
 from ...models.user import User
 from ...core.websocket import manager
-from ...core.websocket_events import emit_to_incident_room, EventTypes
 from ..push_notifications.services import PushNotificationService
 
 logger = get_logger(__name__)
@@ -164,7 +171,8 @@ class ChatService:
             # Message from workshop/technician, increment client unread count
             conversation.unread_count_client += 1
 
-        await self.session.commit()
+        # ⚠️ NO COMMIT YET - need to publish event first
+        await self.session.flush()  # Flush to get message.id
         await self.session.refresh(message)
 
         # Get sender info for broadcast
@@ -179,16 +187,24 @@ class ChatService:
             incident_id=incident_id,
             sender_id=sender_id,
             sender_name=sender_name,
-            message_text=message_text
+            message_text=message_text,
+            message_id=message.id,
+            sender_role=sender.user_type if sender else None
         )
         
-        # 🔔 Emit detailed WebSocket event for real-time chat update
-        await self._emit_new_message_event(
-            message=message,
+        # 🔔 Publish ChatMessageSentEvent to outbox for reliable delivery
+        chat_event = ChatMessageSentEvent(
+            message_id=message.id,
+            incident_id=incident_id,
+            sender_id=sender_id,
             sender_name=sender_name,
-            sender_role=sender.user_type if sender else None,
-            incident_id=incident_id
+            sender_role=sender.user_type if sender else "system",
+            content=message_text
         )
+        await EventPublisher.publish(self.session, chat_event)
+
+        # ✅ NOW commit everything together (message + outbox event)
+        await self.session.commit()
 
         # Send push notification to recipients
         await self._send_chat_push_notification(
@@ -292,7 +308,21 @@ class ChatService:
         if not incident:
             raise NotFoundError(f"Incident {incident_id} not found")
 
+        # Get unread messages before marking them as read (to publish events)
+        unread_messages = await self.session.scalars(
+            select(Message)
+            .where(
+                and_(
+                    Message.incident_id == incident_id,
+                    Message.sender_id != user_id,
+                    Message.is_read == False
+                )
+            )
+        )
+        unread_message_list = list(unread_messages.all())
+
         # Mark messages as read (messages sent by others, not by this user)
+        read_at_time = datetime.utcnow()
         result = await self.session.execute(
             update(Message)
             .where(
@@ -304,7 +334,7 @@ class ChatService:
             )
             .values(
                 is_read=True,
-                read_at=datetime.utcnow()
+                read_at=read_at_time
             )
         )
 
@@ -324,18 +354,21 @@ class ChatService:
         marked_count = result.rowcount
         logger.info(f"Marked {marked_count} messages as read for user {user_id} in incident {incident_id}")
 
-        # Emit message_read event so senders see read receipts in real-time
+        # Publish ChatMessageReadEvent for each message marked as read
+        # This allows proper notification to senders
         if marked_count > 0:
-            await emit_to_incident_room(
-                incident_id=incident_id,
-                event_type=EventTypes.MESSAGE_READ,
-                data={
-                    "incident_id": incident_id,
-                    "read_by_user_id": user_id,
-                    "marked_count": marked_count,
-                    "timestamp": datetime.utcnow().isoformat()
-                }
-            )
+            for message in unread_message_list:
+                try:
+                    read_event = ChatMessageReadEvent(
+                        message_id=message.id,
+                        read_by=user_id,
+                        read_at=read_at_time
+                    )
+                    await EventPublisher.publish(self.session, read_event)
+                except Exception as e:
+                    logger.error(f"Error publishing read event for message {message.id}: {str(e)}")
+            
+            await self.session.commit()
 
         return marked_count
 
@@ -585,68 +618,247 @@ class ChatService:
                 click_action=None  # Set to None for web push
             )
             
-            # Send push notification to all recipients
-            for recipient_id in recipient_ids:
-                await self.push_service.send_to_user(
-                    user_id=recipient_id,
-                    notification_data=notification_data,
-                    save_to_db=True
-                )
-                logger.info(f"Push notification sent to user {recipient_id} for chat message in incident {incident.id}")
+            # ═══════════════════════════════════════════════════════════════════════
+            # ✅ NOTIFICACIONES MANEJADAS POR OUTBOX PROCESSOR
+            # El OutboxProcessor maneja todas las notificaciones de chat automáticamente
+            # via EventPublisher → OutboxEvent → Delivery Strategies
+            # NO enviar notificaciones duplicadas aquí
+            # ═══════════════════════════════════════════════════════════════════════
 
         except Exception as e:
             # Don't fail message sending if push notification fails
-            logger.error(f"Error sending chat push notification: {str(e)}")
+            logger.error(f"Error in chat notification setup: {str(e)}")
 
-    async def _emit_new_message_event(
+
+
+    async def notify_user_typing(
         self,
-        message: Message,
-        sender_name: str,
-        sender_role: Optional[str],
-        incident_id: int
+        incident_id: int,
+        user_id: int
     ) -> None:
         """
-        Emit WebSocket event for new chat message.
-        This allows real-time chat updates without polling.
+        Notify that a user is typing in a conversation.
+        
+        This is an ephemeral event (not persisted to DB).
         
         Args:
-            message: Message object
-            sender_name: Name of sender
-            sender_role: Role of sender (client, workshop, technician)
             incident_id: ID of the incident
+            user_id: ID of the user who is typing
         """
+        # Get user info
+        user = await self.session.scalar(
+            select(User).where(User.id == user_id)
+        )
+        
+        if not user:
+            raise NotFoundError(f"User {user_id} not found")
+        
+        user_name = f"{user.first_name} {user.last_name}" if user.first_name else user.email
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # ✅ PUBLICAR EVENTO DE USUARIO ESCRIBIENDO (EFÍMERO - NO PERSISTE EN DB)
+        # ═══════════════════════════════════════════════════════════════════════
         try:
-            # Build event payload
-            event_data = {
-                "id": message.id,
-                "incident_id": message.incident_id,
-                "sender_id": message.sender_id,
-                "sender_name": sender_name,
-                "sender_role": sender_role,
-                "message": message.message,
-                "message_type": message.message_type,
-                "is_read": message.is_read,
-                "read_at": message.read_at.isoformat() if message.read_at else None,
-                "created_at": message.created_at.isoformat(),
-                "updated_at": message.updated_at.isoformat() if message.updated_at else None,
-                "timestamp": datetime.utcnow().isoformat()
-            }
-            
-            # Broadcast to all users in the incident room
-            await manager.broadcast_to_incident(
+            typing_event = ChatUserTypingEvent(
                 incident_id=incident_id,
-                message={
-                    "type": "new_chat_message",
-                    "data": event_data
-                },
-                exclude_user=message.sender_id  # Don't send back to sender
+                user_id=user_id,
+                user_name=user_name
             )
             
-            logger.info(
-                f"WebSocket event emitted: new message {message.id} in incident {incident_id}"
+            # Publicar evento sin persistir en outbox (send_immediate=True, pero no commit)
+            # Este evento es efímero y solo se envía via WebSocket
+            await EventPublisher.publish(
+                self.session,
+                typing_event,
+                commit=False,  # No persistir en DB
+                send_immediate=True  # Solo WebSocket inmediato
+            )
+            
+            logger.debug(
+                f"User {user_id} is typing in incident {incident_id}",
+                user_id=user_id,
+                incident_id=incident_id
             )
             
         except Exception as e:
-            logger.error(f"Error emitting WebSocket chat message event: {str(e)}", exc_info=True)
-            # Don't fail message sending if WebSocket fails
+            logger.error(
+                f"❌ Error publicando evento USER_TYPING: {str(e)}",
+                exc_info=True
+            )
+        # ═══════════════════════════════════════════════════════════════════════
 
+    async def notify_user_stopped_typing(
+        self,
+        incident_id: int,
+        user_id: int
+    ) -> None:
+        """
+        Notify that a user stopped typing in a conversation.
+        
+        This is an ephemeral event (not persisted to DB).
+        
+        Args:
+            incident_id: ID of the incident
+            user_id: ID of the user who stopped typing
+        """
+        # ═══════════════════════════════════════════════════════════════════════
+        # ✅ PUBLICAR EVENTO DE USUARIO DEJÓ DE ESCRIBIR (EFÍMERO - NO PERSISTE EN DB)
+        # ═══════════════════════════════════════════════════════════════════════
+        try:
+            stopped_typing_event = ChatUserStoppedTypingEvent(
+                incident_id=incident_id,
+                user_id=user_id
+            )
+            
+            # Publicar evento sin persistir en outbox (send_immediate=True, pero no commit)
+            # Este evento es efímero y solo se envía via WebSocket
+            await EventPublisher.publish(
+                self.session,
+                stopped_typing_event,
+                commit=False,  # No persistir en DB
+                send_immediate=True  # Solo WebSocket inmediato
+            )
+            
+            logger.debug(
+                f"User {user_id} stopped typing in incident {incident_id}",
+                user_id=user_id,
+                incident_id=incident_id
+            )
+            
+        except Exception as e:
+            logger.error(
+                f"❌ Error publicando evento USER_STOPPED_TYPING: {str(e)}",
+                exc_info=True
+            )
+        # ═══════════════════════════════════════════════════════════════════════
+
+    async def upload_file_to_chat(
+        self,
+        incident_id: int,
+        sender_id: int,
+        file_id: int,
+        file_name: str,
+        file_type: str,
+        file_size: int,
+        file_url: str
+    ) -> Message:
+        """
+        Upload a file to a chat conversation.
+        
+        Args:
+            incident_id: ID of the incident
+            sender_id: ID of the user uploading the file
+            file_id: ID of the uploaded file
+            file_name: Name of the file
+            file_type: MIME type of the file
+            file_size: Size of the file in bytes
+            file_url: URL to access the file
+            
+        Returns:
+            Created message with file attachment
+        """
+        # Create message with file attachment
+        message_text = f"📎 {file_name}"
+        message = await self.send_message(
+            incident_id=incident_id,
+            sender_id=sender_id,
+            message_text=message_text,
+            message_type="file"
+        )
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # ✅ PUBLICAR EVENTO DE ARCHIVO SUBIDO
+        # ═══════════════════════════════════════════════════════════════════════
+        try:
+            file_uploaded_event = ChatFileUploadedEvent(
+                message_id=message["id"],
+                incident_id=incident_id,
+                file_id=file_id,
+                file_name=file_name,
+                file_type=file_type,
+                file_size=file_size,
+                file_url=file_url
+            )
+            
+            await EventPublisher.publish(self.session, file_uploaded_event)
+            await self.session.commit()
+            
+            logger.info(
+                f"✅ Evento FILE_UPLOADED publicado para incidente {incident_id}",
+                file_name=file_name,
+                file_size=file_size
+            )
+            
+        except Exception as e:
+            logger.error(
+                f"❌ Error publicando evento FILE_UPLOADED: {str(e)}",
+                exc_info=True
+            )
+        # ═══════════════════════════════════════════════════════════════════════
+        
+        return message
+
+    async def mark_message_as_read(
+        self,
+        message_id: int,
+        user_id: int
+    ) -> Message:
+        """
+        Mark a specific message as read.
+        
+        Args:
+            message_id: ID of the message
+            user_id: ID of the user marking the message as read
+            
+        Returns:
+            Updated message
+            
+        Raises:
+            NotFoundError: If message not found
+        """
+        message = await self.session.scalar(
+            select(Message).where(Message.id == message_id)
+        )
+        
+        if not message:
+            raise NotFoundError(f"Message {message_id} not found")
+        
+        # Don't mark own messages as read
+        if message.sender_id == user_id:
+            return message
+        
+        # Mark as read if not already
+        if not message.is_read:
+            message.is_read = True
+            message.read_at = datetime.utcnow()
+            
+            await self.session.commit()
+            await self.session.refresh(message)
+            
+            # ═══════════════════════════════════════════════════════════════════════
+            # ✅ PUBLICAR EVENTO DE MENSAJE LEÍDO
+            # ═══════════════════════════════════════════════════════════════════════
+            try:
+                message_read_event = ChatMessageReadEvent(
+                    message_id=message_id,
+                    read_by=user_id,
+                    read_at=message.read_at
+                )
+                
+                await EventPublisher.publish(self.session, message_read_event)
+                await self.session.commit()
+                
+                logger.info(
+                    f"✅ Evento MESSAGE_READ publicado para mensaje {message_id}",
+                    message_id=message_id,
+                    read_by=user_id
+                )
+                
+            except Exception as e:
+                logger.error(
+                    f"❌ Error publicando evento MESSAGE_READ: {str(e)}",
+                    exc_info=True
+                )
+            # ═══════════════════════════════════════════════════════════════════════
+        
+        return message

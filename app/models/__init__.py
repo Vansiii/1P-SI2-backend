@@ -19,6 +19,10 @@ from .user import User
 from .workshop import Workshop
 from .workshop_schedule import WorkshopSchedule
 
+# Modelos de eventos (Outbox Pattern)
+from .outbox_event import OutboxEvent, EventPriority
+from .event_log import EventLog
+
 # Modelos de negocio (gestión de emergencias vehiculares)
 from .cancellation_request import CancellationRequest
 from .categoria import Categoria
@@ -86,5 +90,9 @@ __all__ = [
     "CancellationRequest",
     # Asignación inteligente
     "AssignmentAttempt",
+    # Eventos (Outbox Pattern)
+    "OutboxEvent",
+    "EventLog",
+    "EventPriority",
 ]
 

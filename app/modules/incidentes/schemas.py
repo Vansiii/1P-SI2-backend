@@ -155,3 +155,36 @@ class IncidenteDetailResponse(IncidenteResponse):
 class IncidenteUpdateStatusRequest(BaseModel):
     """Request para actualizar estado de incidente."""
     estado: str = Field(..., description="Nuevo estado: pendiente, asignado, en_proceso, resuelto, cancelado")
+
+
+
+class AIRecommendationResponse(BaseModel):
+    """Response con recomendación de técnico basada en IA."""
+    incident_id: int = Field(..., description="ID del incidente")
+    analysis_id: int = Field(..., description="ID del análisis de IA")
+    status: str = Field(..., description="Estado del análisis: pending, processing, completed, failed, timeout")
+    
+    # Recomendación de técnico
+    recommended_technician_id: Optional[int] = Field(None, description="ID del técnico recomendado")
+    recommended_technician_name: Optional[str] = Field(None, description="Nombre del técnico recomendado")
+    workshop_id: Optional[int] = Field(None, description="ID del taller del técnico")
+    workshop_name: Optional[str] = Field(None, description="Nombre del taller")
+    
+    # Métricas de confianza
+    confidence_score: Optional[float] = Field(None, ge=0, le=1, description="Score de confianza (0-1)")
+    availability_score: Optional[float] = Field(None, ge=0, le=1, description="Score de disponibilidad")
+    specialty_match_score: Optional[float] = Field(None, ge=0, le=1, description="Score de match con especialidad")
+    workload_score: Optional[float] = Field(None, ge=0, le=1, description="Score de carga de trabajo")
+    performance_score: Optional[float] = Field(None, ge=0, le=1, description="Score de desempeño histórico")
+    
+    # Información adicional
+    estimated_time_minutes: Optional[int] = Field(None, description="Tiempo estimado de llegada en minutos")
+    distance_km: Optional[float] = Field(None, description="Distancia al incidente en km")
+    reason: Optional[str] = Field(None, description="Razón de la recomendación")
+    
+    # Metadata
+    analyzed_at: Optional[datetime] = Field(None, description="Cuándo se completó el análisis")
+    latency_ms: Optional[int] = Field(None, description="Latencia del análisis en milisegundos")
+    
+    model_config = {"from_attributes": True}
+

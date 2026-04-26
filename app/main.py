@@ -1,8 +1,10 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
+from typing import Optional
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
@@ -30,122 +32,12 @@ logger = get_logger(__name__)
 # Create scheduler for background tasks
 scheduler = AsyncIOScheduler()
 
+# Global OutboxProcessor instance for health checks
+outbox_processor_instance: Optional['OutboxProcessor'] = None
 
-async def check_assignment_timeouts():
-    """
-    Background task to check for assignment timeouts and send reminders.
-    Runs every minute to:
-    1. Send reminders at 60% of timeout (e.g., 3 min for 5 min timeout)
-    2. Detect workshops that didn't respond in time
-    3. Trigger automatic reassignment
-    """
-    from .services.reassignment_service import ReassignmentService
-    from .modules.push_notifications.services import PushNotificationService, PushNotificationData
-    from .models.assignment_attempt import AssignmentAttempt
-    from .models.workshop import Workshop
-    from sqlalchemy import select, and_
-    
-    try:
-        logger.info("⏰ Running assignment timeout check...")
-        
-        session_factory = get_session_factory()
-        async with session_factory() as session:
-            now = datetime.utcnow()
-            
-            # 1. Check for reminders (60% of timeout elapsed)
-            reminder_result = await session.execute(
-                select(AssignmentAttempt)
-                .where(
-                    and_(
-                        AssignmentAttempt.status == 'pending',
-                        AssignmentAttempt.timeout_at.isnot(None),
-                        # Reminder at 60% of timeout
-                        AssignmentAttempt.attempted_at + 
-                        (AssignmentAttempt.timeout_at - AssignmentAttempt.attempted_at) * 0.6 <= now,
-                        AssignmentAttempt.timeout_at > now,  # Not yet timed out
-                        # Only send reminder once (check if response_message doesn't contain 'reminder')
-                        ~AssignmentAttempt.response_message.like('%reminder sent%')
-                    )
-                )
-            )
-            
-            reminder_attempts = list(reminder_result.scalars().all())
-            
-            if reminder_attempts:
-                logger.info(f"📢 Sending {len(reminder_attempts)} timeout reminders...")
-                push_service = PushNotificationService(session)
-                
-                for attempt in reminder_attempts:
-                    try:
-                        # Get workshop
-                        workshop = await session.get(Workshop, attempt.workshop_id)
-                        if not workshop:
-                            continue
-                        
-                        # Calculate remaining time
-                        remaining_seconds = (attempt.timeout_at - now).total_seconds()
-                        remaining_minutes = int(remaining_seconds / 60)
-                        
-                        # Send reminder notification
-                        await push_service.send_to_user(
-                            user_id=workshop.id,
-                            notification_data=PushNotificationData(
-                                title="⏰ Recordatorio: Incidente pendiente",
-                                body=f"Tienes {remaining_minutes} minutos para responder al incidente #{attempt.incident_id}",
-                                data={
-                                    "type": "assignment_reminder",
-                                    "incident_id": str(attempt.incident_id),
-                                    "remaining_minutes": str(remaining_minutes),
-                                    "action": "view_incident",
-                                    "action_url": f"/workshop/incidents/{attempt.incident_id}"
-                                }
-                            )
-                        )
-                        
-                        # Mark reminder as sent
-                        attempt.response_message = (
-                            f"Reminder sent at {now.isoformat()} "
-                            f"({remaining_minutes} min remaining)"
-                        )
-                        
-                        logger.info(
-                            f"📢 Sent reminder to workshop {workshop.workshop_name} "
-                            f"for incident {attempt.incident_id}"
-                        )
-                        
-                    except Exception as e:
-                        logger.error(f"Failed to send reminder: {str(e)}")
-                
-                await session.commit()
-            
-            # 2. Check for actual timeouts
-            reassignment_service = ReassignmentService(session)
-            timed_out_incidents = await reassignment_service.check_timeouts()
-            
-            if timed_out_incidents:
-                logger.warning(
-                    f"⏰ Found {len(timed_out_incidents)} timed out incidents: {timed_out_incidents}"
-                )
-                
-                # Reassign each timed out incident
-                for incident_id in timed_out_incidents:
-                    logger.info(f"🔄 Reassigning timed out incident {incident_id}...")
-                    result = await reassignment_service.reassign_to_next_candidate(incident_id)
-                    
-                    if result.success:
-                        logger.info(
-                            f"✅ Successfully reassigned incident {incident_id} to "
-                            f"{result.assigned_workshop.workshop_name if result.assigned_workshop else 'unknown'}"
-                        )
-                    else:
-                        logger.warning(
-                            f"⚠️ Failed to reassign incident {incident_id}: {result.error_message}"
-                        )
-            else:
-                logger.debug("✅ No timed out assignments found")
-                
-    except Exception as e:
-        logger.error(f"❌ Error in timeout check task: {str(e)}", exc_info=True)
+
+# NOTE: Assignment timeout checking is now handled by State Machine in tasks/state_timeouts.py
+# The old check_assignment_timeouts function has been removed to avoid duplication
 
 
 @asynccontextmanager
@@ -156,22 +48,95 @@ async def lifespan(_app: FastAPI):
     if settings.environment == "development":
         await create_database_tables()
     
-    # Start scheduler for background tasks
-    logger.info("🚀 Starting assignment timeout scheduler...")
-    scheduler.add_job(
-        check_assignment_timeouts,
-        trigger=IntervalTrigger(seconds=30),  # Changed from 1 minute to 30 seconds for better precision
-        id="check_assignment_timeouts",
-        name="Check Assignment Timeouts",
-        replace_existing=True,
-        max_instances=1,  # Prevent overlapping executions
+    # Initialize OutboxProcessor
+    from .core.websocket import manager as ws_manager
+    from .modules.outbox import OutboxProcessor
+    
+    global outbox_processor_instance
+    outbox_processor_instance = OutboxProcessor(
+        ws_manager=ws_manager,
+        batch_size=100,
+        poll_interval=1.0,  # Process every second
+        max_retries=3
     )
+    
+    # Start OutboxProcessor
+    logger.info("🚀 Starting OutboxProcessor...")
+    await outbox_processor_instance.start()
+    logger.info("✅ OutboxProcessor started")
+    
+    # ✅ Start State Machine timeout jobs (replaces old check_assignment_timeouts)
+    logger.info("🚀 Starting State Machine timeout scheduler...")
+    from .tasks.state_timeouts import check_all_timeouts
+    
+    # Single unified timeout check that handles both assignment and tracking
+    scheduler.add_job(
+        check_all_timeouts,
+        trigger=IntervalTrigger(seconds=30),  # Check every 30 seconds for precision
+        id="state_machine_all_timeouts",
+        name="State Machine: All Timeouts",
+        replace_existing=True,
+        max_instances=1  # Prevent overlapping executions
+    )
+    
+    # ✅ Start tracking cleanup job
+    logger.info("🚀 Starting tracking cleanup scheduler...")
+    from .tasks.tracking_cleanup import cleanup_old_locations
+    
+    # Clean up old location records every 6 hours at 2 AM, 8 AM, 2 PM, 8 PM
+    scheduler.add_job(
+        cleanup_old_locations,
+        trigger='cron',
+        hour='2,8,14,20',  # Run at 2 AM, 8 AM, 2 PM, 8 PM
+        minute=0,
+        id="tracking_cleanup",
+        name="Tracking: Cleanup Old Locations",
+        replace_existing=True,
+        max_instances=1  # Prevent overlapping executions
+    )
+    
+    # ✅ Start dashboard metrics job
+    logger.info("🚀 Starting dashboard metrics scheduler...")
+    from .tasks.dashboard_metrics import update_dashboard_metrics
+    
+    # Publish dashboard metrics every 1 minute
+    scheduler.add_job(
+        update_dashboard_metrics,
+        trigger=IntervalTrigger(minutes=1),
+        id="dashboard_metrics",
+        name="Dashboard: Metrics Update",
+        replace_existing=True,
+        max_instances=1  # Prevent overlapping executions
+    )
+    
+    # ✅ Start dashboard alerts job
+    logger.info("🚀 Starting dashboard alerts scheduler...")
+    from .tasks.dashboard_alerts import check_alerts
+    
+    # Check for dashboard alerts every 5 minutes
+    scheduler.add_job(
+        check_alerts,
+        trigger=IntervalTrigger(minutes=5),
+        id="dashboard_alerts",
+        name="Dashboard: Alert Checking",
+        replace_existing=True,
+        max_instances=1  # Prevent overlapping executions
+    )
+    
     scheduler.start()
-    logger.info("✅ Assignment timeout scheduler started (runs every 30 seconds)")
+    logger.info("✅ State Machine timeout scheduler started (runs every 30 seconds)")
+    logger.info("✅ Tracking cleanup scheduler started (runs every 6 hours)")
+    logger.info("✅ Dashboard metrics scheduler started (runs every 1 minute)")
+    logger.info("✅ Dashboard alerts scheduler started (runs every 5 minutes)")
     
     yield
     
     # Shutdown
+    logger.info("🛑 Shutting down OutboxProcessor...")
+    if outbox_processor_instance:
+        await outbox_processor_instance.stop()
+    logger.info("✅ OutboxProcessor shut down")
+    
     logger.info("🛑 Shutting down assignment timeout scheduler...")
     scheduler.shutdown(wait=True)
     logger.info("✅ Scheduler shut down")
@@ -190,9 +155,12 @@ app = FastAPI(
 )
 
 # Add middleware (order matters - first added is outermost)
+
+# Apply CORS middleware for HTTP requests
+# TEMPORARY: Allow all origins for WebSocket development
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.cors_origins,
+    allow_origins=["*"],  # ⚠️ TEMPORAL: Permitir todos los orígenes para desarrollo
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -218,3 +186,8 @@ def read_root() -> dict[str, str]:
         "docs": "/docs" if settings.environment != "production" else "disabled",
         "health": "/api/v1/health",
     }
+
+
+def get_outbox_processor():
+    """Get the global OutboxProcessor instance."""
+    return outbox_processor_instance

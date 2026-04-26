@@ -14,14 +14,14 @@ from typing import List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, update
 
-from ..core.logging import get_logger
-from ..core.config import get_settings
-from ..models.incidente import Incidente
-from ..models.assignment_attempt import AssignmentAttempt
-from ..models.administrator import Administrator
-from ..models.notification import Notification
-from ..modules.assignment.services import IntelligentAssignmentService, AssignmentResult
-from ..modules.push_notifications.services import PushNotificationService, PushNotificationData
+from ...core.logging import get_logger
+from ...core.config import get_settings
+from ...models.incidente import Incidente
+from ...models.assignment_attempt import AssignmentAttempt
+from ...models.administrator import Administrator
+from ...models.notification import Notification
+from .services import IntelligentAssignmentService, AssignmentResult
+from ..push_notifications.services import PushNotificationService, PushNotificationData
 
 logger = get_logger(__name__)
 settings = get_settings()
@@ -87,23 +87,19 @@ class ReassignmentService:
             incident = await self._load_incident(incident_id)
             if incident:
                 try:
-                    await self.push_service.send_to_user(
-                        user_id=incident.client_id,
-                        notification_data=PushNotificationData(
-                            title="🔄 Buscando nuevo taller",
-                            body=f"Un taller no pudo atender tu solicitud. Estamos buscando otro taller disponible.",
-                            data={
-                                "type": "incident_rejected_reassigning",
-                                "incident_id": str(incident_id),
-                                "priority": incident.prioridad_ia or "media",
-                                "action": "view_incident",
-                                "action_url": f"/incidents/{incident_id}"
-                            }
-                        )
+                    from ...shared.schemas.events.incident import IncidentReassignmentStartedEvent
+                    from ...core.event_publisher import EventPublisher
+                    
+                    reassignment_event = IncidentReassignmentStartedEvent(
+                        incident_id=incident_id,
+                        previous_workshop_id=workshop_id,
+                        reason=f"Rechazo del taller: {rejection_reason}",
+                        message="Buscando un nuevo taller disponible"
                     )
-                    logger.info(f"✅ Notified client {incident.client_id} about rejection and reassignment")
+                    await EventPublisher.publish(self.session, reassignment_event)
+                    logger.info(f"✅ Published reassignment_started event for incident {incident_id}")
                 except Exception as e:
-                    logger.error(f"Failed to notify client about rejection: {str(e)}")
+                    logger.error(f"Failed to publish reassignment event: {str(e)}")
             
             # 3. Wait a bit before reassigning (configurable delay)
             # This gives time for notifications to be processed
@@ -195,8 +191,8 @@ class ReassignmentService:
             await self.session.commit()
             
             # Emit assignment_timeout WebSocket events (Task 14)
-            from ..core.websocket_events import emit_to_admins, emit_to_user, EventTypes
-            from ..models.workshop import Workshop
+            from ...core.websocket_events import emit_to_admins, emit_to_user, emit_to_all, EventTypes
+            from ...models.workshop import Workshop
             
             for attempt, incident in timed_out_data:
                 if incident.estado_actual != 'pendiente':
@@ -232,6 +228,12 @@ class ReassignmentService:
                             f"WebSocket event '{EventTypes.ASSIGNMENT_TIMEOUT}' emitted to "
                             f"workshop {workshop.workshop_name} (user {workshop.id})"
                         )
+                    
+                    # ✅ Emit to ALL users (so all workshops see the update in real-time)
+                    await emit_to_all(
+                        event_type=EventTypes.ASSIGNMENT_TIMEOUT,
+                        data=timeout_payload
+                    )
                     
                     logger.info(
                         f"WebSocket event '{EventTypes.ASSIGNMENT_TIMEOUT}' emitted for "
@@ -379,26 +381,41 @@ class ReassignmentService:
                     timeout_minutes=timeout_minutes
                 )
                 
-                # Notify client about reassignment
-                try:
-                    await self.push_service.send_to_user(
-                        user_id=incident.client_id,
-                        notification_data=PushNotificationData(
-                            title="🔄 Buscando nuevo taller",
-                            body=f"Estamos asignando tu solicitud a otro taller disponible. Te notificaremos cuando sea aceptada.",
-                            data={
-                                "type": "incident_reassigned",
-                                "incident_id": str(incident_id),
-                                "new_workshop": best_candidate.workshop.workshop_name,
-                                "priority": incident.prioridad_ia or "media",
-                                "action": "view_incident",
-                                "action_url": f"/incidents/{incident_id}"
-                            }
-                        )
-                    )
-                    logger.info(f"✅ Notified client {incident.client_id} about reassignment")
-                except Exception as e:
-                    logger.error(f"Failed to notify client about reassignment: {str(e)}")
+                # Emit WebSocket event for incident reassignment (Task 2.3)
+                from ...core.websocket_events import emit_to_incident_room, emit_to_all, EventTypes
+                
+                old_workshop_id = incident.taller_id
+                new_workshop_id = best_candidate.workshop.id
+                
+                reassignment_data = {
+                    "incident_id": incident_id,
+                    "old_workshop_id": old_workshop_id,
+                    "new_workshop_id": new_workshop_id,
+                    "new_workshop_name": best_candidate.workshop.workshop_name,
+                    "reason": "automatic_reassignment",
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+                
+                # Emit to incident room
+                await emit_to_incident_room(
+                    incident_id=incident_id,
+                    event_type=EventTypes.INCIDENT_REASSIGNED,
+                    data=reassignment_data
+                )
+                
+                # ✅ Emit to ALL users (so all workshops see the update in real-time)
+                await emit_to_all(
+                    event_type=EventTypes.INCIDENT_REASSIGNED,
+                    data=reassignment_data
+                )
+                
+                logger.info(
+                    f"WebSocket event 'incident_reassigned' emitted for incident {incident_id} "
+                    f"(old_workshop: {old_workshop_id}, new_workshop: {new_workshop_id})"
+                )
+                
+                # Notification is handled by OutboxProcessor via incident_reassigned event
+                logger.info(f"✅ Reassignment event will be processed by OutboxProcessor for client {incident.client_id}")
                 
                 logger.info(
                     f"✅ Successfully reassigned incident {incident_id} to "
@@ -431,6 +448,7 @@ class ReassignmentService:
     async def notify_admin_no_workshops(self, incident_id: int) -> bool:
         """
         Notify all administrators AND the client when no workshops are available.
+        Uses event publishing instead of direct push notifications.
         
         Args:
             incident_id: ID of the incident
@@ -460,55 +478,24 @@ class ReassignmentService:
             # Count assignment attempts
             attempt_count = await self._count_assignment_attempts(incident_id)
             
-            # Send push notification to each admin
-            for admin in admins:
-                try:
-                    await self.push_service.send_to_user(
-                        user_id=admin.id,
-                        notification_data=PushNotificationData(
-                            title="⚠️ Incidente sin taller disponible",
-                            body=f"Incidente #{incident_id} no pudo ser asignado después de {attempt_count} intentos. Requiere intervención manual.",
-                            data={
-                                "type": "incident_no_workshop",
-                                "incident_id": str(incident_id),
-                                "priority": incident.prioridad_ia or "media",
-                                "category": incident.categoria_ia or "otros",
-                                "attempts": str(attempt_count),
-                                "location": {
-                                    "lat": str(float(incident.latitude)),
-                                    "lng": str(float(incident.longitude))
-                                },
-                                "action": "view_incident",
-                                "action_url": f"/admin/unassigned-incidents"
-                            }
-                        )
-                    )
-                    logger.info(f"✅ Notified admin {admin.email}")
-                except Exception as e:
-                    logger.error(f"Failed to notify admin {admin.email}: {str(e)}")
-            
-            # Notify the CLIENT about the situation
+            # Publish incident.no_workshop_available event (OutboxProcessor will handle notifications)
             try:
-                await self.push_service.send_to_user(
-                    user_id=incident.client_id,
-                    notification_data=PushNotificationData(
-                        title="⚠️ No hay talleres disponibles",
-                        body=f"Por el momento no hay talleres disponibles para atender tu solicitud. Puedes esperar a que se libere un taller o cancelar la solicitud si lo prefieres.",
-                        data={
-                            "type": "incident_no_workshop_client",
-                            "incident_id": str(incident_id),
-                            "priority": incident.prioridad_ia or "media",
-                            "category": incident.categoria_ia or "otros",
-                            "action": "view_incident",
-                            "action_url": f"/incidents/{incident_id}",
-                            "can_cancel": "true",
-                            "message": "No hay talleres disponibles. Puedes esperar o cancelar la solicitud."
-                        }
-                    )
+                from ...shared.schemas.events.incident import IncidentNoWorkshopAvailableEvent
+                from ...core.event_publisher import EventPublisher
+                
+                no_workshop_event = IncidentNoWorkshopAvailableEvent(
+                    incident_id=incident_id,
+                    reason=f"No hay talleres disponibles después de {attempt_count} intentos",
+                    workshops_contacted=attempt_count,
+                    message="No hay talleres disponibles. Puedes esperar o cancelar la solicitud"
                 )
-                logger.info(f"✅ Notified client {incident.client_id} about no workshops available with cancel option")
+                await EventPublisher.publish(self.session, no_workshop_event)
+                logger.info(f"✅ Published no_workshop_available event for incident {incident_id}")
             except Exception as e:
-                logger.error(f"Failed to notify client {incident.client_id}: {str(e)}")
+                logger.error(f"Failed to publish no_workshop_available event: {str(e)}")
+            
+            # Notifications are handled by OutboxProcessor via status_changed event
+            logger.info(f"✅ Status change event will be processed by OutboxProcessor for {len(admins)} admins")
             
             # Create notification in database for each admin (user_id cannot be null)
             for admin in admins:
@@ -553,6 +540,23 @@ class ReassignmentService:
             
             await self.session.commit()
             
+            # ✅ Emit WebSocket event for status change to all users
+            from ...core.websocket_events import emit_to_all, EventTypes
+            
+            try:
+                await emit_to_all(
+                    event_type=EventTypes.INCIDENT_STATUS_CHANGED,
+                    data={
+                        "incident_id": incident_id,
+                        "estado_actual": "sin_taller_disponible",
+                        "new_status": "sin_taller_disponible",
+                        "timestamp": datetime.utcnow().isoformat()
+                    }
+                )
+                logger.info(f"✅ WebSocket event emitted: incident {incident_id} → sin_taller_disponible")
+            except Exception as ws_err:
+                logger.error(f"Failed to emit status change WebSocket event: {str(ws_err)}")
+            
             logger.warning(
                 f"⚠️ Administrators and client notified: incident {incident_id} has no available workshops "
                 f"after {attempt_count} attempts"
@@ -586,7 +590,7 @@ class ReassignmentService:
         # Medium priority: default
         # Low priority: prioridad_ia is baja
         
-        priority = "media"  # default
+        priority = "media"  # default (solo como fallback, no debería usarse)
         
         if incident.prioridad_ia:
             prioridad_lower = incident.prioridad_ia.lower()
@@ -594,6 +598,14 @@ class ReassignmentService:
                 priority = "alta"
             elif prioridad_lower in ["baja", "low"]:
                 priority = "baja"
+            elif prioridad_lower in ["media", "medium"]:
+                priority = "media"
+        else:
+            # Esto no debería pasar ahora que esperamos a la IA
+            logger.warning(
+                f"⚠️ Incident {incident.id} has no prioridad_ia! Using default 'media'. "
+                f"This should not happen."
+            )
         
         # Map priority to timeout
         timeout_map = {
@@ -602,7 +614,99 @@ class ReassignmentService:
             "baja": settings.assignment_timeout_low_priority
         }
         
-        return timeout_map.get(priority, settings.assignment_timeout_minutes)
+        timeout_minutes = timeout_map.get(priority, settings.assignment_timeout_minutes)
+        
+        # Log para debugging
+        logger.info(
+            f"🕐 Timeout calculation for incident {incident.id}: "
+            f"prioridad_ia='{incident.prioridad_ia}' → priority='{priority}' → timeout={timeout_minutes} minutes"
+        )
+        
+        return timeout_minutes
+
+    async def handle_timeout(
+        self,
+        incident_id: int,
+        workshop_id: int
+    ) -> AssignmentResult:
+        """
+        Handle timeout notification from frontend and reassign with recalculation.
+        
+        This method is called when the frontend detects a timeout or when the
+        backend timeout checker finds expired assignments.
+        
+        Flow:
+        1. Mark current attempt as 'timeout'
+        2. Notify client about timeout
+        3. Get list of excluded workshops (rejected + timeout)
+        4. RECALCULATE available candidates (fresh data)
+        5. Assign to best available candidate NOW
+        6. If no candidates, notify admin and client
+        
+        Args:
+            incident_id: ID of the incident
+            workshop_id: ID of the workshop that timed out
+            
+        Returns:
+            AssignmentResult with reassignment details
+        """
+        try:
+            logger.info(
+                f"⏰ Handling timeout for incident {incident_id} from workshop {workshop_id}"
+            )
+            
+            # 1. Mark as timeout (may already be done by caller, but ensure it's set)
+            await self.assignment_service._update_assignment_attempt_status(
+                incident_id=incident_id,
+                workshop_id=workshop_id,
+                status="timeout",
+                response_message="Timeout: No response within time limit"
+            )
+            
+            # 2. Notify client about timeout and reassignment
+            incident = await self._load_incident(incident_id)
+            if incident:
+                try:
+                    from ...shared.schemas.events.incident import IncidentReassignmentStartedEvent
+                    from ...core.event_publisher import EventPublisher
+                    
+                    reassignment_event = IncidentReassignmentStartedEvent(
+                        incident_id=incident_id,
+                        previous_workshop_id=workshop_id,
+                        reason="Timeout: El taller no respondió a tiempo",
+                        message="Buscando un nuevo taller disponible"
+                    )
+                    await EventPublisher.publish(self.session, reassignment_event)
+                    logger.info(f"✅ Published reassignment_started event for incident {incident_id}")
+                except Exception as e:
+                    logger.error(f"Failed to publish reassignment event: {str(e)}")
+            
+            # 3. Wait a bit before reassigning (configurable delay)
+            # This gives time for notifications to be processed
+            # In production, this could be handled by a background task
+            # For now, we proceed immediately
+            
+            # 4. Reassign with recalculation
+            result = await self.reassign_to_next_candidate(incident_id)
+            
+            if result.success:
+                logger.info(
+                    f"✅ Successfully reassigned incident {incident_id} after timeout to "
+                    f"{result.assigned_workshop.workshop_name if result.assigned_workshop else 'unknown'}"
+                )
+            else:
+                logger.warning(
+                    f"⚠️ Failed to reassign incident {incident_id} after timeout: {result.error_message}"
+                )
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"❌ Error handling timeout: {str(e)}", exc_info=True)
+            return AssignmentResult(
+                success=False,
+                error_message=f"Timeout handling error: {str(e)}"
+            )
 
     async def _count_assignment_attempts(self, incident_id: int) -> int:
         """Count total assignment attempts for an incident."""

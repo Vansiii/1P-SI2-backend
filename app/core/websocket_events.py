@@ -244,6 +244,7 @@ class EventTypes:
     INCIDENT_STATUS_CHANGED = "incident_status_changed"
     INCIDENT_RESOLVED = "incident_resolved"
     INCIDENT_CANCELLED = "incident_cancelled"
+    INCIDENT_REASSIGNED = "incident_reassigned"
     
     # Technician events
     TECHNICIAN_ASSIGNED = "technician_assigned"
@@ -294,7 +295,7 @@ class EventTypes:
     ASSIGNMENT_ATTEMPT_CREATED = "assignment_attempt_created"
     ASSIGNMENT_ACCEPTED = "assignment_accepted"
     ASSIGNMENT_REJECTED = "assignment_rejected"
-    ASSIGNMENT_TIMEOUT = "assignment_timeout"
+    ASSIGNMENT_TIMEOUT = "incident.assignment_timeout"  # ✅ Fixed: Use full event type to match schema
     
     # Service events
     SERVICE_STARTED = "service_started"
@@ -302,6 +303,11 @@ class EventTypes:
     SERVICE_COMPLETED = "service_completed"
     SERVICE_PAUSED = "service_paused"
     SERVICE_RESUMED = "service_resumed"
+    
+    # AI Analysis events
+    INCIDENT_ANALYSIS_STARTED = "incident_analysis_started"
+    INCIDENT_ANALYSIS_COMPLETED = "incident_analysis_completed"
+    INCIDENT_ANALYSIS_FAILED = "incident_analysis_failed"
     
     # Audit events
     AUDIT_LOG_CREATED = "audit_log_created"

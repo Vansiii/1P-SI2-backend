@@ -19,6 +19,7 @@ from sqlalchemy import select, and_, or_, func, text, update
 from sqlalchemy.orm import selectinload
 
 from ...core.logging import get_logger
+from ...core.state_machine import IncidentStateMachine, IncidentState, UserRole
 from ...core.websocket import manager as ws_manager
 from ...models.incidente import Incidente
 from ...models.workshop import Workshop
@@ -112,6 +113,26 @@ class IntelligentAssignmentService:
                     error_message=f"Incident {incident_id} not found"
                 )
 
+            # Validate state transition using State Machine
+            state_machine = IncidentStateMachine()
+            current_state = IncidentState(incident.estado_actual)
+            target_state = IncidentState.ASIGNADO
+            
+            # System role for automatic assignment
+            can_transition, error_message = state_machine.can_transition(
+                from_state=current_state,
+                to_state=target_state,
+                user_role=UserRole.ADMIN,  # System acts as admin for automatic assignment
+                incident=incident
+            )
+            
+            if not can_transition:
+                logger.warning(f"State transition validation failed for incident {incident_id}: {error_message}")
+                return AssignmentResult(
+                    success=False,
+                    error_message=f"Cannot assign incident: {error_message}"
+                )
+
             # Check if already assigned
             if incident.taller_id or incident.tecnico_id:
                 return AssignmentResult(
@@ -120,6 +141,21 @@ class IntelligentAssignmentService:
                 )
 
             logger.info(f"Starting assignment process for incident {incident_id}")
+
+            # ✅ Publicar evento de búsqueda de taller
+            try:
+                from ...shared.schemas.events.incident import IncidentSearchingWorkshopEvent
+                from ...core.event_publisher import EventPublisher
+                
+                searching_event = IncidentSearchingWorkshopEvent(
+                    incident_id=incident_id,
+                    search_attempt=1,  # TODO: Track actual attempt number
+                    message="Buscando el mejor taller disponible"
+                )
+                await EventPublisher.publish(self.session, searching_event)
+                logger.info(f"✅ Published searching_workshop event for incident {incident_id}")
+            except Exception as e:
+                logger.error(f"Failed to publish searching_workshop event: {str(e)}")
 
             # Step 1: Get excluded workshops (already tried)
             excluded_workshops = await self._get_excluded_workshops(incident_id)
@@ -130,6 +166,33 @@ class IntelligentAssignmentService:
             candidates = await self._find_and_score_candidates(incident, excluded_workshops)
             
             if not candidates:
+                # ✅ Actualizar estado del incidente a "sin_taller_disponible"
+                logger.warning(f"⚠️ No candidates found for incident {incident_id}, updating state to sin_taller_disponible")
+                
+                await self.session.execute(
+                    update(Incidente)
+                    .where(Incidente.id == incident_id)
+                    .values(estado_actual="sin_taller_disponible")
+                )
+                await self.session.commit()
+                
+                # ✅ Publicar evento de sin taller disponible
+                try:
+                    from ...shared.schemas.events.incident import IncidentNoWorkshopAvailableEvent
+                    from ...core.event_publisher import EventPublisher
+                    
+                    no_workshop_event = IncidentNoWorkshopAvailableEvent(
+                        incident_id=incident_id,
+                        reason="No available workshops found within coverage area",
+                        workshops_contacted=len(excluded_workshops),
+                        message="No hay talleres disponibles en este momento"
+                    )
+                    await EventPublisher.publish(self.session, no_workshop_event)
+                    await self.session.commit()
+                    logger.info(f"✅ Published no_workshop_available event for incident {incident_id}")
+                except Exception as e:
+                    logger.error(f"Failed to publish no_workshop_available event: {str(e)}")
+                
                 return AssignmentResult(
                     success=False,
                     error_message="No available workshops found within coverage area (after exclusions)"
@@ -799,19 +862,30 @@ Usa tu experiencia para evaluar qué taller y técnico tienen mayor probabilidad
                 f"with {timeout_minutes} minute timeout"
             )
             
-            # Send push notification to workshop owner
-            await self._send_assignment_notification(
-                incident=incident,
-                workshop=candidate.workshop,
-                technician=technician,
-                timeout_minutes=timeout_minutes
-            )
+            # ✅ PUBLICAR EVENTO AL OUTBOX (reemplaza emit_to_all)
+            # El OutboxProcessor se encargará de:
+            # 1. Filtrar destinatarios (solo el taller asignado)
+            # 2. Enviar WebSocket si está online
+            # 3. Enviar notificación push si está offline
+            # 4. Registrar en event_log para auditoría
+            from ...shared.schemas.events.incident import IncidentAssignedEvent
+            from ...core.event_publisher import EventPublisher
             
-            # 🔔 Emit WebSocket event for real-time UI update
-            await self._emit_incident_assignment_event(
-                incident=incident,
-                workshop=candidate.workshop,
-                technician=technician
+            assigned_event = IncidentAssignedEvent(
+                incident_id=incident.id,
+                workshop_id=candidate.workshop.id,
+                workshop_name=candidate.workshop.workshop_name,
+                technician_id=technician.id if technician else None,
+                technician_name=f"{technician.first_name} {technician.last_name}" if technician else None,
+                estimated_time=timeout_minutes,
+                assignment_strategy=candidate.assignment_strategy.value
+            )
+            await EventPublisher.publish(self.session, assigned_event)
+            await self.session.commit()
+            
+            logger.info(
+                f"✅ IncidentAssignedEvent published to outbox for incident {incident.id} "
+                f"→ workshop {candidate.workshop.workshop_name} (id: {candidate.workshop.id})"
             )
             
             # NOTE: We do NOT assign the technician yet
@@ -1022,7 +1096,16 @@ Usa tu experiencia para evaluar qué taller y técnico tienen mayor probabilidad
             True if timeout was set successfully
         """
         try:
-            timeout_at = datetime.utcnow() + timedelta(minutes=timeout_minutes)
+            # ✅ Usar timezone-aware datetime para evitar problemas de zona horaria
+            from datetime import timezone
+            now = datetime.now(timezone.utc)
+            timeout_at = now + timedelta(minutes=timeout_minutes)
+            
+            logger.info(
+                f"⏰ Setting timeout for incident {incident_id}, workshop {workshop_id}: "
+                f"now={now.isoformat()}, timeout_minutes={timeout_minutes}, "
+                f"timeout_at={timeout_at.isoformat()}"
+            )
             
             await self.session.execute(
                 update(AssignmentAttempt)
@@ -1038,13 +1121,13 @@ Usa tu experiencia para evaluar qué taller y técnico tienen mayor probabilidad
             await self.session.commit()
             
             logger.info(
-                f"Set timeout for incident {incident_id}, workshop {workshop_id}: "
-                f"{timeout_at.isoformat()} ({timeout_minutes} minutes)"
+                f"✅ Timeout set successfully for incident {incident_id}, workshop {workshop_id}: "
+                f"{timeout_at.isoformat()} ({timeout_minutes} minutes from now)"
             )
             return True
             
         except Exception as e:
-            logger.error(f"Failed to set assignment timeout: {str(e)}")
+            logger.error(f"❌ Failed to set assignment timeout: {str(e)}")
             return False
 
     def _get_timeout_minutes_for_incident(self, incident: Incidente) -> int:
@@ -1065,7 +1148,7 @@ Usa tu experiencia para evaluar qué taller y técnico tienen mayor probabilidad
         # Medium priority: default
         # Low priority: prioridad_ia is baja
         
-        priority = "media"  # default
+        priority = "media"  # default (solo como fallback, no debería usarse)
         
         if incident.prioridad_ia:
             prioridad_lower = incident.prioridad_ia.lower()
@@ -1073,6 +1156,14 @@ Usa tu experiencia para evaluar qué taller y técnico tienen mayor probabilidad
                 priority = "alta"
             elif prioridad_lower in ["baja", "low"]:
                 priority = "baja"
+            elif prioridad_lower in ["media", "medium"]:
+                priority = "media"
+        else:
+            # Esto no debería pasar ahora que esperamos a la IA
+            logger.warning(
+                f"⚠️ Incident {incident.id} has no prioridad_ia! Using default 'media'. "
+                f"This should not happen."
+            )
         
         # Map priority to timeout
         timeout_map = {
@@ -1081,7 +1172,15 @@ Usa tu experiencia para evaluar qué taller y técnico tienen mayor probabilidad
             "baja": settings.assignment_timeout_low_priority
         }
         
-        return timeout_map.get(priority, settings.assignment_timeout_minutes)
+        timeout_minutes = timeout_map.get(priority, settings.assignment_timeout_minutes)
+        
+        # Log para debugging
+        logger.info(
+            f"🕐 Timeout calculation for incident {incident.id}: "
+            f"prioridad_ia='{incident.prioridad_ia}' → priority='{priority}' → timeout={timeout_minutes} minutes"
+        )
+        
+        return timeout_minutes
 
     async def _send_assignment_notification(
         self,
@@ -1091,66 +1190,20 @@ Usa tu experiencia para evaluar qué taller y técnico tienen mayor probabilidad
         timeout_minutes: int
     ) -> None:
         """
-        Send push notification to workshop owner when incident is assigned.
+        ✅ DEPRECATED: Notifications are now handled by OutboxProcessor.
         
-        Args:
-            incident: The incident being assigned
-            workshop: The workshop receiving the assignment
-            technician: The suggested technician
-            timeout_minutes: Timeout for accepting the assignment
+        The IncidentAssignedEvent published to outbox handles notifications automatically:
+        - WebSocket for online users
+        - FCM push for offline users
+        - Automatic retry on failure
+        - Audit logging in event_log table
+        
+        This method is kept for backward compatibility but does nothing.
         """
-        try:
-            from ..push_notifications.services import PushNotificationService, PushNotificationData
-            
-            push_service = PushNotificationService(self.session)
-            
-            if not push_service.is_enabled():
-                logger.warning("Push notifications are disabled, skipping assignment notification")
-                return
-            
-            # Get workshop owner ID (assuming workshop.id is the owner's user_id)
-            # TODO: If workshop has a separate owner_id field, use that instead
-            workshop_owner_id = workshop.id
-            
-            # Build notification message
-            priority_emoji = "🔴" if incident.prioridad_ia == "alta" else "🟡" if incident.prioridad_ia == "media" else "🟢"
-            
-            notification_data = PushNotificationData(
-                title=f"{priority_emoji} Nueva solicitud de servicio",
-                body=f"Incidente #{incident.id} - {incident.categoria_ia or 'Sin categoría'}. Técnico sugerido: {technician.first_name} {technician.last_name}. Tienes {timeout_minutes} minutos para responder.",
-                data={
-                    "type": "incident_assignment",
-                    "incident_id": str(incident.id),
-                    "workshop_id": str(workshop.id),
-                    "technician_id": str(technician.id),
-                    "priority": incident.prioridad_ia or "media",
-                    "timeout_minutes": str(timeout_minutes),
-                    "click_action": f"/incidents/{incident.id}"  # Moved to data for mobile apps
-                },
-                click_action=None  # Set to None for web push (not needed, handled by service worker)
-            )
-            
-            # Send to workshop owner
-            success = await push_service.send_to_user(
-                user_id=workshop_owner_id,
-                notification_data=notification_data,
-                save_to_db=True
-            )
-            
-            if success:
-                logger.info(
-                    f"Push notification sent to workshop {workshop.workshop_name} (user {workshop_owner_id}) "
-                    f"for incident {incident.id}"
-                )
-            else:
-                logger.warning(
-                    f"Failed to send push notification to workshop {workshop.workshop_name} "
-                    f"for incident {incident.id}"
-                )
-                
-        except Exception as e:
-            logger.error(f"Error sending assignment push notification: {str(e)}", exc_info=True)
-            # Don't fail the assignment if notification fails
+        logger.debug(
+            f"[DEPRECATED] Assignment notification for incident {incident.id} to workshop {workshop.workshop_name} "
+            f"is now handled automatically by OutboxProcessor"
+        )
 
     async def _emit_incident_assignment_event(
         self,
@@ -1159,43 +1212,22 @@ Usa tu experiencia para evaluar qué taller y técnico tienen mayor probabilidad
         technician: Technician
     ) -> None:
         """
-        Emit WebSocket event when incident is assigned to workshop.
-        This allows real-time UI updates without page refresh.
+        ✅ DEPRECATED: WebSocket events are now handled by OutboxProcessor.
         
-        Args:
-            incident: The incident being assigned
-            workshop: The workshop receiving the assignment
-            technician: The suggested technician
+        The IncidentAssignedEvent published to outbox handles WebSocket emission automatically:
+        - Filters recipients (only assigned workshop)
+        - Sends immediate WebSocket if online
+        - Falls back to FCM push if offline
+        - Registers in event_log for audit
+        
+        This method is kept for backward compatibility but does nothing.
+        
+        IMPORTANT: Do NOT use emit_to_all() for entity-specific events.
+        Use EventPublisher.publish() with OutboxProcessor instead.
         """
-        try:
-            from ...core.websocket_events import emit_to_user, EventTypes
-            
-            # Build event payload
-            event_data = {
-                "incident_id": incident.id,
-                "workshop_id": workshop.id,
-                "workshop_name": workshop.workshop_name,
-                "technician_id": technician.id,
-                "technician_name": f"{technician.first_name} {technician.last_name}",
-                "estado_actual": incident.estado_actual,
-                "prioridad_ia": incident.prioridad_ia,
-                "categoria_ia": incident.categoria_ia,
-                "timestamp": datetime.utcnow().isoformat()
-            }
-            
-            # Send to workshop owner using standardized emit_to_user
-            # (workshop.id is the user_id of the workshop owner)
-            await emit_to_user(
-                user_id=workshop.id,
-                event_type=EventTypes.INCIDENT_ASSIGNED,
-                data=event_data
-            )
-            
-            logger.info(
-                f"WebSocket event emitted: incident {incident.id} assigned to "
-                f"workshop {workshop.workshop_name} (user {workshop.id})"
-            )
-            
-        except Exception as e:
-            logger.error(f"Error emitting WebSocket assignment event: {str(e)}", exc_info=True)
+        logger.debug(
+            f"[DEPRECATED] WebSocket event for incident {incident.id} assignment "
+            f"is now handled automatically by OutboxProcessor"
+        )
+
             # Don't fail the assignment if WebSocket fails

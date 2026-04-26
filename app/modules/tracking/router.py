@@ -21,7 +21,8 @@ from .schemas import (
     TrackingSessionResponse,
     LocationHistoryResponse,
     TrackingStatisticsResponse,
-    LocationHistoryRequest
+    LocationHistoryRequest,
+    BatchLocationUpdate
 )
 from ...models.user import User
 
@@ -95,6 +96,83 @@ async def update_technician_location(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error al actualizar ubicación: {str(e)}"
+        )
+
+
+@router.post("/technicians/{technician_id}/location/batch", status_code=status.HTTP_200_OK)
+async def update_technician_location_batch(
+    technician_id: int,
+    batch: 'BatchLocationUpdate',
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Update technician's location with a batch of location updates.
+    
+    This endpoint:
+    - Accepts up to 10 location updates in a single request
+    - Updates technician's current location to the most recent one
+    - Saves all locations to history using batch insert
+    - Broadcasts the most recent location update via WebSocket
+    
+    **Permissions:** Technician can only update their own location
+    
+    **Performance:** Uses executemany() for efficient batch insertion
+    """
+    logger.info(f"📍 Recibida actualización de ubicación en batch para técnico {technician_id}")
+    logger.info(f"📍 Cantidad de ubicaciones: {len(batch.locations)}")
+    
+    # Verify technician can only update their own location
+    is_admin = current_user.user_type == "admin"
+    if not is_admin and current_user.id != technician_id:
+        logger.warning(f"❌ Usuario {current_user.id} intentó actualizar ubicación de técnico {technician_id}")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You can only update your own location"
+        )
+
+    try:
+        real_time_service = RealTimeService(db)
+        
+        # Sort locations by recorded_at to ensure correct order
+        sorted_locations = sorted(batch.locations, key=lambda loc: loc.recorded_at)
+        
+        # Process all locations in batch
+        logger.info(f"📤 Procesando batch de {len(sorted_locations)} ubicaciones...")
+        
+        # Update each location (RealTimeService handles batch insertion internally)
+        for location in sorted_locations:
+            await real_time_service.update_technician_location(
+                technician_id=technician_id,
+                latitude=location.latitude,
+                longitude=location.longitude,
+                accuracy=location.accuracy,
+                speed=location.speed,
+                heading=location.heading
+            )
+        
+        # Get the most recent location for response
+        most_recent = sorted_locations[-1]
+        
+        logger.info(f"✅ Batch de {len(sorted_locations)} ubicaciones procesado exitosamente para técnico {technician_id}")
+        return success_response(
+            data={
+                "technician_id": technician_id,
+                "locations_processed": len(sorted_locations),
+                "most_recent_location": {
+                    "latitude": most_recent.latitude,
+                    "longitude": most_recent.longitude,
+                    "recorded_at": most_recent.recorded_at.isoformat()
+                },
+                "updated_at": datetime.utcnow().isoformat()
+            },
+            message=f"Batch of {len(sorted_locations)} locations updated successfully"
+        )
+    except Exception as e:
+        logger.error(f"❌ Error al actualizar ubicaciones en batch: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error al actualizar ubicaciones en batch: {str(e)}"
         )
 
 

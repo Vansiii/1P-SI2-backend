@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
 
 from ...core.websocket import manager
-from ...core.websocket_events import emit_to_incident_room, EventTypes
+from ...core.websocket_events import emit_to_incident_room, emit_to_all, EventTypes
 from ...core.logging import get_logger
 from ...models.incidente import Incidente
 from ...models.technician import Technician
@@ -126,18 +126,7 @@ class RealTimeService:
                 for incident in active_incidents_list:
                     logger.info(f"📡 Enviando actualización a incidente {incident.id}")
                     
-                    # Legacy WebSocket method (keep for backward compatibility)
-                    await manager.send_location_update(
-                        incident_id=incident.id,
-                        technician_id=technician_id,
-                        latitude=latitude,
-                        longitude=longitude,
-                        accuracy=accuracy,
-                        speed=speed,
-                        heading=heading
-                    )
-                    
-                    # New standardized WebSocket event
+                    # ✅ Solo emitir con el formato estandarizado (eliminada la doble emisión legacy)
                     await emit_to_incident_room(
                         incident_id=incident.id,
                         event_type=EventTypes.LOCATION_UPDATE,
@@ -249,16 +238,11 @@ class RealTimeService:
                 changed_by=changed_by
             )
 
-            # Send push notification to client
-            if self.push_service.is_enabled():
-                await self.push_service.send_incident_notification(
-                    user_id=incident.client_id,
-                    incident_id=incident_id,
-                    notification_type="incident_status_change",
-                    title="Estado del incidente actualizado",
-                    body=f"Tu incidente cambió a estado: {new_status}",
-                    additional_data={"notes": notes}
-                )
+            # ═══════════════════════════════════════════════════════════════════════
+            # ✅ NOTIFICACIONES MANEJADAS POR OUTBOX PROCESSOR
+            # El OutboxProcessor maneja todas las notificaciones automáticamente
+            # NO enviar notificaciones duplicadas aquí
+            # ═══════════════════════════════════════════════════════════════════════
 
             await self.session.commit()
             logger.info(f"Incident {incident_id} status updated to {new_status}")
@@ -300,6 +284,36 @@ class RealTimeService:
                 logger.warning(f"Technician {technician_id} not found")
                 return False
 
+            # Get incident current state for validation
+            incident_before = await self.session.scalar(
+                select(Incidente).where(Incidente.id == incident_id)
+            )
+            
+            if not incident_before:
+                logger.warning(f"Incident {incident_id} not found")
+                return False
+            
+            # ✅ VALIDAR TRANSICIÓN DE ESTADO CON STATE MACHINE
+            from ...core import IncidentStateMachine, ValidationException
+            
+            # When technician is assigned: transition to EN_PROCESO
+            # Valid from: ACEPTADO (taller accepted and now assigns technician)
+            target_state = "en_proceso"
+            
+            is_valid, error_message = IncidentStateMachine.can_transition(
+                from_state=incident_before.estado_actual,
+                to_state=target_state,
+                user_role="admin",  # System/admin role for automatic assignment
+                incident=incident_before
+            )
+            
+            if not is_valid:
+                logger.error(
+                    f"State Machine validation failed: Cannot assign technician to "
+                    f"incident {incident_id} in state '{incident_before.estado_actual}': {error_message}"
+                )
+                raise ValidationException(error_message)
+            
             # Update incident with technician assignment
             await self.session.execute(
                 update(Incidente)
@@ -307,7 +321,7 @@ class RealTimeService:
                 .values(
                     tecnico_id=technician_id,
                     taller_id=technician.workshop_id,
-                    estado_actual="en_proceso",  # Cambiar a en_proceso cuando se asigna técnico
+                    estado_actual="en_proceso",  # ✅ Validated: ACEPTADO → EN_PROCESO
                     assigned_at=datetime.utcnow(),
                     updated_at=datetime.utcnow()
                 )
@@ -390,44 +404,69 @@ class RealTimeService:
             )
             self.session.add(tech_notification)
 
-            # Broadcast assignment
-            await manager.send_technician_assigned(
+            # ═══════════════════════════════════════════════════════════════════════
+            # ✅ EMITIR EVENTO ESTANDARIZADO: technician_assigned
+            # ═══════════════════════════════════════════════════════════════════════
+            
+            technician_assigned_data = {
+                "incident_id": incident_id,
+                "technician_id": technician_id,
+                "technician_name": f"{technician.first_name} {technician.last_name}",
+                "technician_phone": technician.phone,
+                "workshop_id": technician.workshop_id,
+                "workshop_name": workshop_name,
+                "estado_actual": "en_proceso",
+                "assigned_by": assigned_by,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+            
+            # Emit to incident room
+            await emit_to_incident_room(
                 incident_id=incident_id,
-                technician_id=technician_id,
-                technician_name=f"{technician.first_name} {technician.last_name}",
-                workshop_name=workshop_name
+                event_type=EventTypes.TECHNICIAN_ASSIGNED,
+                data=technician_assigned_data
             )
-
-            # Send push notifications
-            if self.push_service.is_enabled():
-                # Notify client
-                await self.push_service.send_incident_notification(
-                    user_id=incident.client_id,
-                    incident_id=incident_id,
-                    notification_type="technician_assigned",
-                    title="Técnico asignado",
-                    body=f"Se asignó el técnico {technician.first_name} {technician.last_name}",
-                    additional_data={
-                        "technician_name": f"{technician.first_name} {technician.last_name}",
-                        "workshop_name": workshop_name
-                    }
-                )
-                
-                # Notify technician
-                await self.push_service.send_incident_notification(
-                    user_id=technician_id,
-                    incident_id=incident_id,
-                    notification_type="incident_assigned",
-                    title="Nuevo incidente asignado",
-                    body=f"Se te asignó un nuevo incidente #{incident_id}",
-                    additional_data={
-                        "client_name": f"{incident.client.first_name} {incident.client.last_name}" if incident.client else "N/A",
-                        "location": {
-                            "latitude": float(incident.latitude),
-                            "longitude": float(incident.longitude)
-                        }
-                    }
-                )
+            
+            # ✅ Emit to ALL users (so all workshops see the update in real-time)
+            await emit_to_all(
+                event_type=EventTypes.TECHNICIAN_ASSIGNED,
+                data=technician_assigned_data
+            )
+            
+            # ✅ Also emit status change event
+            await emit_to_all(
+                event_type=EventTypes.INCIDENT_STATUS_CHANGED,
+                data={
+                    "incident_id": incident_id,
+                    "estado_actual": "en_proceso",
+                    "new_status": "en_proceso",
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+            )
+            
+            # ═══════════════════════════════════════════════════════════════════════
+            # ✅ NOTIFICACIONES MANEJADAS POR OUTBOX PROCESSOR
+            # El evento ya fue publicado arriba, OutboxProcessor se encarga de:
+            # - Enviar via WebSocket si usuario online
+            # - Enviar via FCM si usuario offline
+            # - Aplicar filtros inteligentes
+            # NO enviar notificaciones duplicadas aquí
+            # ═══════════════════════════════════════════════════════════════════════
+            
+            logger.info(
+                f"✅ Evento TECHNICIAN_ASSIGNED emitido para incidente {incident_id}",
+                incident_id=incident_id,
+                technician_id=technician_id
+            )
+            
+            # ═══════════════════════════════════════════════════════════════════════
+            
+            # ═══════════════════════════════════════════════════════════════════════
+            # ✅ NOTIFICACIONES MANEJADAS POR OUTBOX PROCESSOR
+            # El OutboxProcessor ya maneja todas las notificaciones via:
+            # - EventPublisher → OutboxEvent → Delivery Strategies
+            # NO enviar notificaciones duplicadas aquí
+            # ═══════════════════════════════════════════════════════════════════════
 
             await self.session.commit()
             logger.info(f"Technician {technician_id} assigned to incident {incident_id} and marked as on_duty")
@@ -454,12 +493,42 @@ class RealTimeService:
             True if notification was successful
         """
         try:
+            # Get incident current state for validation
+            incident_before = await self.session.scalar(
+                select(Incidente).where(Incidente.id == incident_id)
+            )
+            
+            if not incident_before:
+                logger.warning(f"Incident {incident_id} not found")
+                return False
+            
+            # ✅ VALIDAR TRANSICIÓN DE ESTADO CON STATE MACHINE
+            from ...core import IncidentStateMachine, ValidationException
+            
+            # When technician arrives: transition to EN_PROCESO
+            # Valid from: EN_CAMINO (technician was on the way) or ACEPTADO (direct arrival)
+            target_state = "en_proceso"
+            
+            is_valid, error_message = IncidentStateMachine.can_transition(
+                from_state=incident_before.estado_actual,
+                to_state=target_state,
+                user_role="technician",  # Technician role for arrival notification
+                incident=incident_before
+            )
+            
+            if not is_valid:
+                logger.error(
+                    f"State Machine validation failed: Technician {technician_id} cannot mark arrival for "
+                    f"incident {incident_id} in state '{incident_before.estado_actual}': {error_message}"
+                )
+                raise ValidationException(error_message)
+            
             # Update incident status
             await self.session.execute(
                 update(Incidente)
                 .where(Incidente.id == incident_id)
                 .values(
-                    estado_actual="en_proceso",
+                    estado_actual="en_proceso",  # ✅ Validated: EN_CAMINO/ACEPTADO → EN_PROCESO
                     updated_at=datetime.utcnow()
                 )
             )
@@ -496,21 +565,37 @@ class RealTimeService:
             )
             self.session.add(notification)
 
-            # Broadcast arrival
+            # ✅ Emit WebSocket events
+            arrived_data = {
+                "incident_id": incident_id,
+                "technician_id": technician_id,
+                "timestamp": datetime.utcnow().isoformat()
+            }
+            
+            # Emit to incident room
+            await emit_to_incident_room(
+                incident_id=incident_id,
+                event_type=EventTypes.TECHNICIAN_ARRIVED,
+                data=arrived_data
+            )
+            
+            # ✅ Emit to ALL users
+            await emit_to_all(
+                event_type=EventTypes.TECHNICIAN_ARRIVED,
+                data=arrived_data
+            )
+            
+            # Broadcast arrival (legacy - mantener por compatibilidad)
             await manager.send_technician_arrived(
                 incident_id=incident_id,
                 technician_id=technician_id
             )
 
-            # Send push notification to client
-            if self.push_service.is_enabled():
-                await self.push_service.send_incident_notification(
-                    user_id=incident.client_id,
-                    incident_id=incident_id,
-                    notification_type="technician_arrived",
-                    title="El técnico ha llegado",
-                    body="El técnico ha llegado a tu ubicación y comenzará el servicio"
-                )
+            # ═══════════════════════════════════════════════════════════════════════
+            # ✅ NOTIFICACIONES MANEJADAS POR OUTBOX PROCESSOR
+            # El OutboxProcessor maneja todas las notificaciones automáticamente
+            # NO enviar notificaciones duplicadas aquí
+            # ═══════════════════════════════════════════════════════════════════════
 
             await self.session.commit()
             logger.info(f"Technician {technician_id} arrived at incident {incident_id}")

@@ -326,7 +326,7 @@ class IncidenteRepository(BaseRepository[Incidente]):
             # Para talleres: mostrar incidentes con intentos pendientes O timeout
             # Esto permite que el taller vea las solicitudes que no respondió a tiempo
             from ...models.assignment_attempt import AssignmentAttempt
-            from sqlalchemy import and_
+            from sqlalchemy import and_, or_
             
             query = (
                 select(Incidente)
@@ -338,7 +338,16 @@ class IncidenteRepository(BaseRepository[Incidente]):
                         AssignmentAttempt.status.in_(['pending', 'timeout'])
                     )
                 )
-                .where(Incidente.estado_actual == "pendiente")
+                .where(
+                    and_(
+                        Incidente.estado_actual == "pendiente",
+                        # ✅ CRÍTICO: Excluir incidentes ya asignados a OTRO taller
+                        or_(
+                            Incidente.taller_id.is_(None),  # No asignado a nadie
+                            Incidente.taller_id == taller_id  # O asignado a este taller
+                        )
+                    )
+                )
                 .options(
                     selectinload(Incidente.client),
                     selectinload(Incidente.vehiculo),

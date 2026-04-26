@@ -21,9 +21,10 @@ class Settings(BaseSettings):
     
     # Database
     database_url: str | None = Field(default=None, alias="DATABASE_URL")
-    db_pool_size: int = Field(default=5, alias="DB_POOL_SIZE")
-    db_max_overflow: int = Field(default=10, alias="DB_MAX_OVERFLOW")
+    db_pool_size: int = Field(default=100, alias="DB_POOL_SIZE")
+    db_max_overflow: int = Field(default=20, alias="DB_MAX_OVERFLOW")
     db_pool_timeout: int = Field(default=30, alias="DB_POOL_TIMEOUT")
+    db_pool_recycle: int = Field(default=3600, alias="DB_POOL_RECYCLE")  # Recycle connections every hour
     
     # JWT and Security
     jwt_secret_key: str = Field(
@@ -104,12 +105,41 @@ class Settings(BaseSettings):
     gemini_max_media_bytes: int = Field(default=4_000_000, alias="GEMINI_MAX_MEDIA_BYTES")
     gemini_prompt_version: str = Field(default="v1", alias="GEMINI_PROMPT_VERSION")
     
+    # AI Analysis Slow Detection
+    ai_slow_threshold_seconds: int = Field(
+        default=15,
+        alias="AI_SLOW_THRESHOLD_SECONDS",
+        description="Threshold in seconds to detect slow AI analysis and emit warning event"
+    )
+    
+    # AI Analysis Timeout Configuration
+    ai_max_processing_seconds: int = Field(
+        default=60,
+        alias="AI_MAX_PROCESSING_SECONDS",
+        description="Maximum time in seconds for AI analysis processing before timeout"
+    )
+    
+    ai_assignment_wait_timeout_seconds: int = Field(
+        default=120,
+        alias="AI_ASSIGNMENT_WAIT_TIMEOUT_SECONDS",
+        description="Maximum time in seconds to wait for AI analysis before proceeding with assignment"
+    )
+    
     # Firebase Configuration
+    # Option 1: JSON string (recommended for Railway/production)
+    firebase_credentials_json: str = Field(
+        default="",
+        alias="FIREBASE_CREDENTIALS_JSON",
+        description="Firebase service account JSON as string (for Railway/production)"
+    )
+    
+    # Option 2: File path (for local development)
     firebase_service_account_path: str = Field(
         default="firebase-service-account.json",
         alias="FIREBASE_SERVICE_ACCOUNT_PATH",
-        description="Path to Firebase service account JSON file"
+        description="Path to Firebase service account JSON file (for local development)"
     )
+    
     firebase_project_id: str = Field(
         default="",
         alias="FIREBASE_PROJECT_ID",
@@ -202,7 +232,7 @@ class Settings(BaseSettings):
             raise ValueError("EMAIL_FROM_ADDRESS debe tener formato de email válido")
         return value
     
-    @field_validator("db_pool_size", "db_max_overflow", "db_pool_timeout")
+    @field_validator("db_pool_size", "db_max_overflow", "db_pool_timeout", "db_pool_recycle")
     @classmethod
     def validate_positive_int(cls, value: int) -> int:
         """Validate positive integers."""

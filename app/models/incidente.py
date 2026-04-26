@@ -1,6 +1,7 @@
 ﻿from datetime import datetime
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Numeric, String, Text, func
+from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Numeric, String, Text, func, Index
+import sqlalchemy as sa
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base
@@ -21,6 +22,26 @@ class Incidente(Base):
         CheckConstraint(
             "estado_actual IN ('pendiente', 'asignado', 'en_proceso', 'resuelto', 'cancelado', 'sin_taller_disponible')",
             name="check_estado_actual_valid"
+        ),
+        # Performance indexes for real-time queries
+        Index(
+            'idx_incidentes_estado_fecha',
+            'estado_actual', sa.text('created_at DESC'),
+            postgresql_where=sa.text("((estado_actual)::text = ANY ((ARRAY['pendiente'::character varying, 'asignado'::character varying, 'aceptado'::character varying, 'en_camino'::character varying, 'en_proceso'::character varying])::text[]))")
+        ),
+        Index(
+            'idx_incidentes_taller_estado',
+            'taller_id', 'estado_actual',
+            postgresql_where=sa.text("taller_id IS NOT NULL")
+        ),
+        Index(
+            'idx_incidentes_tecnico_estado',
+            'tecnico_id', 'estado_actual',
+            postgresql_where=sa.text("tecnico_id IS NOT NULL")
+        ),
+        Index(
+            'idx_incidentes_client_fecha',
+            'client_id', sa.text('created_at DESC')
         ),
     )
 
