@@ -166,12 +166,39 @@ class GeminiIncidentClassifier:
         }
 
         start_time = time.perf_counter()
-        response_data, used_model_name = await self._call_gemini(payload)
-        latency_ms = int((time.perf_counter() - start_time) * 1000)
-
-        raw_text = self._extract_text_response(response_data)
-        parsed_json = parse_gemini_response_json(raw_text)
-
+        
+        try:
+            response_data, used_model_name = await self._call_gemini(payload)
+            latency_ms = int((time.perf_counter() - start_time) * 1000)
+            raw_text = self._extract_text_response(response_data)
+            parsed_json = parse_gemini_response_json(raw_text)
+        except ExternalServiceException as e:
+            # Check if this is a quota exceeded (429) or all models failed
+            error_str = str(e)
+            if "HTTP 429" in error_str or "HTTP 50" in error_str or "failed" in error_str.lower():
+                logger.warning(f"AI Quota or Server Error. Using Mock Fallback Classification. Error: {error_str}")
+                
+                # Default mock response for graceful degradation
+                mock_json = {
+                    "category": "incierto",
+                    "priority": "media",
+                    "summary": "Análisis automático no disponible temporalmente. Por favor, proceder con análisis manual.",
+                    "is_ambiguous": True,
+                    "confidence": 0.0,
+                    "findings": ["Análisis manual requerido"],
+                    "missing_data": ["Análisis de IA"],
+                    "workshop_recommendation": "Asignar técnico para revisión visual directa debido a la falta de análisis previo."
+                }
+                
+                classification = GeminiIncidentClassification.model_validate(mock_json)
+                return GeminiClassificationOutput(
+                    classification=classification,
+                    used_model_name="mock-fallback-model",
+                    raw_response_json=json.dumps(mock_json, ensure_ascii=False),
+                    latency_ms=int((time.perf_counter() - start_time) * 1000)
+                )
+            raise
+        
         try:
             classification = GeminiIncidentClassification.model_validate(parsed_json)
         except ValidationError as exc:
