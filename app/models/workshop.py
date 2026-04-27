@@ -1,4 +1,4 @@
-﻿from datetime import datetime
+from datetime import datetime
 
 from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Numeric, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -39,6 +39,11 @@ class Workshop(User):
     # Relaciones
     technicians = relationship("Technician", back_populates="workshop", foreign_keys="[Technician.workshop_id]")
     incidentes = relationship("Incidente", back_populates="workshop")
+    
+    # Financial relationships (Module 6)
+    transactions = relationship("Transaction", back_populates="workshop")
+    balance = relationship("WorkshopBalance", back_populates="workshop", uselist=False)
+    withdrawals = relationship("Withdrawal", back_populates="workshop")
 
     __mapper_args__ = {
         "polymorphic_identity": "workshop",

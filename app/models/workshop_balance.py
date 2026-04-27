@@ -58,7 +58,7 @@ class Withdrawal(Base):
         String(50), 
         nullable=False, 
         default="pending"
-    )  # pending, processing, completed, failed, cancelled
+    )  # pending, approved, rejected, paid
     
     # Bank details
     bank_name = Column(String(100), nullable=True)
@@ -76,10 +76,14 @@ class Withdrawal(Base):
     requested_at = Column(DateTime, default=datetime.utcnow, nullable=False)
     processed_at = Column(DateTime, nullable=True)
     completed_at = Column(DateTime, nullable=True)
+    
+    # Admin processing
+    admin_notes = Column(Text, nullable=True)
+    processed_by = Column(Integer, ForeignKey("users.id"), nullable=True)
 
     # Relationships
-    workshop_balance = relationship("WorkshopBalance", back_populates="withdrawals")
-    workshop = relationship("Workshop", back_populates="withdrawals")
+    workshop_balance = relationship("WorkshopBalance", back_populates="withdrawals", foreign_keys=[workshop_balance_id])
+    workshop = relationship("Workshop", back_populates="withdrawals", foreign_keys=[workshop_id])
 
     def __repr__(self):
         return f"<Withdrawal(id={self.id}, workshop_id={self.workshop_id}, amount={self.amount}, status={self.status})>"
@@ -97,6 +101,8 @@ class Withdrawal(Base):
             "account_holder": self.account_holder,
             "stripe_transfer_id": self.stripe_transfer_id,
             "notes": self.notes,
+            "admin_notes": self.admin_notes,
+            "processed_by": self.processed_by,
             "failure_reason": self.failure_reason,
             "requested_at": self.requested_at.isoformat() if self.requested_at else None,
             "processed_at": self.processed_at.isoformat() if self.processed_at else None,

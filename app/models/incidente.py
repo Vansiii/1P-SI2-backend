@@ -1,4 +1,4 @@
-﻿from datetime import datetime
+from datetime import datetime
 
 from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Numeric, String, Text, func, Index
 import sqlalchemy as sa
@@ -94,4 +94,7 @@ class Incidente(Base):
     )
     assigned_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    
+    # Financial relationships (Module 6)
+    transactions = relationship("Transaction", back_populates="incident")
 

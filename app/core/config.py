@@ -185,6 +185,28 @@ class Settings(BaseSettings):
         description="Timeout in minutes for low priority incidents"
     )
     
+    # Stripe Payment Configuration
+    stripe_secret_key: str = Field(
+        default="", alias="STRIPE_SECRET_KEY",
+        description="Stripe secret API key"
+    )
+    stripe_webhook_secret: str = Field(
+        default="", alias="STRIPE_WEBHOOK_SECRET",
+        description="Stripe webhook signing secret"
+    )
+    stripe_publishable_key: str = Field(
+        default="", alias="STRIPE_PUBLISHABLE_KEY",
+        description="Stripe publishable key (sent to frontend/mobile)"
+    )
+    platform_commission_rate: float = Field(
+        default=0.10, alias="PLATFORM_COMMISSION_RATE",
+        description="Platform commission rate (0.10 = 10%)"
+    )
+    min_withdrawal_amount: float = Field(
+        default=100.00, alias="MIN_WITHDRAWAL_AMOUNT",
+        description="Minimum amount for workshop withdrawal requests"
+    )
+    
     # Logging
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     log_format: Literal["json", "text"] = Field(default="text", alias="LOG_FORMAT")

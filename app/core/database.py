@@ -162,6 +162,14 @@ async def create_database_tables() -> None:
         Vehiculo,
         Workshop,
         WorkshopSchedule,
+        # Module 6: Payments & Commissions
+        Transaction,
+        WorkshopBalance,
+        Withdrawal,
+        WorkshopFinancialMovement,
+        WorkshopSettlement,
+        PlatformCommission,
+        StripeEventLog,
     )
     
     from ..models.base import Base

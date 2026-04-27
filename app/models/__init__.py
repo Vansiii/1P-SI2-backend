@@ -1,4 +1,4 @@
-﻿"""
+"""
 Modelos de base de datos del sistema.
 Usa herencia de tabla (Table Per Type) para diferentes tipos de usuarios.
 """
@@ -47,6 +47,14 @@ from .technician_location_history import TechnicianLocationHistory
 from .tracking_session import TrackingSession
 from .vehiculo import Vehiculo
 
+# Modelos financieros (Módulo 6: Pagos y Comisiones)
+from .transaction import Transaction
+from .workshop_balance import WorkshopBalance, Withdrawal
+from .financial_movement import WorkshopFinancialMovement
+from .workshop_settlement import WorkshopSettlement
+from .platform_commission import PlatformCommission
+from .stripe_event_log import StripeEventLog
+
 __all__ = [
     # Base
     "Base",
@@ -94,5 +102,13 @@ __all__ = [
     "OutboxEvent",
     "EventLog",
     "EventPriority",
+    # Financiero (Módulo 6: Pagos y Comisiones)
+    "Transaction",
+    "WorkshopBalance",
+    "Withdrawal",
+    "WorkshopFinancialMovement",
+    "WorkshopSettlement",
+    "PlatformCommission",
+    "StripeEventLog",
 ]
 

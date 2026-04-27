@@ -308,9 +308,9 @@ class IncidentStateService:
                     TrackingSession.is_active == True
                 )
             )
-            active_session = result.scalar_one_or_none()
+            active_sessions = result.scalars().all()
             
-            if active_session:
+            for active_session in active_sessions:
                 active_session.is_active = False
                 active_session.ended_at = datetime.utcnow()
                 logger.info(
@@ -392,9 +392,9 @@ class IncidentStateService:
                     TrackingSession.is_active == True
                 )
             )
-            active_session = result.scalar_one_or_none()
+            active_sessions = result.scalars().all()
             
-            if active_session:
+            for active_session in active_sessions:
                 active_session.is_active = False
                 active_session.ended_at = datetime.utcnow()
                 logger.info(
