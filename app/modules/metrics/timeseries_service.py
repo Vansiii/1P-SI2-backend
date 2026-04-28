@@ -42,19 +42,19 @@ class MetricsTimeSeriesService:
 
         # Build query
         query = select(
-            func.date(Incidente.fecha_hora_reporte).label('date'),
+            func.date(Incidente.created_at).label('date'),
             func.avg(
-                func.extract('epoch', Incidente.fecha_hora_asignacion - Incidente.fecha_hora_reporte) / 60
+                func.extract('epoch', Incidente.assigned_at - Incidente.created_at) / 60
             ).label('avg_response_minutes')
         ).where(
             and_(
-                Incidente.fecha_hora_reporte >= start_date,
-                Incidente.fecha_hora_asignacion.isnot(None)
+                Incidente.created_at >= start_date,
+                Incidente.assigned_at.isnot(None)
             )
         ).group_by(
-            func.date(Incidente.fecha_hora_reporte)
+            func.date(Incidente.created_at)
         ).order_by(
-            func.date(Incidente.fecha_hora_reporte)
+            func.date(Incidente.created_at)
         )
 
         if workshop_id:
@@ -97,19 +97,19 @@ class MetricsTimeSeriesService:
 
         # Build query
         query = select(
-            func.date(Incidente.fecha_hora_reporte).label('date'),
+            func.date(Incidente.created_at).label('date'),
             func.avg(
-                func.extract('epoch', Incidente.fecha_hora_resolucion - Incidente.fecha_hora_reporte) / 60
+                func.extract('epoch', Incidente.resolved_at - Incidente.created_at) / 60
             ).label('avg_resolution_minutes')
         ).where(
             and_(
-                Incidente.fecha_hora_reporte >= start_date,
-                Incidente.fecha_hora_resolucion.isnot(None)
+                Incidente.created_at >= start_date,
+                Incidente.resolved_at.isnot(None)
             )
         ).group_by(
-            func.date(Incidente.fecha_hora_reporte)
+            func.date(Incidente.created_at)
         ).order_by(
-            func.date(Incidente.fecha_hora_reporte)
+            func.date(Incidente.created_at)
         )
 
         if workshop_id:
@@ -154,14 +154,14 @@ class MetricsTimeSeriesService:
 
         # Build query
         query = select(
-            func.date(Incidente.fecha_hora_reporte).label('date'),
+            func.date(Incidente.created_at).label('date'),
             func.count(Incidente.id).label('count')
         ).where(
-            Incidente.fecha_hora_reporte >= start_date
+            Incidente.created_at >= start_date
         ).group_by(
-            func.date(Incidente.fecha_hora_reporte)
+            func.date(Incidente.created_at)
         ).order_by(
-            func.date(Incidente.fecha_hora_reporte)
+            func.date(Incidente.created_at)
         )
 
         if workshop_id:
@@ -216,7 +216,7 @@ class MetricsTimeSeriesService:
                 case((Incidente.estado_actual == 'resuelto', 1))
             ).label('resolved_incidents'),
             func.avg(
-                func.extract('epoch', Incidente.fecha_hora_resolucion - Incidente.fecha_hora_asignacion) / 60
+                func.extract('epoch', Incidente.resolved_at - Incidente.assigned_at) / 60
             ).label('avg_resolution_minutes'),
             func.avg(Incidente.calificacion).label('avg_rating')
         ).join(
@@ -224,7 +224,7 @@ class MetricsTimeSeriesService:
         ).where(
             and_(
                 Technician.workshop_id == workshop_id,
-                Incidente.fecha_hora_reporte >= start_date
+                Incidente.created_at >= start_date
             )
         ).group_by(
             Technician.id,
@@ -279,21 +279,20 @@ class MetricsTimeSeriesService:
 
         # Query for category trends
         query = select(
-            Categoria.id,
-            Categoria.nombre,
-            func.date(Incidente.fecha_hora_reporte).label('date'),
+            Incidente.categoria_ia,
+            func.date(Incidente.created_at).label('date'),
             func.count(Incidente.id).label('count')
-        ).join(
-            Incidente, Incidente.categoria_id == Categoria.id
         ).where(
-            Incidente.fecha_hora_reporte >= start_date
+            and_(
+                Incidente.created_at >= start_date,
+                Incidente.categoria_ia.isnot(None)
+            )
         ).group_by(
-            Categoria.id,
-            Categoria.nombre,
-            func.date(Incidente.fecha_hora_reporte)
+            Incidente.categoria_ia,
+            func.date(Incidente.created_at)
         ).order_by(
-            Categoria.nombre,
-            func.date(Incidente.fecha_hora_reporte)
+            Incidente.categoria_ia,
+            func.date(Incidente.created_at)
         )
 
         if workshop_id:
@@ -305,18 +304,18 @@ class MetricsTimeSeriesService:
         # Organize data by category
         categories = {}
         for row in rows:
-            if row.nombre not in categories:
-                categories[row.nombre] = []
-            categories[row.nombre].append({
+            if row.categoria_ia not in categories:
+                categories[row.categoria_ia] = []
+            categories[row.categoria_ia].append({
                 "date": row.date.isoformat(),
                 "count": row.count
             })
 
         # Convert to list format
         trends = []
-        for category_name, data_points in categories.items():
+        for cat_name, data_points in categories.items():
             trends.append({
-                "category": category_name,
+                "category_name": cat_name or "General",
                 "data": data_points
             })
 
@@ -342,14 +341,14 @@ class MetricsTimeSeriesService:
 
         # Query for hourly distribution
         query = select(
-            extract('hour', Incidente.fecha_hora_reporte).label('hour'),
+            extract('hour', Incidente.created_at).label('hour'),
             func.count(Incidente.id).label('count')
         ).where(
-            Incidente.fecha_hora_reporte >= start_date
+            Incidente.created_at >= start_date
         ).group_by(
-            extract('hour', Incidente.fecha_hora_reporte)
+            extract('hour', Incidente.created_at)
         ).order_by(
-            extract('hour', Incidente.fecha_hora_reporte)
+            extract('hour', Incidente.created_at)
         )
 
         if workshop_id:
@@ -391,23 +390,23 @@ class MetricsTimeSeriesService:
 
         # Query for weekly data
         query = select(
-            extract('week', Incidente.fecha_hora_reporte).label('week'),
-            extract('year', Incidente.fecha_hora_reporte).label('year'),
+            extract('week', Incidente.created_at).label('week'),
+            extract('year', Incidente.created_at).label('year'),
             func.count(Incidente.id).label('total_incidents'),
             func.count(
                 case((Incidente.estado_actual == 'resuelto', 1))
             ).label('resolved_incidents'),
             func.avg(
-                func.extract('epoch', Incidente.fecha_hora_resolucion - Incidente.fecha_hora_reporte) / 60
+                func.extract('epoch', Incidente.resolved_at - Incidente.created_at) / 60
             ).label('avg_resolution_minutes')
         ).where(
-            Incidente.fecha_hora_reporte >= start_date
+            Incidente.created_at >= start_date
         ).group_by(
-            extract('week', Incidente.fecha_hora_reporte),
-            extract('year', Incidente.fecha_hora_reporte)
+            extract('week', Incidente.created_at),
+            extract('year', Incidente.created_at)
         ).order_by(
-            extract('year', Incidente.fecha_hora_reporte),
-            extract('week', Incidente.fecha_hora_reporte)
+            extract('year', Incidente.created_at),
+            extract('week', Incidente.created_at)
         )
 
         if workshop_id:

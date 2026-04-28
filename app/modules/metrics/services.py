@@ -418,22 +418,22 @@ class MetricsService:
 
         result = await self.session.execute(
             select(
-                Categoria.nombre,
+                Incidente.categoria_ia,
                 func.count(Incidente.id).label('count')
             )
-            .join(Incidente, Incidente.categoria_id == Categoria.id)
             .where(
                 and_(
                     Incidente.created_at >= start_date,
-                    Incidente.created_at <= end_date
+                    Incidente.created_at <= end_date,
+                    Incidente.categoria_ia.isnot(None)
                 )
             )
-            .group_by(Categoria.nombre)
+            .group_by(Incidente.categoria_ia)
             .order_by(func.count(Incidente.id).desc())
         )
 
         return [
-            {"category": row[0], "count": row[1]}
+            {"category_name": row[0] or "General", "count": row[1]}
             for row in result.all()
         ]
 
