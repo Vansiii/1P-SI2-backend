@@ -54,6 +54,11 @@ dependencies = [
     
     # System monitoring
     "psutil>=5.9.0,<6.0.0",
+    
+    # Reporting & Data
+    "pandas>=2.2.0,<3.0.0",
+    "openpyxl>=3.1.0,<4.0.0",
+    "reportlab>=4.0.0,<5.0.0",
 ]
 
 [project.optional-dependencies]
