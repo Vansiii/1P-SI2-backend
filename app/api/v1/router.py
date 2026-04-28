@@ -38,6 +38,11 @@ from ...modules.metrics.router import router as metrics_endpoints_router
 from ...modules.metrics.timeseries_router import router as metrics_timeseries_router
 from ...modules.especialidades.router import router as especialidades_router
 
+# Payment module routers
+from ...modules.payments.router import router as payments_router
+from ...modules.payments.workshop_router import router as payments_workshop_router
+from ...modules.payments.admin_router import router as payments_admin_router
+
 # Import admin routers
 from .admin import ai_analytics_router
 
@@ -253,6 +258,22 @@ api_router.include_router(
     ai_analytics_router,
     prefix="/admin",
     tags=["Admin - AI Analytics"],
+)
+
+# Payment module routes
+api_router.include_router(
+    payments_router,
+    tags=["Payments"],
+)
+
+api_router.include_router(
+    payments_workshop_router,
+    tags=["Workshop Finance"],
+)
+
+api_router.include_router(
+    payments_admin_router,
+    tags=["Admin - Finance"],
 )
 
 __all__ = ["api_router"]

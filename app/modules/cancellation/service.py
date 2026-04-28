@@ -458,25 +458,12 @@ class CancellationService:
                     f"workshop={result.assigned_workshop.workshop_name if result.assigned_workshop else 'N/A'}"
                 )
                 
-                # Notificar al cliente sobre la nueva asignación
-                try:
-                    await self.push_service.send_to_user(
-                        user_id=incident.client_id,
-                        notification_data=PushNotificationData(
-                            title="✅ Nuevo taller asignado",
-                            body=f"Tu solicitud ha sido reasignada a {result.assigned_workshop.workshop_name}. Te contactarán pronto.",
-                            data={
-                                "type": "incident_reassigned_success",
-                                "incident_id": str(incident.id),
-                                "workshop_name": result.assigned_workshop.workshop_name,
-                                "action": "view_incident",
-                                "action_url": f"/incidents/{incident.id}"
-                            }
-                        )
-                    )
-                    logger.info(f"✅ Cliente notificado sobre nueva asignación para incidente {incident.id}")
-                except Exception as notify_error:
-                    logger.error(f"Error notificando nueva asignación: {str(notify_error)}")
+                # ═══════════════════════════════════════════════════════════════════════
+                # ✅ NOTIFICACIONES MANEJADAS POR OUTBOX PROCESSOR
+                # assignment_service.assign_incident_automatically ya publica los eventos
+                # incident.assigned y incident.no_workshop_available.
+                # NO enviar notificaciones duplicadas aquí.
+                # ═══════════════════════════════════════════════════════════════════════
                     
             else:
                 logger.warning(
@@ -484,24 +471,9 @@ class CancellationService:
                     f"{result.error_message}"
                 )
                 
-                # Notificar al cliente que no se pudo reasignar
-                try:
-                    await self.push_service.send_to_user(
-                        user_id=incident.client_id,
-                        notification_data=PushNotificationData(
-                            title="⚠️ Buscando taller disponible",
-                            body="No pudimos encontrar un taller disponible inmediatamente. Seguimos buscando y te notificaremos cuando encontremos uno.",
-                            data={
-                                "type": "incident_reassignment_pending",
-                                "incident_id": str(incident.id),
-                                "action": "view_incident",
-                                "action_url": f"/incidents/{incident.id}"
-                            }
-                        )
-                    )
-                    logger.info(f"Cliente notificado sobre búsqueda pendiente para incidente {incident.id}")
-                except Exception as notify_error:
-                    logger.error(f"Error notificando búsqueda pendiente: {str(notify_error)}")
+                # ═══════════════════════════════════════════════════════════════════════
+                # ✅ NOTIFICACIONES MANEJADAS POR OUTBOX PROCESSOR
+                # ═══════════════════════════════════════════════════════════════════════
                         
         except Exception as e:
             logger.error(
@@ -509,23 +481,9 @@ class CancellationService:
                 exc_info=True
             )
             
-            # Notificar al cliente sobre el error
-            try:
-                await self.push_service.send_to_user(
-                    user_id=incident.client_id,
-                    notification_data=PushNotificationData(
-                        title="⚠️ Error en reasignación",
-                        body="Hubo un problema al buscar un nuevo taller. Por favor, contacta con soporte si el problema persiste.",
-                        data={
-                            "type": "incident_reassignment_error",
-                            "incident_id": str(incident.id),
-                            "action": "contact_support"
-                        }
-                    )
-                )
-            except Exception as notify_error:
-                logger.error(f"Error notificando error de reasignación: {str(notify_error)}")
-    
+            # ═══════════════════════════════════════════════════════════════════════
+            # ✅ NOTIFICACIONES MANEJADAS POR OUTBOX PROCESSOR
+            # ═══════════════════════════════════════════════════════════════════════    
     async def _send_cancellation_request_notification(
         self,
         incident: Incidente,

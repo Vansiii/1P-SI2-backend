@@ -191,7 +191,7 @@ class ReassignmentService:
             await self.session.commit()
             
             # Emit assignment_timeout WebSocket events (Task 14)
-            from ...core.websocket_events import emit_to_admins, emit_to_user, emit_to_all, EventTypes
+            from ...core.websocket_events import emit_to_admins, emit_to_user, emit_to_users, emit_to_all, EventTypes
             from ...models.workshop import Workshop
             
             for attempt, incident in timed_out_data:
@@ -218,27 +218,23 @@ class ReassignmentService:
                     )
                     
                     # Emit to the workshop that timed out (so their UI updates)
+                    # and to the client so they know what's happening
+                    targeted_users = []
                     if workshop:
-                        await emit_to_user(
-                            user_id=workshop.id,
+                        targeted_users.append(workshop.id)
+                    if incident.client_id:
+                        targeted_users.append(incident.client_id)
+                    
+                    if targeted_users:
+                        await emit_to_users(
+                            user_ids=targeted_users,
                             event_type=EventTypes.ASSIGNMENT_TIMEOUT,
                             data=timeout_payload
                         )
                         logger.info(
                             f"WebSocket event '{EventTypes.ASSIGNMENT_TIMEOUT}' emitted to "
-                            f"workshop {workshop.workshop_name} (user {workshop.id})"
+                            f"participants {targeted_users} for incident {attempt.incident_id}"
                         )
-                    
-                    # ✅ Emit to ALL users (so all workshops see the update in real-time)
-                    await emit_to_all(
-                        event_type=EventTypes.ASSIGNMENT_TIMEOUT,
-                        data=timeout_payload
-                    )
-                    
-                    logger.info(
-                        f"WebSocket event '{EventTypes.ASSIGNMENT_TIMEOUT}' emitted for "
-                        f"incident {attempt.incident_id}, workshop {attempt.workshop_id}"
-                    )
                 except Exception as ws_err:
                     logger.error(
                         f"Failed to emit assignment_timeout WebSocket event: {str(ws_err)}"
@@ -381,8 +377,8 @@ class ReassignmentService:
                     timeout_minutes=timeout_minutes
                 )
                 
-                # Emit WebSocket event for incident reassignment (Task 2.3)
-                from ...core.websocket_events import emit_to_incident_room, emit_to_all, EventTypes
+                # Emit WebSocket event for incident reassignment
+                from ...core.websocket_events import emit_to_incident_room, EventTypes
                 
                 old_workshop_id = incident.taller_id
                 new_workshop_id = best_candidate.workshop.id
@@ -396,21 +392,15 @@ class ReassignmentService:
                     "timestamp": datetime.utcnow().isoformat()
                 }
                 
-                # Emit to incident room
+                # Emit to incident room (all participants: client, prev workshop, new workshop)
                 await emit_to_incident_room(
                     incident_id=incident_id,
                     event_type=EventTypes.INCIDENT_REASSIGNED,
                     data=reassignment_data
                 )
                 
-                # ✅ Emit to ALL users (so all workshops see the update in real-time)
-                await emit_to_all(
-                    event_type=EventTypes.INCIDENT_REASSIGNED,
-                    data=reassignment_data
-                )
-                
                 logger.info(
-                    f"WebSocket event 'incident_reassigned' emitted for incident {incident_id} "
+                    f"WebSocket event 'incident_reassigned' emitted to incident room {incident_id} "
                     f"(old_workshop: {old_workshop_id}, new_workshop: {new_workshop_id})"
                 )
                 

@@ -297,7 +297,6 @@ class RealTimeService:
             from ...core import IncidentStateMachine, ValidationException
             
             # When technician is assigned: transition to EN_PROCESO
-            # Valid from: ACEPTADO (taller accepted and now assigns technician)
             target_state = "en_proceso"
             
             is_valid, error_message = IncidentStateMachine.can_transition(
@@ -321,7 +320,7 @@ class RealTimeService:
                 .values(
                     tecnico_id=technician_id,
                     taller_id=technician.workshop_id,
-                    estado_actual="en_proceso",  # ✅ Validated: ACEPTADO → EN_PROCESO
+                    estado_actual="en_proceso",
                     assigned_at=datetime.utcnow(),
                     updated_at=datetime.utcnow()
                 )

@@ -825,10 +825,12 @@ class IncidenteService:
         await self.session.commit()
         # ═══════════════════════════════════════════════════════════════════════
         
-        # ✅ EMISIÓN INMEDIATA DE EVENTO WEBSOCKET (BUGFIX)
-        # Emitir evento WebSocket para actualización en tiempo real del frontend
+        # ═══════════════════════════════════════════════════════════════════════
+        # ✅ EMISIÓN DIRIGIDA DE EVENTO WEBSOCKET (solo a participantes del incidente)
+        # Corrige el bug de emit_to_all que enviaba datos a todos los usuarios.
+        # ═══════════════════════════════════════════════════════════════════════
         try:
-            from ...core.websocket_events import emit_to_all, EventTypes
+            from ...core.websocket_events import emit_to_users, EventTypes
             
             # Preparar payload del evento
             event_data = {
@@ -843,15 +845,18 @@ class IncidenteService:
                 "timestamp": datetime.now(UTC).isoformat()
             }
             
-            # Emitir evento WebSocket a todos los usuarios
-            await emit_to_all(
-                event_type=EventTypes.ASSIGNMENT_ACCEPTED,
-                data=event_data
-            )
+            # Emitir solo a los participantes del incidente: cliente y taller
+            participants = [p for p in [incidente.client_id, taller_id] if p is not None]
+            if participants:
+                await emit_to_users(
+                    user_ids=participants,
+                    event_type=EventTypes.ASSIGNMENT_ACCEPTED,
+                    data=event_data
+                )
             
             logger.info(
-                f"✅ WebSocket event ASSIGNMENT_ACCEPTED emitted for incident {incidente_id} "
-                f"→ workshop {taller_id} (estado: {nuevo_estado})"
+                f"✅ WebSocket event ASSIGNMENT_ACCEPTED emitted to participants {participants} "
+                f"for incident {incidente_id} → workshop {taller_id} (estado: {nuevo_estado})"
             )
             
         except Exception as ws_err:
@@ -966,9 +971,9 @@ class IncidenteService:
                 taller_id=taller_id
             )
             
-            # ✅ EMISIÓN INMEDIATA DE EVENTO WEBSOCKET (BUGFIX)
-            # Emitir evento WebSocket para actualización en tiempo real del frontend
-            from ...core.websocket_events import emit_to_all, EventTypes
+            # ✅ EMISIÓN DIRIGIDA DE EVENTO WEBSOCKET (solo al cliente del incidente)
+            # El taller ya sabe que rechazó; el cliente necesita saber que se busca otro taller.
+            from ...core.websocket_events import emit_to_users, EventTypes
             
             # Preparar payload del evento
             event_data = {
@@ -982,15 +987,17 @@ class IncidenteService:
                 "timestamp": datetime.now(UTC).isoformat()
             }
             
-            # Emitir evento WebSocket a todos los usuarios
-            await emit_to_all(
-                event_type=EventTypes.ASSIGNMENT_REJECTED,
-                data=event_data
-            )
+            # Emitir solo al cliente (el taller que rechazó ya lo sabe)
+            if incidente.client_id:
+                await emit_to_users(
+                    user_ids=[incidente.client_id],
+                    event_type=EventTypes.ASSIGNMENT_REJECTED,
+                    data=event_data
+                )
             
             logger.info(
-                f"✅ WebSocket event ASSIGNMENT_REJECTED emitted for incident {incidente_id} "
-                f"→ workshop {taller_id}"
+                f"✅ WebSocket event ASSIGNMENT_REJECTED emitted to client {incidente.client_id} "
+                f"for incident {incidente_id} → workshop {taller_id}"
             )
             
         except Exception as e:

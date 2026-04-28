@@ -164,18 +164,10 @@ class NotificationFilter:
         
         # Eventos relevantes para clientes
         client_events = {
-            "incident.created",
-            "incident.assigned",
-            "incident.updated",  # Actualizaciones de campos (ej: análisis IA)
-            "incident.technician_on_way",
-            "incident.technician_arrived",
-            "incident.work_started",
-            "incident.work_completed",
-            "incident.cancelled",
-            "incident.no_workshop_available",
-            "incident.searching_workshop",
-            "incident.reassignment_started",
-            "incident.assignment_timeout",
+            "incident.analysis_completed",  # 1. Cuando se termina el análisis de la IA
+            "incident.assigned",            # 2. Cuando encuentra un taller
+            "incident.no_workshop_available",# 4. Cuando no se pudo encontrar un taller
+            "incident.technician_assigned",  # 3. Cuando el taller asigna el técnico
         }
         
         return event_type in client_events
@@ -194,7 +186,6 @@ class NotificationFilter:
         # Eventos relevantes para talleres
         workshop_events = {
             "incident.assigned",
-            "incident.assignment_timeout",
             "incident.cancelled",
             "incident.work_completed",
             "incident.technician_arrived",  # Informativo
@@ -217,8 +208,6 @@ class NotificationFilter:
         # Eventos relevantes para técnicos
         technician_events = {
             "incident.technician_assigned",  # Cuando se le asigna
-            "incident.cancelled",
-            "incident.work_completed",  # Confirmación
         }
         
         return event_type in technician_events
@@ -229,7 +218,6 @@ class NotificationFilter:
         # Admins reciben eventos críticos del sistema
         admin_events = {
             "incident.no_workshop_available",
-            "incident.assignment_timeout",
             "dashboard.critical_alert",
             "audit.security_event",
         }

@@ -212,7 +212,7 @@ class OutboxProcessor:
             # Order by priority (CRITICAL first) then creation time
             OutboxEvent.priority.desc(),
             OutboxEvent.created_at.asc()
-        ).limit(self.batch_size)
+        ).limit(self.batch_size).with_for_update(skip_locked=True)
         
         result = await session.execute(query)
         return list(result.scalars().all())
@@ -544,29 +544,19 @@ class OutboxProcessor:
     def _get_notification_title(self, event_type: str) -> str:
         """Get notification title based on event type - Professional and minimalist."""
         title_map = {
-            # Incident lifecycle
-            "incident.created": "Solicitud recibida",
-            "incident.assigned": "Taller asignado",
-            "incident.assignment_accepted": "Solicitud aceptada",
-            "incident.assignment_rejected": "Solicitud rechazada",
-            "incident.assignment_timeout": "Tiempo de espera agotado",
-            "incident.status_changed": "Estado actualizado",
-            
-            # Technician actions
-            "incident.technician_on_way": "Técnico en camino",
-            "incident.technician_arrived": "Técnico en sitio",
-            "incident.work_started": "Servicio iniciado",
-            "incident.work_completed": "Servicio completado",
-            
-            # Search and reassignment
-            "incident.searching_workshop": "Buscando taller",
-            "incident.no_workshop_available": "Sin talleres disponibles",
-            "incident.reassignment_started": "Reasignando servicio",
-            
-            # Cancellation
-            "incident.cancelled": "Servicio cancelado",
-            
-            # Communication
+            "incident.created": "Solicitud Recibida",
+            "incident.analysis_completed": "Diagnóstico de IA Completado",
+            "incident.assigned": "Taller Asignado",
+            "incident.technician_assigned": "Técnico Asignado",
+            "incident.assignment_accepted": "Solicitud Aceptada",
+            "incident.assignment_rejected": "Solicitud Rechazada",
+            "incident.assignment_timeout": "Tiempo de Espera Agotado",
+            "incident.technician_on_way": "Técnico en Camino",
+            "incident.technician_arrived": "Técnico en Sitio",
+            "incident.work_started": "Servicio Iniciado",
+            "incident.work_completed": "Servicio Finalizado",
+            "incident.cancelled": "Solicitud Cancelada",
+            "incident.no_workshop_available": "Sin Talleres Disponibles",
             "chat.message_sent": "Nuevo mensaje",
             "notification.received": "Notificación",
         }
@@ -579,8 +569,9 @@ class OutboxProcessor:
         
         # Custom messages based on event type
         body_map = {
-            "incident.created": f"Tu solicitud #{incident_id} está siendo procesada",
+            "incident.analysis_completed": "El análisis inicial de tu solicitud está listo.",
             "incident.assigned": f"Hemos asignado un taller para tu solicitud #{incident_id}",
+            "incident.technician_assigned": "Se ha asignado un técnico a tu solicitud",
             "incident.assignment_accepted": f"El taller ha aceptado tu solicitud #{incident_id}",
             "incident.assignment_rejected": f"Buscando alternativa para tu solicitud #{incident_id}",
             "incident.assignment_timeout": f"Reasignando tu solicitud #{incident_id}",
@@ -610,14 +601,6 @@ class OutboxProcessor:
             return event_data["description"][:100]
         elif "body" in event_data:
             return event_data["body"][:100]
-        elif "content" in event_data:
-            return event_data["content"][:100]
-        else:
-            return "Tienes una actualización"
-        if "description" in event_data:
-            return event_data["description"][:100]
-        elif "message" in event_data:
-            return event_data["message"][:100]
         elif "content" in event_data:
             return event_data["content"][:100]
         else:

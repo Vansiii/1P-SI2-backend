@@ -228,11 +228,21 @@ class StrategyConfig:
     """
     
     # Critical events that require hybrid delivery (WebSocket + FCM)
+    # These events are delivered via BOTH channels regardless of online status
     CRITICAL_EVENTS = {
-        "incident.created",
+        "incident.analysis_completed",
         "incident.assigned",
-        "incident.technician_arrived",
-        "incident.work_completed",
+        "incident.no_workshop_available",
+        "incident.technician_assigned",
+    }
+    
+    # Events where push is always sent even if user is online via WebSocket
+    # (Maximum importance: user might have the screen off or app in background)
+    ALWAYS_PUSH_EVENTS = {
+        "incident.analysis_completed",
+        "incident.assigned",
+        "incident.no_workshop_available",
+        "incident.technician_assigned",
     }
     
     # Event type prefixes
@@ -452,13 +462,14 @@ class PushNotificationStrategy(DeliveryStrategy):
 
 class HybridDeliveryStrategy(DeliveryStrategy):
     """
-    Delivers events via both WebSocket and FCM.
+    Delivers events via WebSocket and conditionally via FCM.
     
-    Attempts WebSocket delivery first, then always attempts FCM
-    regardless of WebSocket result. This ensures:
-    - Users with multiple devices receive notifications on all devices
-    - Unstable WebSocket connections have FCM as backup
-    - Maximum reliability for critical events
+    Smart delivery logic:
+    - If user is connected via WebSocket → deliver via WebSocket only
+      (avoids duplicate notification: UI update + push banner)
+    - If user is NOT connected → deliver via FCM push
+    - For ALWAYS_PUSH_EVENTS → deliver via both regardless of online status
+      (maximum reliability for critical moments like technician arriving)
     
     Use Cases:
     - Critical incident lifecycle events
@@ -473,6 +484,7 @@ class HybridDeliveryStrategy(DeliveryStrategy):
         Args:
             ws_manager: WebSocket connection manager
         """
+        self.ws_manager = ws_manager
         self.ws_strategy = WebSocketDeliveryStrategy(ws_manager)
         self.push_strategy = PushNotificationStrategy()
     
@@ -483,7 +495,10 @@ class HybridDeliveryStrategy(DeliveryStrategy):
         event_data: dict
     ) -> DeliveryResult:
         """
-        Deliver event via both WebSocket and FCM.
+        Deliver event via WebSocket and conditionally via FCM.
+        
+        Smart deduplication: push is only sent when user is offline or
+        the event is categorized as ALWAYS_PUSH (critical moments).
         
         Args:
             session: Database session
@@ -496,6 +511,12 @@ class HybridDeliveryStrategy(DeliveryStrategy):
         event_type = event_data.get("event_type", "")
         channels = []
         
+        # Check if user is currently connected via WebSocket
+        user_is_online = self.ws_manager.is_user_connected(user_id)
+        
+        # Determine if push must always be sent for this event type
+        always_push = event_type in StrategyConfig.ALWAYS_PUSH_EVENTS
+        
         # Attempt WebSocket delivery
         ws_result = await self.ws_strategy.deliver(session, user_id, event_data)
         if ws_result.success:
@@ -506,15 +527,25 @@ class HybridDeliveryStrategy(DeliveryStrategy):
                 f"WebSocket delivery failed for user {user_id}: {ws_result.reason}"
             )
         
-        # Always attempt FCM delivery (even if WebSocket succeeded)
-        # This ensures users with multiple devices get notifications on all devices
-        push_result = await self.push_strategy.deliver(session, user_id, event_data)
-        if push_result.success:
-            channels.append("push")
-            logger.debug(f"FCM delivery succeeded for user {user_id}")
+        # Decide whether to send push notification:
+        # - Always push for critical events (technician arrived, work completed, etc.)
+        # - Push as fallback when user is offline
+        # - Skip push if user is already notified via WebSocket (avoids duplicates)
+        should_push = always_push or not user_is_online
+        
+        if should_push:
+            push_result = await self.push_strategy.deliver(session, user_id, event_data)
+            if push_result.success:
+                channels.append("push")
+                logger.debug(f"FCM delivery succeeded for user {user_id}")
+            else:
+                logger.debug(
+                    f"FCM delivery skipped/failed for user {user_id}: {push_result.reason}"
+                )
         else:
             logger.debug(
-                f"FCM delivery failed for user {user_id}: {push_result.reason}"
+                f"FCM push skipped for user {user_id} — already notified via WebSocket "
+                f"(event: {event_type}). Set as ALWAYS_PUSH_EVENT to force push."
             )
         
         # Success if at least one channel worked
@@ -522,7 +553,7 @@ class HybridDeliveryStrategy(DeliveryStrategy):
             channel_str = "+".join(channels)
             logger.info(
                 f"✅ Hybrid delivery succeeded for user {user_id} "
-                f"via {channel_str} (event: {event_type})"
+                f"via {channel_str} (event: {event_type}, always_push={always_push})"
             )
             return DeliveryResult(
                 success=True,

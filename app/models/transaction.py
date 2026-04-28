@@ -31,6 +31,8 @@ class Transaction(Base):
     stripe_payment_intent_id = Column(String(255), unique=True, nullable=True)
     stripe_charge_id = Column(String(255), unique=True, nullable=True)
     stripe_customer_id = Column(String(255), nullable=True)
+    idempotency_key = Column(String(255), unique=True, nullable=True)
+    receipt_number = Column(String(100), unique=True, nullable=True)
     
     # Metadata
     description = Column(Text, nullable=True)
@@ -46,6 +48,8 @@ class Transaction(Base):
     incident = relationship("Incidente", back_populates="transactions")
     workshop = relationship("Workshop", back_populates="transactions")
     client = relationship("Client", back_populates="transactions")
+    platform_commission = relationship("PlatformCommission", back_populates="transaction", uselist=False)
+    financial_movement = relationship("WorkshopFinancialMovement", back_populates="transaction", uselist=False)
 
     def __repr__(self):
         return f"<Transaction(id={self.id}, incident_id={self.incident_id}, amount={self.amount}, status={self.status})>"
@@ -64,6 +68,7 @@ class Transaction(Base):
             "payment_method": self.payment_method,
             "stripe_payment_intent_id": self.stripe_payment_intent_id,
             "stripe_charge_id": self.stripe_charge_id,
+            "receipt_number": self.receipt_number,
             "description": self.description,
             "failure_reason": self.failure_reason,
             "refund_reason": self.refund_reason,

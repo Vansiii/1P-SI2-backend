@@ -85,6 +85,12 @@ class IncidentStateMachine:
         ),
         Transition(
             from_state=IncidentState.PENDIENTE,
+            to_state=IncidentState.EN_PROCESO,
+            allowed_roles=[UserRole.TALLER, UserRole.ADMIN],
+            description="Taller asigna técnico directamente desde pendiente"
+        ),
+        Transition(
+            from_state=IncidentState.PENDIENTE,
             to_state=IncidentState.RECHAZADO,
             allowed_roles=[UserRole.TALLER, UserRole.ADMIN],
             description="Taller rechaza la solicitud"
@@ -128,6 +134,12 @@ class IncidentStateMachine:
             to_state=IncidentState.ACEPTADO,
             allowed_roles=[UserRole.TALLER, UserRole.ADMIN],
             description="Taller acepta el incidente"
+        ),
+        Transition(
+            from_state=IncidentState.ASIGNADO,
+            to_state=IncidentState.EN_PROCESO,
+            allowed_roles=[UserRole.TALLER, UserRole.ADMIN],
+            description="Taller asigna técnico directamente"
         ),
         Transition(
             from_state=IncidentState.ASIGNADO,
