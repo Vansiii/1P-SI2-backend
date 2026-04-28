@@ -54,6 +54,26 @@ async def create_payment_intent(
         raise HTTPException(status_code=403, detail=str(e))
 
 
+@router.get(
+    "/incident/{incident_id}/status",
+    summary="Estado de pago del incidente",
+    description="Comprueba si un incidente ya fue pagado y retorna su transaction_id",
+    dependencies=[Depends(require_permission(Permission.PAYMENT_PROCESS))],
+)
+async def check_incident_payment_status(
+    incident_id: int,
+    current_user: Client = Depends(get_current_client),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Check if an incident has a completed payment."""
+    service = PaymentService(session)
+    result = await service.get_incident_payment_status(
+        incident_id=incident_id,
+        client_id=current_user.id,
+    )
+    return create_success_response(data=result)
+
+
 @router.post(
     "/stripe/webhook",
     summary="Webhook de Stripe",

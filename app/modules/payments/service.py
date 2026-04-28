@@ -97,6 +97,12 @@ class PaymentService:
                         "workshop_amount": float(pending_payment.workshop_amount),
                         "publishable_key": settings.stripe_publishable_key,
                     }
+                elif pi.status == "succeeded":
+                    # Proactively handle success if webhook hasn't fired yet
+                    await self.handle_payment_succeeded(pi.id)
+                    raise ValueError("Este incidente ya tiene un pago completado")
+            except ValueError as e:
+                raise e
             except Exception as e:
                 logger.warning(f"Could not reuse pending payment intent: {e}")
                 # If we can't reuse, create a new one
@@ -266,6 +272,56 @@ class PaymentService:
             "size": size,
         }
 
+    async def get_incident_payment_status(self, incident_id: int, client_id: int) -> dict:
+        """Check if an incident has a completed payment and return its transaction ID."""
+        from sqlalchemy import and_
+        
+        # 1. First check for a completed transaction
+        transaction = await self.session.scalar(
+            select(Transaction).where(
+                and_(
+                    Transaction.incident_id == incident_id,
+                    Transaction.client_id == client_id,
+                    Transaction.status == "completed"
+                )
+            )
+        )
+        
+        if transaction:
+            return {
+                "is_paid": True,
+                "transaction_id": transaction.id
+            }
+            
+        # 2. If not completed, check if there is a pending transaction with a Stripe intent
+        pending_tx = await self.session.scalar(
+            select(Transaction).where(
+                and_(
+                    Transaction.incident_id == incident_id,
+                    Transaction.client_id == client_id,
+                    Transaction.status == "pending",
+                    Transaction.stripe_payment_intent_id.isnot(None)
+                )
+            )
+        )
+        
+        if pending_tx:
+            # Proactively check Stripe
+            try:
+                pi = stripe.PaymentIntent.retrieve(pending_tx.stripe_payment_intent_id)
+                if pi.status == "succeeded":
+                    # Force handle payment success
+                    completed_tx = await self.handle_payment_succeeded(pi.id)
+                    if completed_tx:
+                        return {
+                            "is_paid": True,
+                            "transaction_id": completed_tx.id
+                        }
+            except Exception as e:
+                logger.error(f"Could not proactively verify payment intent status: {e}", exc_info=True)
+                
+        return {"is_paid": False}
+
     async def get_payment_receipt(self, transaction_id: int, client_id: int) -> dict:
         """Get payment receipt for a specific transaction."""
         transaction = await self.session.scalar(
@@ -278,6 +334,17 @@ class PaymentService:
         if transaction.client_id != client_id:
             raise PermissionError("No tienes permiso para ver este comprobante")
         
+        if transaction.status == "pending" and transaction.stripe_payment_intent_id:
+            # Proactively check Stripe in case webhook was missed
+            try:
+                pi = stripe.PaymentIntent.retrieve(transaction.stripe_payment_intent_id)
+                if pi.status == "succeeded":
+                    completed_tx = await self.handle_payment_succeeded(pi.id)
+                    if completed_tx:
+                        transaction = completed_tx
+            except Exception as e:
+                logger.error(f"Could not proactively verify payment intent: {e}", exc_info=True)
+
         if transaction.status != "completed":
             raise ValueError("Solo se puede generar comprobante para pagos completados")
         

@@ -193,6 +193,7 @@ def read_root() -> dict[str, str]:
     }
 
 
+
 def get_outbox_processor():
     """Get the global OutboxProcessor instance."""
     return outbox_processor_instance
