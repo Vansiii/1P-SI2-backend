@@ -12,7 +12,7 @@ from ...core.responses import success_response
 from .timeseries_service import MetricsTimeSeriesService
 from ...models.user import User
 
-router = APIRouter(prefix="/metrics/timeseries", tags=["Metrics Time Series"])
+router = APIRouter(prefix="/stats/timeline", tags=["Stats Timeline"])
 
 
 @router.get("/response-time")

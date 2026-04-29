@@ -16,7 +16,7 @@ from .reports_service import ReportsService
 from .communication_metrics import CommunicationMetricsService
 from ...models.user import User
 
-router = APIRouter(prefix="/metrics", tags=["metrics-reporting"])
+router = APIRouter(prefix="/stats", tags=["stats-reporting"])
 
 
 def normalize_dates(start_date: Optional[datetime], end_date: Optional[datetime]):
@@ -99,7 +99,7 @@ async def get_system_metrics(
     return success_response(data=metrics, message="System metrics retrieved successfully")
 
 
-@router.get("/reports/incidents")
+@router.get("/summary/incidents")
 async def get_incident_report(
     start_date: datetime = Query(...),
     end_date: datetime = Query(...),
@@ -122,7 +122,7 @@ async def get_incident_report(
     return success_response(data=data)
 
 
-@router.get("/reports/financial")
+@router.get("/summary/financial")
 async def get_financial_report(
     start_date: datetime = Query(...),
     end_date: datetime = Query(...),
@@ -142,7 +142,7 @@ async def get_financial_report(
     return success_response(data=data)
 
 
-@router.get("/reports/performance")
+@router.get("/summary/performance")
 async def get_performance_report(
     workshop_id: Optional[int] = Query(None),
     start_date: Optional[datetime] = Query(None),
@@ -163,7 +163,7 @@ async def get_performance_report(
     return success_response(data=data)
 
 
-@router.get("/reports/export/{export_format}")
+@router.get("/summary/download/{export_format}")
 async def export_report(
     export_format: str,
     report_type: str = Query(..., description="incident, financial, or performance"),
@@ -206,7 +206,7 @@ async def export_report(
     )
 
 
-@router.get("/incidents/by-category")
+@router.get("/summary/categories")
 async def get_incidents_by_category(
     start_date: Optional[datetime] = Query(None),
     end_date: Optional[datetime] = Query(None),
@@ -220,7 +220,7 @@ async def get_incidents_by_category(
     return success_response(data={"categories": categories, "total": sum(c["count"] for c in categories)})
 
 
-@router.get("/communication")
+@router.get("/usage")
 async def get_communication_metrics(
     start_time: Optional[datetime] = Query(None),
     end_time: Optional[datetime] = Query(None),
