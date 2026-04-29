@@ -216,7 +216,7 @@ async def kill_idle_connections(
                 "idle_seconds": float(row.idle_seconds)
             })
         except Exception as e:
-            print(f"Failed to kill connection {row.pid}: {e}")
+            logger.error(f"Failed to kill connection {row.pid}: {e}")
     
     await session.commit()
     

@@ -26,6 +26,15 @@ class MetricsService:
     def __init__(self, session: AsyncSession):
         self.session = session
 
+    def _to_naive_utc(self, dt: Optional[datetime]) -> Optional[datetime]:
+        """Normalize datetime to naive UTC."""
+        if dt is None:
+            return None
+        from datetime import timezone
+        if dt.tzinfo is not None:
+            return dt.astimezone(timezone.utc).replace(tzinfo=None)
+        return dt
+
     async def get_workshop_metrics(
         self,
         workshop_id: int,
@@ -48,6 +57,9 @@ class MetricsService:
             end_date = datetime.utcnow()
         if not start_date:
             start_date = end_date - timedelta(days=30)
+        
+        start_date = self._to_naive_utc(start_date)
+        end_date = self._to_naive_utc(end_date)
 
         # Total incidents assigned to workshop
         total_incidents = await self.session.scalar(
@@ -191,6 +203,9 @@ class MetricsService:
             end_date = datetime.utcnow()
         if not start_date:
             start_date = end_date - timedelta(days=30)
+            
+        start_date = self._to_naive_utc(start_date)
+        end_date = self._to_naive_utc(end_date)
 
         # Total incidents
         total_incidents = await self.session.scalar(
@@ -287,6 +302,9 @@ class MetricsService:
             end_date = datetime.utcnow()
         if not start_date:
             start_date = end_date - timedelta(days=30)
+
+        start_date = self._to_naive_utc(start_date)
+        end_date = self._to_naive_utc(end_date)
 
         # Total incidents
         total_incidents = await self.session.scalar(
@@ -413,6 +431,9 @@ class MetricsService:
             end_date = datetime.utcnow()
         if not start_date:
             start_date = end_date - timedelta(days=30)
+
+        start_date = self._to_naive_utc(start_date)
+        end_date = self._to_naive_utc(end_date)
 
         from ...models.categoria import Categoria
 

@@ -42,6 +42,8 @@ def get_engine() -> AsyncEngine:
                 "command_timeout": 30,  # 30 seconds timeout for commands
                 "timeout": 30,  # Connection timeout
                 "statement_cache_size": 0,  # Disable prepared statements for pgbouncer transaction mode
+                "max_cached_statement_lifetime": 0,
+                "max_cacheable_statement_size": 0,
             },
         )
         
@@ -183,12 +185,15 @@ async def create_database_tables() -> None:
         raise RuntimeError("Error creating database tables") from exc
 
 
-async def get_database_health() -> dict[str, Any]:
+async def get_database_health(session: AsyncSession | None = None) -> dict[str, Any]:
     """Get database health information."""
     try:
-        async with get_engine().connect() as connection:
-            # Test basic connectivity
-            await connection.execute(text("SELECT 1"))
+        # Use provided session or create temporary connection
+        if session:
+            await session.execute(text("SELECT 1"))
+        else:
+            async with get_engine().connect() as connection:
+                await connection.execute(text("SELECT 1"))
             
             # Get pool status
             pool = get_engine().pool

@@ -144,18 +144,11 @@ class ConsoleEmailProvider(EmailProvider):
         from_name: Optional[str] = None,
     ) -> bool:
         """Print email to console instead of sending."""
-        print(f"\n{'='*50}")
-        print(f"EMAIL TO: {to_email}")
-        print(f"SUBJECT: {subject}")
-        print(f"FROM: {from_name or 'Sistema'} <{from_email or 'noreply@example.com'}>")
-        print(f"{'='*50}")
+        logger.info(f"📧 EMAIL TO: {to_email} | SUBJECT: {subject}")
+        logger.debug(f"FROM: {from_name or 'Sistema'} <{from_email or 'noreply@example.com'}>")
         if text_content:
-            print("TEXT CONTENT:")
-            print(text_content)
-            print("-" * 50)
-        print("HTML CONTENT:")
-        print(html_content)
-        print(f"{'='*50}\n")
+            logger.debug(f"TEXT CONTENT: {text_content[:200]}...")
+        logger.debug(f"HTML CONTENT: {html_content[:200]}...")
         
         logger.info("Email printed to console", to_email=to_email, subject=subject)
         return True
