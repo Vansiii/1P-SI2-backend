@@ -28,6 +28,14 @@ class ReportsService:
             return dt.astimezone(timezone.utc).replace(tzinfo=None)
         return dt
 
+    def _to_aware_utc(self, dt: Optional[datetime]) -> Optional[datetime]:
+        """Normalize datetime to aware UTC."""
+        if dt is None:
+            return None
+        if dt.tzinfo is not None:
+            return dt.astimezone(timezone.utc)
+        return dt.replace(tzinfo=timezone.utc)
+
     async def get_incident_report(
         self,
         start_date: datetime,
@@ -41,9 +49,10 @@ class ReportsService:
         from ...models.workshop import Workshop
 
         try:
-            start_date = self._to_naive_utc(start_date)
-            end_date = self._to_naive_utc(end_date)
-            query = select(Incidente).join(Workshop).where(
+            start_date = self._to_aware_utc(start_date)
+            end_date = self._to_aware_utc(end_date)
+            # Use outerjoin to include incidents without an assigned workshop
+            query = select(Incidente).outerjoin(Workshop).where(
                 and_(
                     Incidente.created_at >= start_date,
                     Incidente.created_at <= end_date
@@ -92,7 +101,8 @@ class ReportsService:
             ).where(
                 and_(
                     Transaction.created_at >= start_date,
-                    Transaction.created_at <= end_date
+                    Transaction.created_at <= end_date,
+                    Transaction.status == 'completed'
                 )
             )
 
@@ -110,7 +120,8 @@ class ReportsService:
             with_query = select(func.sum(Withdrawal.amount)).where(
                 and_(
                     Withdrawal.completed_at >= start_date,
-                    Withdrawal.completed_at <= end_date
+                    Withdrawal.completed_at <= end_date,
+                    Withdrawal.status == 'paid'
                 )
             )
 
@@ -169,12 +180,12 @@ class ReportsService:
 
         try:
             if not end_date:
-                end_date = datetime.utcnow()
+                end_date = datetime.now(timezone.utc)
             if not start_date:
                 start_date = end_date - timedelta(days=30)
                 
-            start_date = self._to_naive_utc(start_date)
-            end_date = self._to_naive_utc(end_date)
+            start_date = self._to_aware_utc(start_date)
+            end_date = self._to_aware_utc(end_date)
 
             query = select(
                 Workshop.id,

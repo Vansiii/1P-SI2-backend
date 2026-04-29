@@ -1,7 +1,7 @@
 """
 Service for calculating system metrics and statistics.
 """
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, List
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_, or_
@@ -9,6 +9,7 @@ from sqlalchemy import select, func, and_, or_
 from ...core.logging import get_logger
 from ...core.event_publisher import EventPublisher
 from ...shared.schemas.events.dashboard import DashboardMetricsUpdatedEvent
+from ...models.user import User
 from ...models.incidente import Incidente
 from ...models.technician import Technician
 from ...models.workshop import Workshop
@@ -30,7 +31,6 @@ class MetricsService:
         """Normalize datetime to naive UTC."""
         if dt is None:
             return None
-        from datetime import timezone
         if dt.tzinfo is not None:
             return dt.astimezone(timezone.utc).replace(tzinfo=None)
         return dt
@@ -54,10 +54,11 @@ class MetricsService:
         """
         # Default to last 30 days if no dates provided
         if not end_date:
-            end_date = datetime.utcnow()
+            end_date = datetime.now(timezone.utc)
         if not start_date:
             start_date = end_date - timedelta(days=30)
         
+        # Ensure they are naive UTC
         start_date = self._to_naive_utc(start_date)
         end_date = self._to_naive_utc(end_date)
 
@@ -200,7 +201,7 @@ class MetricsService:
             Dictionary with technician metrics
         """
         if not end_date:
-            end_date = datetime.utcnow()
+            end_date = datetime.now(timezone.utc)
         if not start_date:
             start_date = end_date - timedelta(days=30)
             
@@ -299,7 +300,7 @@ class MetricsService:
             Dictionary with system-wide metrics
         """
         if not end_date:
-            end_date = datetime.utcnow()
+            end_date = datetime.now(timezone.utc)
         if not start_date:
             start_date = end_date - timedelta(days=30)
 
@@ -337,7 +338,8 @@ class MetricsService:
         # Active workshops
         active_workshops = await self.session.scalar(
             select(func.count(Workshop.id))
-            .where(Workshop.is_active == True)
+            .join(User, Workshop.id == User.id)
+            .where(User.is_active == True)
         )
 
         # Active technicians
@@ -428,7 +430,7 @@ class MetricsService:
             List of category statistics
         """
         if not end_date:
-            end_date = datetime.utcnow()
+            end_date = datetime.now(timezone.utc)
         if not start_date:
             start_date = end_date - timedelta(days=30)
 
@@ -465,7 +467,7 @@ class MetricsService:
         Returns:
             Dictionary with current system metrics
         """
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         today_start = datetime(now.year, now.month, now.day)
         
         # Total incidents (all time)

@@ -24,6 +24,7 @@ def normalize_dates(start_date: Optional[datetime], end_date: Optional[datetime]
     if start_date:
         if start_date.tzinfo is not None:
             start_date = start_date.astimezone(timezone.utc).replace(tzinfo=None)
+            
     if end_date:
         if end_date.tzinfo is not None:
             end_date = end_date.astimezone(timezone.utc).replace(tzinfo=None)

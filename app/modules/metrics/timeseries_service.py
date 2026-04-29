@@ -22,14 +22,14 @@ class MetricsTimeSeriesService:
     def __init__(self, session: AsyncSession):
         self.session = session
 
-    def _to_naive_utc(self, dt: Optional[datetime]) -> Optional[datetime]:
-        """Normalize datetime to naive UTC."""
+    def _to_aware_utc(self, dt: Optional[datetime]) -> Optional[datetime]:
+        """Normalize datetime to aware UTC."""
         if dt is None:
             return None
         from datetime import timezone
         if dt.tzinfo is not None:
-            return dt.astimezone(timezone.utc).replace(tzinfo=None)
-        return dt
+            return dt.astimezone(timezone.utc)
+        return dt.replace(tzinfo=timezone.utc)
 
     async def get_response_time_series(
         self,
@@ -46,11 +46,11 @@ class MetricsTimeSeriesService:
         Returns:
             List of daily response time data points
         """
-        end_date = datetime.utcnow()
+        end_date = datetime.now(timezone.utc)
         start_date = end_date - timedelta(days=days)
         
-        start_date = self._to_naive_utc(start_date)
-        end_date = self._to_naive_utc(end_date)
+        start_date = self._to_aware_utc(start_date)
+        end_date = self._to_aware_utc(end_date)
 
         # Build query
         query = select(
@@ -104,11 +104,11 @@ class MetricsTimeSeriesService:
         Returns:
             List of daily resolution time data points
         """
-        end_date = datetime.utcnow()
+        end_date = datetime.now(timezone.utc)
         start_date = end_date - timedelta(days=days)
         
-        start_date = self._to_naive_utc(start_date)
-        end_date = self._to_naive_utc(end_date)
+        start_date = self._to_aware_utc(start_date)
+        end_date = self._to_aware_utc(end_date)
 
         # Build query
         query = select(
@@ -164,11 +164,11 @@ class MetricsTimeSeriesService:
         Returns:
             List of daily incident count data points
         """
-        end_date = datetime.utcnow()
+        end_date = datetime.now(timezone.utc)
         start_date = end_date - timedelta(days=days)
         
-        start_date = self._to_naive_utc(start_date)
-        end_date = self._to_naive_utc(end_date)
+        start_date = self._to_aware_utc(start_date)
+        end_date = self._to_aware_utc(end_date)
 
         # Build query
         query = select(
@@ -222,11 +222,11 @@ class MetricsTimeSeriesService:
         Returns:
             List of technician performance data
         """
-        end_date = datetime.utcnow()
+        end_date = datetime.now(timezone.utc)
         start_date = end_date - timedelta(days=days)
         
-        start_date = self._to_naive_utc(start_date)
-        end_date = self._to_naive_utc(end_date)
+        start_date = self._to_aware_utc(start_date)
+        end_date = self._to_aware_utc(end_date)
 
         # Query for technician performance
         query = select(
@@ -295,11 +295,11 @@ class MetricsTimeSeriesService:
         Returns:
             List of category trend data
         """
-        end_date = datetime.utcnow()
+        end_date = datetime.now(timezone.utc)
         start_date = end_date - timedelta(days=days)
         
-        start_date = self._to_naive_utc(start_date)
-        end_date = self._to_naive_utc(end_date)
+        start_date = self._to_aware_utc(start_date)
+        end_date = self._to_aware_utc(end_date)
 
         # Query for category trends
         query = select(
@@ -360,11 +360,11 @@ class MetricsTimeSeriesService:
         Returns:
             List of hourly distribution data
         """
-        end_date = datetime.utcnow()
+        end_date = datetime.now(timezone.utc)
         start_date = end_date - timedelta(days=days)
         
-        start_date = self._to_naive_utc(start_date)
-        end_date = self._to_naive_utc(end_date)
+        start_date = self._to_aware_utc(start_date)
+        end_date = self._to_aware_utc(end_date)
 
         # Query for hourly distribution
         query = select(
@@ -412,11 +412,11 @@ class MetricsTimeSeriesService:
         Returns:
             List of weekly comparison data
         """
-        end_date = datetime.utcnow()
+        end_date = datetime.now(timezone.utc)
         start_date = end_date - timedelta(weeks=weeks)
         
-        start_date = self._to_naive_utc(start_date)
-        end_date = self._to_naive_utc(end_date)
+        start_date = self._to_aware_utc(start_date)
+        end_date = self._to_aware_utc(end_date)
 
         # Query for weekly data
         query = select(
