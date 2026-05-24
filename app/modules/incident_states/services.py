@@ -11,7 +11,6 @@ from ...core.exceptions import NotFoundError, ValidationError
 from ...models.incidente import Incidente
 from ...models.historial_servicio import HistorialServicio
 from ...models.estados_servicio import EstadosServicio
-from ...core.websocket import manager
 from ..push_notifications.services import PushNotificationService
 
 logger = get_logger(__name__)
@@ -114,62 +113,6 @@ class IncidentStateService:
 
         await self.session.commit()
         await self.session.refresh(incident)
-
-        # Broadcast state change
-        await manager.send_incident_status_change(
-            incident_id=incident_id,
-            new_status=new_state,
-            changed_by=changed_by
-        )
-
-        # Emit standardized service status WebSocket events (Task 16)
-        from ...core.websocket_events import emit_to_incident_room, emit_to_all, EventTypes
-        
-        service_event_map = {
-            "en_proceso": EventTypes.SERVICE_STARTED,
-            "resuelto": EventTypes.SERVICE_COMPLETED,
-            "cancelado": EventTypes.SERVICE_PAUSED,
-        }
-        
-        service_event_type = service_event_map.get(new_state)
-        
-        if service_event_type:
-            service_payload = {
-                "service_id": incident_id,  # Use incident_id as service_id
-                "incident_id": incident_id,
-                "status": new_state,
-                "timestamp": datetime.utcnow().isoformat()
-            }
-            
-            # Emit to incident room
-            await emit_to_incident_room(
-                incident_id=incident_id,
-                event_type=service_event_type,
-                data=service_payload
-            )
-            
-            # ✅ Emit to ALL users
-            await emit_to_all(
-                event_type=service_event_type,
-                data=service_payload
-            )
-            
-            logger.info(
-                f"WebSocket event '{service_event_type}' emitted for incident {incident_id} "
-                f"(state: {new_state})"
-            )
-        
-        # ✅ Always emit status change event to all users
-        await emit_to_all(
-            event_type=EventTypes.INCIDENT_STATUS_CHANGED,
-            data={
-                "incident_id": incident_id,
-                "estado_actual": new_state,
-                "new_status": new_state,
-                "changed_by": changed_by,
-                "timestamp": datetime.utcnow().isoformat()
-            }
-        )
 
         # Send push notification
         if self.push_service.is_enabled():

@@ -171,42 +171,31 @@ class ChatService:
             # Message from workshop/technician, increment client unread count
             conversation.unread_count_client += 1
 
-        # ⚠️ NO COMMIT YET - need to publish event first
         await self.session.flush()  # Flush to get message.id
         await self.session.refresh(message)
 
-        # Get sender info for broadcast
         sender = await self.session.scalar(
             select(User).where(User.id == sender_id)
         )
-
         sender_name = f"{sender.first_name} {sender.last_name}" if sender else "Unknown"
+        sender_role = sender.user_type if sender else None
 
-        # Broadcast message via WebSocket
-        await manager.send_message_notification(
-            incident_id=incident_id,
-            sender_id=sender_id,
-            sender_name=sender_name,
-            message_text=message_text,
-            message_id=message.id,
-            sender_role=sender.user_type if sender else None
-        )
-        
-        # 🔔 Publish ChatMessageSentEvent to outbox for reliable delivery
         chat_event = ChatMessageSentEvent(
             message_id=message.id,
             incident_id=incident_id,
             sender_id=sender_id,
             sender_name=sender_name,
-            sender_role=sender.user_type if sender else "system",
+            sender_role=sender_role or "system",
             content=message_text
         )
         await EventPublisher.publish(self.session, chat_event)
 
-        # ✅ NOW commit everything together (message + outbox event)
         await self.session.commit()
 
-        # Send push notification to recipients
+        # WebSocket delivery handled by OutboxProcessor (polls every 1s)
+        # OUTBOX handles: WS delivery + FCM fallback + event_log tracking
+        # Removed legacy manager.send_message_notification() to eliminate double-delivery
+
         await self._send_chat_push_notification(
             incident=incident,
             sender_id=sender_id,

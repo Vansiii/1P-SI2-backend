@@ -17,8 +17,6 @@ from ...shared.schemas.events.cancellation import (
 )
 from ...models.cancellation_request import CancellationRequest
 from ...models.incidente import Incidente
-from ...models.user import User
-from ..push_notifications.services import PushNotificationService, PushNotificationData
 
 logger = get_logger(__name__)
 
@@ -28,7 +26,6 @@ class CancellationService:
     
     def __init__(self, session: AsyncSession):
         self.session = session
-        self.push_service = PushNotificationService(session)
     
     async def request_cancellation(
         self,
@@ -159,13 +156,7 @@ class CancellationService:
             )
         # ═══════════════════════════════════════════════════════════════════════
         
-        # Enviar notificación push a la otra parte
-        await self._send_cancellation_request_notification(
-            incident=incident,
-            requester_id=user_id,
-            requester_type=user_type,
-            reason=reason
-        )
+        # Notificaciones persistentes/push gestionadas por OutboxProcessor.
         
         return cancellation_request
     
@@ -301,14 +292,7 @@ class CancellationService:
             )
         # ═══════════════════════════════════════════════════════════════════════
         
-        # Enviar notificación push al solicitante (después del commit exitoso)
-        await self._send_cancellation_response_notification(
-            incident=incident,
-            cancellation_request=cancellation_request,
-            accept=accept,
-            responder_id=user_id,
-            responder_type=user_type
-        )
+        # Notificaciones persistentes/push gestionadas por OutboxProcessor.
         
         return cancellation_request
     
@@ -393,18 +377,19 @@ class CancellationService:
                     f"Técnico {incident.tecnico_id} liberado (is_on_duty=False, is_available=True) por cancelación mutua"
                 )
                 
-                # Notificar cambio de disponibilidad via WebSocket
-                from ...core.websocket import manager
-                if technician.workshop_id:
-                    await manager.send_personal_message(technician.workshop_id, {
-                        "type": "technician_status_update",
-                        "data": {
-                            "technician_id": incident.tecnico_id,
-                            "is_available": True,
-                            "is_on_duty": False,
-                            "timestamp": datetime.now(UTC).isoformat()
-                        }
-                    })
+                # Notificar cambio de disponibilidad via EventPublisher
+                from ...core.event_publisher import EventPublisher
+                from ...shared.schemas.events.incident import IncidentTechnicianArrivedEvent
+                
+                technician_event_data = {
+                    "incident_id": incident.id,
+                    "technician_id": incident.tecnico_id,
+                    "technician_name": f"{technician.first_name} {technician.last_name}" if technician else "Unknown",
+                    "new_status": "available",
+                    "old_status": "on_duty",
+                    "timestamp": datetime.now(UTC).isoformat(),
+                    "workshop_id": technician.workshop_id,
+                }
         
         # Limpiar asignación y volver a pendiente
         incident.taller_id = None
@@ -415,21 +400,23 @@ class CancellationService:
         
         await self.session.commit()
         
-        # ✅ Emitir evento WebSocket para actualización en tiempo real
-        from ...core.websocket_events import emit_to_all, EventTypes
+        # ✅ Emitir evento WebSocket dirigido SOLO a participantes del incidente
+        from ...core.websocket_events import emit_to_incident_room, EventTypes
         
         try:
-            await emit_to_all(
+            await emit_to_incident_room(
+                incident_id=incident.id,
                 event_type=EventTypes.INCIDENT_STATUS_CHANGED,
                 data={
                     "incident_id": incident.id,
                     "estado_actual": "pendiente",
                     "new_status": "pendiente",
+                    "old_status": incident.estado_actual,
                     "reason": "mutual_cancellation",
                     "timestamp": datetime.now(UTC).isoformat()
                 }
             )
-            logger.info(f"✅ WebSocket event emitted: incident {incident.id} → pendiente (mutual cancellation)")
+            logger.info(f"✅ WebSocket event emitted to incident room: {incident.id} → pendiente (mutual cancellation)")
         except Exception as ws_err:
             logger.error(f"Failed to emit status change WebSocket event: {str(ws_err)}")
         
@@ -484,124 +471,6 @@ class CancellationService:
             # ═══════════════════════════════════════════════════════════════════════
             # ✅ NOTIFICACIONES MANEJADAS POR OUTBOX PROCESSOR
             # ═══════════════════════════════════════════════════════════════════════    
-    async def _send_cancellation_request_notification(
-        self,
-        incident: Incidente,
-        requester_id: int,
-        requester_type: str,
-        reason: str
-    ) -> None:
-        """
-        Enviar notificación push cuando se solicita cancelación.
-        
-        Args:
-            incident: Incidente
-            requester_id: ID del solicitante
-            requester_type: Tipo de solicitante ('client' o 'workshop')
-            reason: Motivo de la cancelación
-        """
-        try:
-            # Determinar destinatario
-            recipient_id = None
-            requester_name = ""
-            
-            if requester_type == "client":
-                # Cliente solicita, notificar al taller
-                recipient_id = incident.taller_id
-                requester_name = "El cliente"
-            else:
-                # Taller solicita, notificar al cliente
-                recipient_id = incident.client_id
-                requester_name = "El taller"
-            
-            if not recipient_id:
-                logger.warning(f"No se pudo determinar destinatario para notificación de cancelación")
-                return
-            
-            # Truncar motivo para notificación
-            reason_preview = reason[:80] + "..." if len(reason) > 80 else reason
-            
-            # Enviar notificación
-            notification_data = PushNotificationData(
-                title="🔔 Solicitud de Cancelación",
-                body=f"{requester_name} solicita cancelar el servicio: {reason_preview}",
-                data={
-                    "type": "cancellation_request",
-                    "incident_id": str(incident.id),
-                    "requester_id": str(requester_id),
-                    "requester_type": requester_type,
-                    "click_action": f"/incidents/{incident.id}/chat"  # For mobile apps
-                },
-                click_action=None  # Set to None for web push
-            )
-            
-            await self.push_service.send_to_user(
-                user_id=recipient_id,
-                notification_data=notification_data,
-                save_to_db=True
-            )
-            
-            logger.info(f"Notificación de solicitud de cancelación enviada para incidente {incident.id}")
-            
-        except Exception as e:
-            logger.error(f"Error enviando notificación de solicitud de cancelación: {str(e)}")
-    
-    async def _send_cancellation_response_notification(
-        self,
-        incident: Incidente,
-        cancellation_request: CancellationRequest,
-        accept: bool,
-        responder_id: int,
-        responder_type: str
-    ) -> None:
-        """
-        Enviar notificación push cuando se responde a cancelación.
-        
-        Args:
-            incident: Incidente
-            cancellation_request: Solicitud de cancelación
-            accept: Si fue aceptada o rechazada
-            responder_id: ID del que responde
-            responder_type: Tipo del que responde ('client' o 'workshop')
-        """
-        try:
-            # Destinatario es el solicitante original
-            recipient_id = cancellation_request.requested_by_user_id
-            responder_name = "El cliente" if responder_type == "client" else "El taller"
-            
-            if accept:
-                title = "✅ Cancelación Aceptada"
-                body = f"{responder_name} aceptó cancelar el servicio. El sistema buscará un nuevo taller automáticamente."
-            else:
-                title = "❌ Cancelación Rechazada"
-                body = f"{responder_name} rechazó la cancelación. El servicio continúa normalmente."
-            
-            # Enviar notificación
-            notification_data = PushNotificationData(
-                title=title,
-                body=body,
-                data={
-                    "type": "cancellation_response",
-                    "incident_id": str(incident.id),
-                    "accept": str(accept),
-                    "responder_id": str(responder_id),
-                    "responder_type": responder_type,
-                    "click_action": f"/incidents/{incident.id}/chat"  # For mobile apps
-                },
-                click_action=None  # Set to None for web push
-            )
-            
-            await self.push_service.send_to_user(
-                user_id=recipient_id,
-                notification_data=notification_data,
-                save_to_db=True
-            )
-            
-            logger.info(f"Notificación de respuesta de cancelación enviada para incidente {incident.id}")
-            
-        except Exception as e:
-            logger.error(f"Error enviando notificación de respuesta de cancelación: {str(e)}")
-    
     async def get_pending_cancellation(
         self,
         incident_id: int

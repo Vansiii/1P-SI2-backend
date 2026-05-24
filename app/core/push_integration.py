@@ -3,6 +3,8 @@ Push Notification Integration with WebSocket Events
 
 Automatically sends push notifications when users are offline or not connected to WebSocket.
 """
+import uuid
+from datetime import datetime, timezone
 from typing import Dict, Any, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,7 +24,11 @@ async def send_notification_with_fallback(
     force_push: bool = False
 ) -> bool:
     """
-    Send notification via WebSocket if user is connected, otherwise via push notification.
+    Send notification: WebSocket if user is connected, otherwise push notification as fallback.
+    
+    This is ONLY for additional direct notifications. The primary notification delivery
+    goes through the EventPublisher → OutboxProcessor pipeline which handles both WS
+    and push via HybridDeliveryStrategy.
     
     Args:
         session: Database session
@@ -33,14 +39,30 @@ async def send_notification_with_fallback(
         force_push: Force push notification even if user is connected
         
     Returns:
-        True if notification was sent successfully
+        True if notification was sent or user is already receiving via WebSocket;
+        False if push was attempted but failed.
     """
     try:
         # Check if user is connected to WebSocket
         is_connected = ws_manager.is_user_connected(user_id)
         
         if is_connected and not force_push:
-            logger.debug(f"User {user_id} is connected, skipping push notification")
+            # Send via WebSocket notification event directly
+            ws_payload = {
+                "event_type": "notification.received",
+                "event_id": f"direct-fallback-{user_id}-{uuid.uuid4().hex[:12]}",
+                "payload": {
+                    "title": title,
+                    "body": body,
+                    "data": data or {},
+                    "user_id": user_id,
+                    "notification_type": data.get("type", "system_alert") if data else "system_alert"
+                },
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "version": "1.0"
+            }
+            await ws_manager.send_personal_message(user_id, ws_payload, check_dedup=False)
+            logger.info(f"Notification sent via WebSocket to connected user {user_id}: {title}")
             return True
         
         # User is offline or force_push is True, send push notification

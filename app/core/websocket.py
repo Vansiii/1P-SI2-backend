@@ -1,9 +1,9 @@
 """
 WebSocket connection manager for real-time communication.
 """
-from typing import Dict, List, Set
+from typing import Dict, List, Set, Optional
 from fastapi import WebSocket, WebSocketDisconnect
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 import json
 import asyncio
 
@@ -14,146 +14,252 @@ logger = get_logger(__name__)
 
 class ConnectionManager:
     """
-    Gestiona conexiones WebSocket y rooms por incidente.
-    Permite broadcast de eventos a usuarios específicos o a todos en un room.
+    Gestiona conexiones WebSocket y rooms.
+
+    Rooms disponibles:
+    - incident_rooms: Participantes de un incidente (cliente, taller, técnico, admin)
+    - workshop_rooms: Usuarios de un taller (owner + staff)
+    - technician_rooms: Técnico individual (para eventos de asignación)
+    - tracking_connections: Técnicos enviando ubicación
+    - admin_user_ids: Administradores conectados (broadcast global admin)
+
+    Seguimiento de eventos emitidos para evitar duplicados.
     """
 
+    MAX_EMITTED_EVENT_IDS = 5000
+
     def __init__(self):
-        # Conexiones activas por user_id
         self.active_connections: Dict[int, WebSocket] = {}
-        
-        # Rooms por incidente_id (set de user_ids)
+
         self.incident_rooms: Dict[int, Set[int]] = {}
-        
-        # Tracking rooms por technician_id
+        self.workshop_rooms: Dict[int, Set[int]] = {}
+        self.technician_rooms: Dict[int, Set[int]] = {}
+
         self.tracking_connections: Dict[int, WebSocket] = {}
-        
-        # Admin user IDs for admin-only broadcasts
         self.admin_user_ids: Set[int] = set()
-        
-        # Heartbeat tasks
+
         self.heartbeat_tasks: Dict[int, asyncio.Task] = {}
 
-    async def connect(self, websocket: WebSocket, user_id: int, user_type: str = None):
+        self._emitted_event_ids: Dict[str, Set[str]] = {}
+        self._event_id_timestamps: Dict[str, datetime] = {}
+
+    async def connect(self, websocket: WebSocket, user_id: int, user_type: str = None, workshop_id: int = None):
         """
         Registrar una conexión WebSocket ya aceptada.
-        El endpoint es responsable de llamar websocket.accept() antes de invocar este método.
-        
+
         Args:
             websocket: Conexión WebSocket (ya aceptada)
             user_id: ID del usuario
             user_type: Tipo de usuario ('admin', 'workshop', 'client', 'technician')
+            workshop_id: ID del taller (si aplica, para workshop_room)
         """
-        # Si ya existe una conexión, cerrar la anterior
         if user_id in self.active_connections:
             try:
                 await self.active_connections[user_id].close()
             except Exception:
                 pass
-        
+
         self.active_connections[user_id] = websocket
-        
-        # Track admin users for admin-only broadcasts
-        if user_type in ('admin', 'administrator'):  # ✅ Corregido: aceptar ambos tipos
+
+        if user_type in ('admin', 'administrator'):
             self.admin_user_ids.add(user_id)
-        
-        # Iniciar heartbeat
+
+        # Join workshop room if user belongs to a workshop
+        if workshop_id:
+            await self.join_workshop_room(user_id, workshop_id)
+
+        # Join technician room if user is a technician
+        if user_type == 'technician':
+            await self.join_technician_room(user_id)
+
         self.heartbeat_tasks[user_id] = asyncio.create_task(
             self._heartbeat(websocket, user_id)
         )
-        
+
         logger.info(f"WebSocket connected: user_id={user_id}, user_type={user_type}")
 
     def disconnect(self, user_id: int):
         """
-        Desconectar un usuario del WebSocket.
-        
-        Args:
-            user_id: ID del usuario
+        Desconectar un usuario del WebSocket y limpiar todos sus rooms.
         """
-        # Cancelar heartbeat
         if user_id in self.heartbeat_tasks:
             self.heartbeat_tasks[user_id].cancel()
             del self.heartbeat_tasks[user_id]
-        
-        # Remover de conexiones activas
+
         if user_id in self.active_connections:
             del self.active_connections[user_id]
-        
-        # Remover de admin users
+
         self.admin_user_ids.discard(user_id)
-        
-        # Remover de tracking
+
         if user_id in self.tracking_connections:
             del self.tracking_connections[user_id]
-        
-        # Remover de todos los rooms
+
+        # Clean incident rooms
         for incident_id in list(self.incident_rooms.keys()):
             if user_id in self.incident_rooms[incident_id]:
                 self.incident_rooms[incident_id].remove(user_id)
                 if not self.incident_rooms[incident_id]:
                     del self.incident_rooms[incident_id]
-        
+
+        # Clean workshop rooms
+        for workshop_id in list(self.workshop_rooms.keys()):
+            if user_id in self.workshop_rooms[workshop_id]:
+                self.workshop_rooms[workshop_id].remove(user_id)
+                if not self.workshop_rooms[workshop_id]:
+                    del self.workshop_rooms[workshop_id]
+
+        # Clean technician rooms
+        if user_id in self.technician_rooms:
+            del self.technician_rooms[user_id]
+
         logger.info(f"WebSocket disconnected: user_id={user_id}")
 
     async def join_incident_room(self, user_id: int, incident_id: int):
         """
         Unir un usuario a un room de incidente.
-        
-        Args:
-            user_id: ID del usuario
-            incident_id: ID del incidente
         """
         if incident_id not in self.incident_rooms:
             self.incident_rooms[incident_id] = set()
-        
+
         self.incident_rooms[incident_id].add(user_id)
-        
+
         logger.info(f"User {user_id} joined incident room {incident_id}")
 
     async def leave_incident_room(self, user_id: int, incident_id: int):
         """
         Remover un usuario de un room de incidente.
-        
-        Args:
-            user_id: ID del usuario
-            incident_id: ID del incidente
         """
         if incident_id in self.incident_rooms:
             self.incident_rooms[incident_id].discard(user_id)
             if not self.incident_rooms[incident_id]:
                 del self.incident_rooms[incident_id]
-        
+
         logger.info(f"User {user_id} left incident room {incident_id}")
 
-    async def send_personal_message(self, user_id: int, message: dict):
+    async def join_workshop_room(self, user_id: int, workshop_id: int):
         """
-        Enviar mensaje a un usuario específico.
+        Unir un usuario a un room de taller (para staff multi-usuario).
+        """
+        if workshop_id not in self.workshop_rooms:
+            self.workshop_rooms[workshop_id] = set()
+        self.workshop_rooms[workshop_id].add(user_id)
+        logger.info(f"User {user_id} joined workshop room {workshop_id}")
+
+    async def leave_workshop_room(self, user_id: int, workshop_id: int):
+        """
+        Remover un usuario de un room de taller.
+        """
+        if workshop_id in self.workshop_rooms:
+            self.workshop_rooms[workshop_id].discard(user_id)
+            if not self.workshop_rooms[workshop_id]:
+                del self.workshop_rooms[workshop_id]
+        logger.info(f"User {user_id} left workshop room {workshop_id}")
+
+    async def join_technician_room(self, technician_id: int):
+        """
+        Crear room privado para un técnico.
+        """
+        self.technician_rooms[technician_id] = {technician_id}
+        logger.info(f"Technician room created for technician {technician_id}")
+
+    async def broadcast_to_workshop(self, workshop_id: int, message: dict, exclude_user: int = None):
+        """
+        Broadcast mensaje a todos los usuarios de un taller.
+        Uses send_personal_message internally for dedup support.
+        """
+        if workshop_id not in self.workshop_rooms:
+            return
+        disconnected_users = []
+        for user_id in self.workshop_rooms[workshop_id]:
+            if exclude_user and user_id == exclude_user:
+                continue
+            if user_id in self.active_connections:
+                try:
+                    await self.send_personal_message(user_id, message)
+                except Exception:
+                    disconnected_users.append(user_id)
+        for uid in disconnected_users:
+            self.disconnect(uid)
+
+    async def send_to_technician(self, technician_id: int, message: dict):
+        """
+        Enviar mensaje al room de un técnico específico.
+        """
+        if technician_id in self.technician_rooms:
+            for uid in self.technician_rooms[technician_id]:
+                await self.send_personal_message(uid, message)
+                break
+
+    def was_event_emitted(self, event_id: str, user_id: int = None) -> bool:
+        """
+        Verificar si un evento ya fue emitido a un usuario específico (deduplicación server-side).
         
-        Args:
-            user_id: ID del usuario
-            message: Diccionario con el mensaje
+        La deduplicación es PER-USER para evitar que broadcasts a múltiples
+        usuarios sean descartados para todos menos el primero.
+        
+        También limpia eventos expirados (> 5 min).
+        """
+        key = str(user_id) if user_id is not None else "__global__"
+        
+        if key not in self._emitted_event_ids:
+            self._emitted_event_ids[key] = set()
+        
+        full_key = f"{key}:{event_id}"
+        
+        if full_key in self._emitted_event_ids[key]:
+            return True
+        
+        self._emitted_event_ids[key].add(full_key)
+        self._event_id_timestamps[full_key] = datetime.now(timezone.utc)
+
+        # Limit per-user set size
+        if len(self._emitted_event_ids[key]) > self.MAX_EMITTED_EVENT_IDS:
+            oldest = min(
+                self._emitted_event_ids[key],
+                key=lambda eid: self._event_id_timestamps.get(eid, datetime.now(timezone.utc))
+            )
+            self._emitted_event_ids[key].discard(oldest)
+            self._event_id_timestamps.pop(oldest, None)
+
+        # Cleanup expired entries (> 5 minutes)
+        expire_before = datetime.now(timezone.utc) - timedelta(minutes=5)
+        for k in list(self._emitted_event_ids.keys()):
+            expired = [
+                eid for eid in self._emitted_event_ids[k]
+                if self._event_id_timestamps.get(eid, datetime.min) < expire_before
+            ]
+            for eid in expired:
+                self._emitted_event_ids[k].discard(eid)
+                self._event_id_timestamps.pop(eid, None)
+            if not self._emitted_event_ids[k]:
+                del self._emitted_event_ids[k]
+
+        return False
+
+    async def send_personal_message(self, user_id: int, message: dict, check_dedup: bool = True):
+        """
+        Enviar mensaje a un usuario específico con deduplicación opcional.
         """
         if user_id not in self.active_connections:
             logger.debug(f"User {user_id} not connected, skipping message")
             return
-            
+
+        if check_dedup:
+            event_id = message.get("event_id")
+            if event_id and self.was_event_emitted(event_id, user_id):
+                logger.debug(f"Skipping duplicate event {event_id} for user {user_id}")
+                return
+
         try:
             websocket = self.active_connections[user_id]
-            # Verificar que el WebSocket esté en estado correcto
             if websocket.client_state.name == 'CONNECTED':
-                logger.debug(f"📤 Sending message to user {user_id}: type={message.get('type')}")
                 await websocket.send_json(message)
-                logger.debug(f"✅ Message sent successfully to user {user_id}")
             else:
-                logger.warning(f"⚠️ WebSocket for user {user_id} is not in CONNECTED state: {websocket.client_state.name}")
-                # Don't disconnect immediately - the connection might recover
+                logger.warning(f"WebSocket for user {user_id} not CONNECTED: {websocket.client_state.name}")
         except Exception as e:
-            logger.error(f"❌ Error sending message to user {user_id}: {type(e).__name__}: {str(e)}")
-            # Solo desconectar si es un error crítico de conexión cerrada
+            logger.error(f"Error sending message to user {user_id}: {type(e).__name__}: {str(e)}")
             error_msg = str(e).lower()
             if "not connected" in error_msg or "closed" in error_msg or "disconnected" in error_msg:
-                logger.info(f"🔌 Disconnecting user {user_id} due to connection error")
                 self.disconnect(user_id)
 
     async def send_to_user(self, user_id: int, message: dict):
@@ -169,11 +275,7 @@ class ConnectionManager:
     async def broadcast_to_incident(self, incident_id: int, message: dict, exclude_user: int = None):
         """
         Broadcast mensaje a todos los usuarios en un room de incidente.
-        
-        Args:
-            incident_id: ID del incidente
-            message: Diccionario con el mensaje
-            exclude_user: ID de usuario a excluir (opcional)
+        Uses send_personal_message internally for dedup support.
         """
         if incident_id not in self.incident_rooms:
             return
@@ -186,38 +288,38 @@ class ConnectionManager:
             
             if user_id in self.active_connections:
                 try:
-                    await self.active_connections[user_id].send_json(message)
+                    await self.send_personal_message(user_id, message)
                 except Exception as e:
                     logger.error(f"Error broadcasting to user {user_id}: {str(e)}")
                     disconnected_users.append(user_id)
         
-        # Limpiar usuarios desconectados
         for user_id in disconnected_users:
             self.disconnect(user_id)
 
     async def broadcast_to_all(self, message: dict):
         """
         Broadcast mensaje a todos los usuarios conectados.
+        Uses send_personal_message for per-user dedup support.
         
         Args:
             message: Diccionario con el mensaje
         """
         disconnected_users = []
         
-        for user_id, websocket in self.active_connections.items():
+        for user_id in list(self.active_connections.keys()):
             try:
-                await websocket.send_json(message)
+                await self.send_personal_message(user_id, message)
             except Exception as e:
                 logger.error(f"Error broadcasting to user {user_id}: {str(e)}")
                 disconnected_users.append(user_id)
         
-        # Limpiar usuarios desconectados
         for user_id in disconnected_users:
             self.disconnect(user_id)
 
     async def broadcast_to_admins(self, message: dict):
         """
         Broadcast mensaje a todos los administradores conectados.
+        Uses send_personal_message for per-user dedup support.
         
         Args:
             message: Diccionario con el mensaje
@@ -227,16 +329,21 @@ class ConnectionManager:
         for user_id in list(self.admin_user_ids):
             if user_id in self.active_connections:
                 try:
-                    await self.active_connections[user_id].send_json(message)
+                    await self.send_personal_message(user_id, message)
                 except Exception as e:
                     logger.error(f"Error broadcasting to admin {user_id}: {str(e)}")
                     disconnected_users.append(user_id)
         
-        # Limpiar usuarios desconectados
         for user_id in disconnected_users:
             self.disconnect(user_id)
         
         logger.debug(f"Broadcast to {len(self.admin_user_ids)} admins")
+
+    # ═══════════════════════════════════════════════════════════════════════
+    # DEPRECATED legacy methods — use EventPublisher + OutboxProcessor instead
+    # These methods emit in legacy format without event_id for deduplication.
+    # They will be removed in a future version.
+    # ═══════════════════════════════════════════════════════════════════════
 
     async def send_location_update(
         self,
@@ -248,18 +355,11 @@ class ConnectionManager:
         speed: float = None,
         heading: float = None
     ):
-        """
-        Enviar actualización de ubicación de técnico a todos en el incidente.
-        
-        Args:
-            incident_id: ID del incidente
-            technician_id: ID del técnico
-            latitude: Latitud
-            longitude: Longitud
-            accuracy: Precisión en metros
-            speed: Velocidad en km/h
-            heading: Dirección en grados
-        """
+        """DEPRECATED: Use EventPublisher with TrackingLocationUpdatedEvent instead."""
+        logger.warning(
+            "DEPRECATED: send_location_update() called. "
+            "Use EventPublisher with TrackingLocationUpdatedEvent."
+        )
         message = {
             "type": "location_update",
             "incident_id": incident_id,
@@ -271,9 +371,8 @@ class ConnectionManager:
                 "speed": speed,
                 "heading": heading
             },
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
-        
         await self.broadcast_to_incident(incident_id, message)
 
     async def send_incident_status_change(
@@ -282,22 +381,18 @@ class ConnectionManager:
         new_status: str,
         changed_by: int = None
     ):
-        """
-        Notificar cambio de estado de incidente.
-        
-        Args:
-            incident_id: ID del incidente
-            new_status: Nuevo estado
-            changed_by: ID del usuario que cambió el estado
-        """
+        """DEPRECATED: Use EventPublisher with IncidentStatusChangedEvent instead."""
+        logger.warning(
+            "DEPRECATED: send_incident_status_change() called. "
+            "Use EventPublisher with IncidentStatusChangedEvent."
+        )
         message = {
             "type": "incident_status_change",
             "incident_id": incident_id,
             "new_status": new_status,
             "changed_by": changed_by,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
-        
         await self.broadcast_to_incident(incident_id, message)
 
     async def send_technician_assigned(
@@ -307,15 +402,11 @@ class ConnectionManager:
         technician_name: str,
         workshop_name: str
     ):
-        """
-        Notificar asignación de técnico.
-        
-        Args:
-            incident_id: ID del incidente
-            technician_id: ID del técnico
-            technician_name: Nombre del técnico
-            workshop_name: Nombre del taller
-        """
+        """DEPRECATED: Use EventPublisher with IncidentTechnicianOnWayEvent instead."""
+        logger.warning(
+            "DEPRECATED: send_technician_assigned() called. "
+            "Use EventPublisher with IncidentTechnicianOnWayEvent."
+        )
         message = {
             "type": "technician_assigned",
             "incident_id": incident_id,
@@ -324,9 +415,8 @@ class ConnectionManager:
                 "name": technician_name,
                 "workshop": workshop_name
             },
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
-        
         await self.broadcast_to_incident(incident_id, message)
 
     async def send_technician_arrived(
@@ -334,20 +424,17 @@ class ConnectionManager:
         incident_id: int,
         technician_id: int
     ):
-        """
-        Notificar que el técnico llegó al lugar.
-        
-        Args:
-            incident_id: ID del incidente
-            technician_id: ID del técnico
-        """
+        """DEPRECATED: Use EventPublisher with IncidentTechnicianArrivedEvent instead."""
+        logger.warning(
+            "DEPRECATED: send_technician_arrived() called. "
+            "Use EventPublisher with IncidentTechnicianArrivedEvent."
+        )
         message = {
             "type": "technician_arrived",
             "incident_id": incident_id,
             "technician_id": technician_id,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
-        
         await self.broadcast_to_incident(incident_id, message)
 
     async def send_message_notification(
@@ -359,17 +446,11 @@ class ConnectionManager:
         message_id: int = None,
         sender_role: str = None
     ):
-        """
-        Notificar nuevo mensaje en chat.
-        
-        Args:
-            incident_id: ID del incidente
-            sender_id: ID del remitente
-            sender_name: Nombre del remitente
-            message_text: Texto del mensaje
-            message_id: ID del mensaje (opcional)
-            sender_role: Rol del remitente (opcional)
-        """
+        """DEPRECATED: Use EventPublisher with ChatMessageSentEvent instead."""
+        logger.warning(
+            "DEPRECATED: send_message_notification() called. "
+            "Use EventPublisher with ChatMessageSentEvent."
+        )
         message = {
             "type": "new_message",
             "incident_id": incident_id,
@@ -383,12 +464,11 @@ class ConnectionManager:
                 "message_type": "text",
                 "is_read": False,
                 "read_at": None,
-                "created_at": datetime.utcnow().isoformat(),
+                "created_at": datetime.now(timezone.utc).isoformat(),
                 "updated_at": None
             },
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
-        
         await self.broadcast_to_incident(incident_id, message, exclude_user=sender_id)
 
     async def _heartbeat(self, websocket: WebSocket, user_id: int):

@@ -112,6 +112,16 @@ class PushNotificationService:
             True if token was registered successfully
         """
         try:
+            existing_by_device = None
+            if device_id:
+                existing_by_device = await self.session.scalar(
+                    select(PushToken).where(
+                        PushToken.user_id == user_id,
+                        PushToken.platform == platform,
+                        PushToken.device_id == device_id,
+                    )
+                )
+
             # Check if token already exists for any user
             existing_token = await self.session.scalar(
                 select(PushToken).where(PushToken.token == token)
@@ -131,6 +141,21 @@ class PushNotificationService:
                     )
                 )
                 logger.info(f"Updated existing FCM token for user {user_id}")
+            elif existing_by_device:
+                # Token rotÃ³ en el mismo dispositivo: actualizar el registro existente
+                await self.session.execute(
+                    update(PushToken)
+                    .where(PushToken.id == existing_by_device.id)
+                    .values(
+                        token=token,
+                        is_active=True,
+                        updated_at=datetime.utcnow()
+                    )
+                )
+                logger.info(
+                    f"Updated rotated FCM token for user {user_id} "
+                    f"(platform={platform}, device_id={device_id})"
+                )
             else:
                 # Create new token
                 push_token = PushToken(
@@ -144,6 +169,39 @@ class PushNotificationService:
                 )
                 self.session.add(push_token)
                 logger.info(f"Registered new FCM token for user {user_id}")
+
+            # Desactivar tokens antiguos del mismo dispositivo para evitar duplicados
+            if device_id:
+                await self.session.execute(
+                    update(PushToken)
+                    .where(
+                        PushToken.user_id == user_id,
+                        PushToken.platform == platform,
+                        PushToken.device_id == device_id,
+                        PushToken.token != token,
+                    )
+                    .values(
+                        is_active=False,
+                        updated_at=datetime.utcnow()
+                    )
+                )
+
+                # Limpieza legacy web: tokens antiguos sin device_id para el mismo usuario
+                # pueden causar doble push en navegador tras rotaciones previas.
+                if platform == "web":
+                    await self.session.execute(
+                        update(PushToken)
+                        .where(
+                            PushToken.user_id == user_id,
+                            PushToken.platform == platform,
+                            PushToken.token != token,
+                            PushToken.device_id.is_(None),
+                        )
+                        .values(
+                            is_active=False,
+                            updated_at=datetime.utcnow()
+                        )
+                    )
 
             await self.session.commit()
             return True
@@ -319,10 +377,20 @@ class PushNotificationService:
             return False
 
         try:
+            # Defensive dedup in case upstream produced repeated tokens.
+            unique_tokens = list(dict.fromkeys(tokens))
+
             # FCM requires all data values to be strings
             str_data: dict[str, str] = {
                 k: str(v) for k, v in (notification_data.data or {}).items() if v is not None
             }
+
+            event_tag = (
+                str_data.get("event_id")
+                or str_data.get("notification_id")
+                or str_data.get("incident_id")
+                or f"{notification_data.title}:{notification_data.body}"
+            )
 
             # Create FCM message
             message = messaging.MulticastMessage(
@@ -353,22 +421,23 @@ class PushNotificationService:
                         icon='/assets/icons/icon-192x192.png',
                         badge='/assets/icons/icon-72x72.png',
                         require_interaction=True,
+                        tag=event_tag,
                     )
                     # Note: fcm_options.link removed - not needed for web push
                     # Web apps should handle navigation via service worker using notification.data
                 ),
-                tokens=tokens
+                tokens=unique_tokens
             )
 
             # Send message
             response = messaging.send_each_for_multicast(message)
             
             # Log results
-            logger.info(f"Push notification sent: {response.success_count}/{len(tokens)} successful")
+            logger.info(f"Push notification sent: {response.success_count}/{len(unique_tokens)} successful")
             
             # Handle failed tokens
             if response.failure_count > 0:
-                await self._handle_failed_tokens(tokens, response.responses)
+                await self._handle_failed_tokens(unique_tokens, response.responses)
 
             return response.success_count > 0
 
@@ -418,11 +487,11 @@ class PushNotificationService:
         notification_data: PushNotificationData
     ):
         """
-        Save notification to database for history and emit WebSocket event.
-        
-        Args:
-            user_id: ID of the user
-            notification_data: Notification data
+        Save notification to database for history.
+
+        Does NOT emit WebSocket events - the OutboxProcessor handles real-time
+        delivery through its own delivery pipeline, and the immediate WS send
+        in EventPublisher already covers online users.
         """
         try:
             import json
@@ -433,7 +502,7 @@ class PushNotificationService:
                 type="push_notification",
                 title=notification_data.title,
                 message=notification_data.body,
-                data_json=json.dumps(notification_data.data or {}),  # Convertir dict a JSON string
+                data_json=json.dumps(notification_data.data or {}),
                 created_at=datetime.now(UTC)
             )
             
@@ -441,22 +510,8 @@ class PushNotificationService:
             await self.session.commit()
             await self.session.refresh(notification)
             
-            # 🔔 Emit WebSocket event to notify client about new notification
-            from ...core.websocket_events import emit_to_user, EventTypes
-            await emit_to_user(
-                user_id=user_id,
-                event_type=EventTypes.NOTIFICATION_CREATED,
-                data={
-                    "notification_id": notification.id,
-                    "user_id": user_id,
-                    "title": notification_data.title,
-                    "body": notification_data.body,
-                    "priority": "normal",
-                    "created_at": notification.created_at.isoformat(),
-                }
-            )
-            logger.info(f"✅ Notification saved and WebSocket event emitted for user {user_id}")
-
+            logger.info(f"Notification saved to DB for user {user_id}")
+            
         except Exception as e:
             logger.error(f"Error saving notification to database: {str(e)}")
 

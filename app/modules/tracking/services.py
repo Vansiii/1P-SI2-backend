@@ -135,34 +135,9 @@ class TrackingService:
         # ═══════════════════════════════════════════════════════════════════════
         # ✅ EMIT WEBSOCKET EVENT FOR REAL-TIME UPDATE (EN_CAMINO)
         # ═══════════════════════════════════════════════════════════════════════
-        if incident_id:
-            try:
-                from ...core.websocket_events import emit_to_all, EventTypes
-                from datetime import datetime, UTC
-                
-                await emit_to_all(
-                    event_type=EventTypes.INCIDENT_STATUS_CHANGED,
-                    data={
-                        "incident_id": incident_id,
-                        "old_status": old_status,
-                        "new_status": "en_camino",
-                        "estado_actual": "en_camino",
-                        "technician_id": technician_id,
-                        "changed_by": technician_id,
-                        "changed_by_role": "technician",
-                        "timestamp": datetime.now(UTC).isoformat()
-                    }
-                )
-                
-                logger.info(
-                    f"✅ WebSocket event emitted: incident {incident_id} status changed {old_status} → en_camino"
-                )
-                
-            except Exception as ws_err:
-                # ⚠️ NO fallar la operación si WebSocket falla
-                logger.error(
-                    f"❌ Failed to emit WebSocket event for incident {incident_id}: {str(ws_err)}"
-                )
+        # NOTE: WebSocket emission is handled by EventPublisher via OutboxProcessor.
+        # The incident_room broadcast happens when OutboxProcessor processes the event.
+        # This avoids duplicate emissions and ensures WS only fires after DB commit.
         # ═══════════════════════════════════════════════════════════════════════
         
         # Publish TrackingSessionStartedEvent to outbox for reliable delivery
@@ -688,37 +663,9 @@ class TrackingService:
         # ═══════════════════════════════════════════════════════════════════════
         # ✅ EMIT WEBSOCKET EVENT FOR REAL-TIME UPDATE (TECHNICIAN ARRIVED)
         # ═══════════════════════════════════════════════════════════════════════
-        try:
-            from ...core.websocket_events import emit_to_all, EventTypes
-            from datetime import datetime, UTC
-            
-            await emit_to_all(
-                event_type=EventTypes.INCIDENT_STATUS_CHANGED,
-                data={
-                    "incident_id": incident_id,
-                    "old_status": old_status,
-                    "new_status": "en_proceso",
-                    "estado_actual": "en_proceso",
-                    "technician_id": technician_id,
-                    "changed_by": technician_id,
-                    "changed_by_role": "technician",
-                    "arrival_location": {
-                        "latitude": arrival_latitude,
-                        "longitude": arrival_longitude
-                    },
-                    "timestamp": datetime.now(UTC).isoformat()
-                }
-            )
-            
-            logger.info(
-                f"✅ WebSocket event emitted: incident {incident_id} status changed {old_status} → en_proceso (technician arrived)"
-            )
-            
-        except Exception as ws_err:
-            # ⚠️ NO fallar la operación si WebSocket falla
-            logger.error(
-                f"❌ Failed to emit WebSocket event for incident {incident_id}: {str(ws_err)}"
-            )
+        # NOTE: WebSocket emission is handled by EventPublisher via OutboxProcessor.
+        # The IncidentTechnicianArrivedEvent published below will trigger proper
+        # WebSocket delivery to incident_room participants after DB commit.
         # ═══════════════════════════════════════════════════════════════════════
         
         # ═══════════════════════════════════════════════════════════════════════

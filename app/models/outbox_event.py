@@ -101,6 +101,13 @@ class OutboxEvent(Base):
         comment="Whether event has been processed"
     )
     
+    ws_immediate_sent = Column(
+        Boolean,
+        nullable=False,
+        default=False,
+        comment="Whether immediate WebSocket was already sent by EventPublisher"
+    )
+    
     processed_at = Column(
         DateTime,
         nullable=True,

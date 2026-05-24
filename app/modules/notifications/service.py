@@ -288,13 +288,19 @@ EmailService = NotificationService
 # In-App Notification Service (WebSocket-backed)
 # ─────────────────────────────────────────────────────────────────────────────
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 
-from sqlalchemy import select, update
+from sqlalchemy import select, update, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ...core.event_publisher import EventPublisher
 from ...core.websocket_events import EventTypes, emit_to_user
+from ...shared.schemas.events.notification import (
+    NotificationReceivedEvent,
+    NotificationReadEvent,
+    NotificationBadgeUpdatedEvent,
+)
 from ...models.notification import Notification
 
 
@@ -302,9 +308,8 @@ class InAppNotificationService:
     """
     Service for in-app notifications backed by the Notification model.
 
-    All mutating operations persist to the database and then emit a
-    WebSocket event to the recipient user so the frontend can update
-    its state without polling.
+    Uses EventPublisher for reliable event delivery (outbox pattern)
+    with immediate WebSocket emission for low-latency real-time updates.
     """
 
     def __init__(self, session: AsyncSession) -> None:
@@ -321,18 +326,10 @@ class InAppNotificationService:
         data_json: Optional[str] = None,
     ) -> Notification:
         """
-        Persist a new in-app notification and emit ``notification_created``
-        to the recipient user via WebSocket.
+        Persist a new in-app notification and emit via EventPublisher.
 
-        Args:
-            user_id: Recipient user ID.
-            notification_type: Logical type string (e.g. ``incident_assigned``).
-            title: Short notification title.
-            message: Full notification body.
-            data_json: Optional JSON string with extra context data.
-
-        Returns:
-            The newly created :class:`Notification` instance.
+        EventPublisher._send_immediate_websocket() handles real-time WS delivery,
+        while OutboxProcessor handles FCM fallback for offline users.
         """
         notification = Notification(
             user_id=user_id,
@@ -341,25 +338,21 @@ class InAppNotificationService:
             message=message,
             data_json=data_json,
             is_read=False,
-            created_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
         )
         self.session.add(notification)
+        await self.session.flush()
+
+        event = NotificationReceivedEvent(
+            notification_id=notification.id,
+            user_id=user_id,
+            notification_type=notification_type,
+            title=title,
+            body=message,
+        )
+        await EventPublisher.publish(self.session, event)
         await self.session.commit()
         await self.session.refresh(notification)
-
-        await emit_to_user(
-            user_id=user_id,
-            event_type=EventTypes.NOTIFICATION_CREATED,
-            data={
-                "notification_id": notification.id,
-                "user_id": user_id,
-                "notification_type": notification_type,
-                "title": title,
-                "message": message,
-                "is_read": False,
-                "timestamp": notification.created_at.isoformat(),
-            },
-        )
 
         logger.info(
             "In-app notification created",
@@ -377,14 +370,7 @@ class InAppNotificationService:
         user_id: int,
     ) -> Optional[Notification]:
         """
-        Mark a single notification as read and emit ``notification_read``.
-
-        Args:
-            notification_id: ID of the notification to mark.
-            user_id: Owner of the notification (used for authorisation and WS routing).
-
-        Returns:
-            The updated :class:`Notification`, or ``None`` if not found.
+        Mark a single notification as read and emit via EventPublisher.
         """
         notification = await self.session.scalar(
             select(Notification).where(
@@ -402,19 +388,24 @@ class InAppNotificationService:
             return None
 
         notification.is_read = True
+        await self.session.flush()
+
+        event = NotificationReadEvent(
+            notification_id=notification_id,
+            user_id=user_id,
+            read_at=datetime.now(timezone.utc),
+        )
+        await EventPublisher.publish(self.session, event)
+
+        unread_count = await self._get_unread_count(user_id)
+        badge_event = NotificationBadgeUpdatedEvent(
+            user_id=user_id,
+            unread_count=unread_count,
+        )
+        await EventPublisher.publish(self.session, badge_event)
+
         await self.session.commit()
         await self.session.refresh(notification)
-
-        await emit_to_user(
-            user_id=user_id,
-            event_type=EventTypes.NOTIFICATION_READ,
-            data={
-                "notification_id": notification_id,
-                "user_id": user_id,
-                "is_read": True,
-                "timestamp": datetime.utcnow().isoformat(),
-            },
-        )
 
         logger.info(
             "Notification marked as read",
@@ -427,14 +418,8 @@ class InAppNotificationService:
 
     async def mark_all_as_read(self, user_id: int) -> int:
         """
-        Mark every unread notification for *user_id* as read and emit
-        ``notifications_all_read``.
-
-        Args:
-            user_id: The user whose notifications should be marked.
-
-        Returns:
-            Number of rows updated.
+        Mark every unread notification for *user_id* as read.
+        Emits notification.badge_updated with count=0 via EventPublisher.
         """
         result = await self.session.execute(
             update(Notification)
@@ -444,18 +429,16 @@ class InAppNotificationService:
             )
             .values(is_read=True)
         )
-        await self.session.commit()
-
         updated_count: int = result.rowcount  # type: ignore[assignment]
 
-        await emit_to_user(
-            user_id=user_id,
-            event_type=EventTypes.NOTIFICATIONS_ALL_READ,
-            data={
-                "user_id": user_id,
-                "timestamp": datetime.utcnow().isoformat(),
-            },
-        )
+        if updated_count > 0:
+            event = NotificationBadgeUpdatedEvent(
+                user_id=user_id,
+                unread_count=0,
+            )
+            await EventPublisher.publish(self.session, event)
+
+        await self.session.commit()
 
         logger.info(
             "All notifications marked as read",
@@ -463,6 +446,17 @@ class InAppNotificationService:
             updated_count=updated_count,
         )
         return updated_count
+
+    # ── Helpers ───────────────────────────────────────────────────────────────
+
+    async def _get_unread_count(self, user_id: int) -> int:
+        result = await self.session.scalar(
+            select(func.count(Notification.id)).where(
+                Notification.user_id == user_id,
+                Notification.is_read == False,  # noqa: E712
+            )
+        )
+        return result or 0
 
     # ── Query ─────────────────────────────────────────────────────────────────
 

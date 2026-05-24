@@ -237,46 +237,6 @@ async def check_assignment_timeouts() -> List[int]:
                         )
                         await EventPublisher.publish(session, timeout_event)
                         
-                        # ✅ EMITIR WEBSOCKET INMEDIATO PARA TIMEOUT
-                        try:
-                            from app.core.websocket_events import emit_to_user, emit_to_incident_room
-                            
-                            # ✅ Use the correct event type from the schema: "incident.assignment_timeout"
-                            # This matches what the frontend is listening for
-                            event_type = "incident.assignment_timeout"
-                            
-                            # Emitir al taller específico
-                            await emit_to_user(
-                                user_id=attempt.workshop_id,
-                                event_type=event_type,
-                                data={
-                                    "incident_id": incident.id,
-                                    "workshop_id": attempt.workshop_id,
-                                    "timeout_minutes": timeout_minutes
-                                }
-                            )
-                            
-                            # También emitir a la sala del incidente (para cliente y otros)
-                            await emit_to_incident_room(
-                                incident_id=incident.id,
-                                event_type=event_type,
-                                data={
-                                    "incident_id": incident.id,
-                                    "workshop_id": attempt.workshop_id,
-                                    "timeout_minutes": timeout_minutes
-                                }
-                            )
-                            
-                            logger.info(
-                                f"✅ WebSocket event ASSIGNMENT_TIMEOUT emitido para incidente {incident.id} "
-                                f"al taller {attempt.workshop_id}"
-                            )
-                        except Exception as e:
-                            logger.error(
-                                f"❌ Error emitiendo WebSocket event ASSIGNMENT_TIMEOUT: {str(e)}",
-                                exc_info=True
-                            )
-                        
                         timed_out_incidents.append(incident.id)
                         
                 except Exception as e:

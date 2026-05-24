@@ -211,36 +211,9 @@ async def update_incidente_estado(
         current_user.user_type
     )
     
-    # ═══════════════════════════════════════════════════════════════════════
-    # ✅ EMIT WEBSOCKET EVENT FOR REAL-TIME UPDATE
-    # ═══════════════════════════════════════════════════════════════════════
-    try:
-        from ...core.websocket_events import emit_to_all, EventTypes
-        from datetime import datetime, UTC
-        
-        await emit_to_all(
-            event_type=EventTypes.INCIDENT_STATUS_CHANGED,
-            data={
-                "incident_id": incidente_id,
-                "old_status": old_status,
-                "new_status": request.estado,
-                "estado_actual": request.estado,
-                "changed_by": current_user.id,
-                "changed_by_role": current_user.user_type,
-                "timestamp": datetime.now(UTC).isoformat()
-            }
-        )
-        
-        logger.info(
-            f"✅ WebSocket event emitted: incident {incidente_id} status changed {old_status} → {request.estado}"
-        )
-        
-    except Exception as ws_err:
-        # ⚠️ NO fallar la operación si WebSocket falla
-        logger.error(
-            f"❌ Failed to emit WebSocket event for incident {incidente_id}: {str(ws_err)}"
-        )
-    # ═══════════════════════════════════════════════════════════════════════
+    # NOTE: WebSocket event publishing is handled by EventPublisher in
+    # the service layer (service.py update_estado method) which ensures
+    # events are broadcast only to authorized participants.
     
     return create_success_response(
         data=IncidenteResponse.model_validate(incidente).model_dump(mode='json'),

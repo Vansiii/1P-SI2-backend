@@ -118,94 +118,178 @@ class NotificationFormatter:
     Provides consistent, professional notification formatting across all delivery strategies.
     """
     
-    # Map event types to user-friendly, professional titles
     TITLE_MAP = {
-        # Incident lifecycle - Professional and clear
+        # Incident lifecycle
         "incident.created": "Solicitud recibida",
         "incident.assigned": "Taller asignado",
         "incident.assignment_accepted": "Solicitud aceptada",
         "incident.assignment_rejected": "Buscando alternativa",
         "incident.assignment_timeout": "Reasignando servicio",
         "incident.status_changed": "Estado actualizado",
-        
-        # Technician actions - Clear and informative
-        "incident.technician_on_way": "Técnico en camino",
-        "incident.technician_arrived": "Técnico en sitio",
-        "incident.work_started": "Servicio iniciado",
-        "incident.work_completed": "Servicio completado",
-        
-        # Search and reassignment - Transparent
-        "incident.searching_workshop": "Buscando taller",
-        "incident.no_workshop_available": "Sin talleres disponibles",
+        "incident.reassigned": "Servicio reasignado",
+        "incident.updated": "Servicio actualizado",
+        "incident.photos_uploaded": "Fotos recibidas",
         "incident.reassignment_started": "Reasignando servicio",
         
-        # Cancellation - Direct
-        "incident.cancelled": "Servicio cancelado",
+        # Technician actions
+        "incident.technician_on_way": "Tecnico en camino",
+        "incident.technician_arrived": "Tecnico en sitio",
+        "incident.work_started": "Servicio iniciado",
+        "incident.work_completed": "Servicio completado",
+        "technician.availability_changed": "Disponibilidad actualizada",
+        "technician.online_status_changed": "Estado de tecnico",
         
-        # Communication - Simple
+        # AI Analysis
+        "incident.analysis_started": "Analizando solicitud",
+        "incident.analysis_completed": "Analisis completado",
+        "incident.analysis_failed": "Analisis no disponible",
+        
+        # Search and reassignment
+        "incident.searching_workshop": "Buscando taller",
+        "incident.no_workshop_available": "Sin talleres disponibles",
+        
+        # Cancellation
+        "incident.cancelled": "Servicio cancelado",
+        "cancellation.requested": "Cancelacion solicitada",
+        "cancellation.approved": "Cancelacion aprobada",
+        "cancellation.rejected": "Cancelacion rechazada",
+        
+        # Communication
         "chat.message_sent": "Nuevo mensaje",
-        "notification.general": "Notificación",
+        "chat.message_delivered": "Mensaje entregado",
+        
+        # Evidence
+        "evidence.image_uploaded": "Imagen recibida",
+        "evidence.audio_uploaded": "Audio recibido",
+        "evidence.deleted": "Evidencia eliminada",
+        
+        # Notifications
+        "notification.received": "Notificacion",
+        "notification.general": "Notificacion",
+        
+        # Workshop
+        "workshop.availability_changed": "Taller actualizado",
+        "workshop.verified": "Taller verificado",
+        "workshop.updated": "Taller actualizado",
+        "workshop.balance_updated": "Balance actualizado",
+        
+        # Vehicle
+        "vehicle.created": "Vehiculo registrado",
+        "vehicle.updated": "Vehiculo actualizado",
+        
+        # Service
+        "service.started": "Servicio iniciado",
+        "service.completed": "Servicio completado",
+        "service.paused": "Servicio pausado",
+        "service.resumed": "Servicio reanudado",
+        
+        # Tracking
+        "tracking.session_started": "Seguimiento iniciado",
+        "tracking.session_ended": "Seguimiento finalizado",
+        "tracking.location_updated": "Ubicacion actualizada",
+        
+        # Dashboard (admin only)
+        "dashboard.metrics_updated": "Metricas actualizadas",
+        "dashboard.alert_triggered": "Alerta del sistema",
+        
+        # User
+        "user.profile_updated": "Perfil actualizado",
+        "user.password_changed": "Contrasena cambiada",
+        
+        # Audit (admin only)
+        "audit.log_created": "Actividad registrada",
     }
     
     @staticmethod
     def get_title(event_type: str) -> str:
-        """
-        Get notification title for an event type.
-        
-        Args:
-            event_type: Event type (e.g., "incident.created")
-            
-        Returns:
-            User-friendly, professional title string
-        """
-        return NotificationFormatter.TITLE_MAP.get(event_type, "Actualización")
+        return NotificationFormatter.TITLE_MAP.get(event_type, NotificationFormatter._fallback_title(event_type))
+    
+    @staticmethod
+    def _fallback_title(event_type: str) -> str:
+        parts = event_type.split(".", 1)
+        if len(parts) == 2:
+            domain, action = parts
+            return f"{domain.title()} - {action.replace('_', ' ').title()}"
+        return "MecanicoYa"
     
     @staticmethod
     def get_body(event_data: dict) -> str:
-        """
-        Extract professional notification body from event data.
-        
-        Provides context-aware, user-friendly messages.
-        
-        Args:
-            event_data: Event payload dictionary
-            
-        Returns:
-            Notification body string (max 100 characters)
-        """
         event_type = event_data.get("event_type", "")
         incident_id = event_data.get("incident_id", "")
         
-        # Professional, context-aware messages by event type
         body_templates = {
-            "incident.created": f"Tu solicitud #{incident_id} está siendo procesada",
+            "incident.created": f"Tu solicitud #{incident_id} esta siendo procesada",
             "incident.assigned": f"Hemos asignado un taller para tu solicitud #{incident_id}",
             "incident.assignment_accepted": f"El taller ha aceptado tu solicitud #{incident_id}",
             "incident.assignment_rejected": f"Buscando alternativa para tu solicitud #{incident_id}",
             "incident.assignment_timeout": f"Reasignando tu solicitud #{incident_id}",
+            "incident.status_changed": f"Tu solicitud #{incident_id} ahora esta en '{event_data.get('new_status', 'actualizado')}'",
+            "incident.reassigned": f"Tu solicitud #{incident_id} ha sido reasignada",
+            "incident.updated": f"Tu solicitud #{incident_id} ha sido actualizada",
+            "incident.photos_uploaded": f"Se recibieron fotos para tu solicitud #{incident_id}",
+            "incident.reassignment_started": f"Buscando un nuevo taller para tu solicitud #{incident_id}",
             
-            "incident.technician_on_way": "El técnico se dirige a tu ubicación",
-            "incident.technician_arrived": "El técnico ha llegado al lugar",
+            "incident.technician_on_way": "El tecnico se dirige a tu ubicacion",
+            "incident.technician_arrived": "El tecnico ha llegado al lugar",
             "incident.work_started": "El servicio ha iniciado",
             "incident.work_completed": "El servicio ha sido completado",
+            "technician.availability_changed": "La disponibilidad del tecnico ha cambiado",
+            "technician.online_status_changed": "El estado de conexion del tecnico ha cambiado",
+            
+            "incident.analysis_started": "Estamos analizando tu solicitud con IA",
+            "incident.analysis_completed": "El analisis de tu solicitud esta listo",
+            "incident.analysis_failed": "No se pudo completar el analisis automatico",
             
             "incident.searching_workshop": "Buscando el mejor taller disponible",
             "incident.no_workshop_available": "No hay talleres disponibles en este momento",
-            "incident.reassignment_started": "Buscando un nuevo taller para tu solicitud",
             
             "incident.cancelled": f"La solicitud #{incident_id} ha sido cancelada",
+            "cancellation.requested": f"Se ha solicitado cancelar el servicio #{incident_id}",
+            "cancellation.approved": f"La cancelacion del servicio #{incident_id} fue aprobada",
+            "cancellation.rejected": f"La cancelacion del servicio #{incident_id} fue rechazada",
+            
+            "chat.message_delivered": f"Mensaje entregado para el servicio #{incident_id}",
+            
+            "evidence.image_uploaded": f"Nueva imagen para el servicio #{incident_id}",
+            "evidence.audio_uploaded": f"Nuevo audio para el servicio #{incident_id}",
+            "evidence.deleted": f"Se elimino evidencia del servicio #{incident_id}",
+            
+            "notification.received": event_data.get("body", event_data.get("message", "Tienes una notificacion")),
+            "notification.general": event_data.get("body", event_data.get("message", "Tienes una notificacion")),
+            
+            "workshop.availability_changed": "La disponibilidad del taller ha cambiado",
+            "workshop.verified": "El taller ha sido verificado",
+            "workshop.updated": "La informacion del taller ha sido actualizada",
+            "workshop.balance_updated": "El balance del taller ha sido actualizado",
+            
+            "vehicle.created": "Vehiculo registrado exitosamente",
+            "vehicle.updated": "La informacion del vehiculo ha sido actualizada",
+            
+            "service.started": "El servicio ha iniciado",
+            "service.completed": "El servicio ha sido completado",
+            "service.paused": "El servicio ha sido pausado",
+            "service.resumed": "El servicio ha sido reanudado",
+            
+            "tracking.session_started": "El seguimiento GPS ha iniciado",
+            "tracking.session_ended": "El seguimiento GPS ha finalizado",
+            "tracking.location_updated": "La ubicacion ha sido actualizada",
+            
+            "dashboard.metrics_updated": "Las metricas del panel se han actualizado",
+            "dashboard.alert_triggered": event_data.get("message", "Se ha activado una alerta del sistema"),
+            
+            "user.profile_updated": "Tu perfil ha sido actualizado",
+            "user.password_changed": "Tu contrasena ha sido cambiada",
+            
+            "audit.log_created": "Se ha registrado actividad en el sistema",
         }
         
-        # Return template if exists
         if event_type in body_templates:
             return body_templates[event_type]
         
-        # For chat messages, use content
         if event_type == "chat.message_sent":
             content = event_data.get("content", "Tienes un nuevo mensaje")
             return content[:100]
         
-        # Fallback: try to extract meaningful message from event data
         if "message" in event_data:
             return str(event_data["message"])[:100]
         elif "description" in event_data:
@@ -213,7 +297,15 @@ class NotificationFormatter:
         elif "content" in event_data:
             return str(event_data["content"])[:100]
         else:
-            return "Tienes una actualización"
+            return NotificationFormatter._fallback_body(event_type)
+    
+    @staticmethod
+    def _fallback_body(event_type: str) -> str:
+        parts = event_type.split(".", 1)
+        if len(parts) == 2:
+            domain, action = parts
+            return f"{domain.title()}: {action.replace('_', ' ').title()}"
+        return ""
 
 
 # ============================================================================
@@ -225,24 +317,37 @@ class StrategyConfig:
     Centralized configuration for strategy selection.
     
     Defines which events use which delivery strategies.
+    Aligned with NotificationFilter classifications to prevent push spam.
     """
     
     # Critical events that require hybrid delivery (WebSocket + FCM)
     # These events are delivered via BOTH channels regardless of online status
+    # Aligned with NotificationFilter.CRITICAL_EVENTS
     CRITICAL_EVENTS = {
-        "incident.analysis_completed",
+        "incident.created",
         "incident.assigned",
+        "incident.assignment_accepted",
+        "incident.assignment_rejected",
+        "incident.technician_arrived",
+        "incident.work_completed",
+        "incident.cancelled",
         "incident.no_workshop_available",
-        "incident.technician_assigned",
+        "incident.assignment_timeout",
+        "cancellation.requested",
+        "cancellation.approved",
+        "cancellation.rejected",
+        "chat.message_sent",
     }
     
     # Events where push is always sent even if user is online via WebSocket
     # (Maximum importance: user might have the screen off or app in background)
     ALWAYS_PUSH_EVENTS = {
-        "incident.analysis_completed",
         "incident.assigned",
+        "incident.assignment_accepted",
+        "incident.assignment_rejected",
         "incident.no_workshop_available",
-        "incident.technician_assigned",
+        "incident.assignment_timeout",
+        "incident.cancelled",
     }
     
     # Event type prefixes
@@ -254,11 +359,11 @@ class StrategyConfig:
         """
         Determine which strategy to use for an event type.
         
-        Rules:
-        - Critical events (incident lifecycle) → HYBRID
+        Rules (aligned with NotificationFilter):
+        - Critical events → HYBRID (WS + push fallback)
         - Chat events → HYBRID (real-time + persistent)
         - Notification events → PUSH (persistent only)
-        - Default → HYBRID (safest option)
+        - Default → WEBSOCKET (no push unless critical — prevents push spam)
         
         Args:
             event_type: Event type string
@@ -278,8 +383,10 @@ class StrategyConfig:
         if event_type.startswith(StrategyConfig.NOTIFICATION_EVENTS_PREFIX):
             return StrategyType.PUSH
         
-        # Default to hybrid for safety
-        return StrategyType.HYBRID
+        # Default to WebSocket only — no push unless explicitly classified as critical.
+        # This prevents push spam for informative/technical/silent events that
+        # should only be delivered via WebSocket.
+        return StrategyType.WEBSOCKET
 
 
 
@@ -465,11 +572,9 @@ class HybridDeliveryStrategy(DeliveryStrategy):
     Delivers events via WebSocket and conditionally via FCM.
     
     Smart delivery logic:
-    - If user is connected via WebSocket → deliver via WebSocket only
-      (avoids duplicate notification: UI update + push banner)
-    - If user is NOT connected → deliver via FCM push
-    - For ALWAYS_PUSH_EVENTS → deliver via both regardless of online status
-      (maximum reliability for critical moments like technician arriving)
+    - Try WebSocket delivery first
+    - If WebSocket succeeds → no push needed (avoids duplicate notifications)
+    - If WebSocket fails → fall back to FCM push (user is offline/unreachable)
     
     Use Cases:
     - Critical incident lifecycle events
@@ -497,8 +602,8 @@ class HybridDeliveryStrategy(DeliveryStrategy):
         """
         Deliver event via WebSocket and conditionally via FCM.
         
-        Smart deduplication: push is only sent when user is offline or
-        the event is categorized as ALWAYS_PUSH (critical moments).
+        Smart deduplication: push is only sent when WebSocket delivery fails
+        (user is offline or unreachable).
         
         Args:
             session: Database session
@@ -511,10 +616,7 @@ class HybridDeliveryStrategy(DeliveryStrategy):
         event_type = event_data.get("event_type", "")
         channels = []
         
-        # Check if user is currently connected via WebSocket
-        user_is_online = self.ws_manager.is_user_connected(user_id)
-        
-        # Determine if push must always be sent for this event type
+        # Determine if this event type is in the always-push category (for logging)
         always_push = event_type in StrategyConfig.ALWAYS_PUSH_EVENTS
         
         # Attempt WebSocket delivery
@@ -528,10 +630,9 @@ class HybridDeliveryStrategy(DeliveryStrategy):
             )
         
         # Decide whether to send push notification:
-        # - Always push for critical events (technician arrived, work completed, etc.)
-        # - Push as fallback when user is offline
-        # - Skip push if user is already notified via WebSocket (avoids duplicates)
-        should_push = always_push or not user_is_online
+        # - Always-push events: send push even if WS succeeded (critical visibility)
+        # - Other events: push only when WS failed (fallback mode)
+        should_push = always_push or not ws_result.success
         
         if should_push:
             push_result = await self.push_strategy.deliver(session, user_id, event_data)
@@ -545,7 +646,7 @@ class HybridDeliveryStrategy(DeliveryStrategy):
         else:
             logger.debug(
                 f"FCM push skipped for user {user_id} — already notified via WebSocket "
-                f"(event: {event_type}). Set as ALWAYS_PUSH_EVENT to force push."
+                f"(event: {event_type}). Push only used as fallback when WS fails."
             )
         
         # Success if at least one channel worked

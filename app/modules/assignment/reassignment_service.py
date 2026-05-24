@@ -7,7 +7,6 @@ This service handles:
 - Dynamic candidate recalculation (fresh data)
 - Admin notification when no workshops available
 """
-import json
 from datetime import datetime, timedelta
 from typing import List, Optional
 
@@ -19,9 +18,7 @@ from ...core.config import get_settings
 from ...models.incidente import Incidente
 from ...models.assignment_attempt import AssignmentAttempt
 from ...models.administrator import Administrator
-from ...models.notification import Notification
 from .services import IntelligentAssignmentService, AssignmentResult
-from ..push_notifications.services import PushNotificationService, PushNotificationData
 
 logger = get_logger(__name__)
 settings = get_settings()
@@ -42,7 +39,6 @@ class ReassignmentService:
     def __init__(self, session: AsyncSession):
         self.session = session
         self.assignment_service = IntelligentAssignmentService(session)
-        self.push_service = PushNotificationService(session)
 
     async def handle_rejection(
         self,
@@ -190,55 +186,10 @@ class ReassignmentService:
             
             await self.session.commit()
             
-            # Emit assignment_timeout WebSocket events (Task 14)
-            from ...core.websocket_events import emit_to_admins, emit_to_user, emit_to_users, emit_to_all, EventTypes
-            from ...models.workshop import Workshop
-            
-            for attempt, incident in timed_out_data:
-                if incident.estado_actual != 'pendiente':
-                    continue
-                    
-                try:
-                    workshop = await self.session.get(Workshop, attempt.workshop_id)
-                    workshop_name = workshop.workshop_name if workshop else "Unknown"
-                    
-                    timeout_payload = {
-                        "attempt_id": attempt.id,
-                        "incident_id": attempt.incident_id,
-                        "workshop_id": attempt.workshop_id,
-                        "workshop_name": workshop_name,
-                        "response_status": "timeout",
-                        "timestamp": now.isoformat()
-                    }
-                    
-                    # Emit to admins
-                    await emit_to_admins(
-                        event_type=EventTypes.ASSIGNMENT_TIMEOUT,
-                        data=timeout_payload
-                    )
-                    
-                    # Emit to the workshop that timed out (so their UI updates)
-                    # and to the client so they know what's happening
-                    targeted_users = []
-                    if workshop:
-                        targeted_users.append(workshop.id)
-                    if incident.client_id:
-                        targeted_users.append(incident.client_id)
-                    
-                    if targeted_users:
-                        await emit_to_users(
-                            user_ids=targeted_users,
-                            event_type=EventTypes.ASSIGNMENT_TIMEOUT,
-                            data=timeout_payload
-                        )
-                        logger.info(
-                            f"WebSocket event '{EventTypes.ASSIGNMENT_TIMEOUT}' emitted to "
-                            f"participants {targeted_users} for incident {attempt.incident_id}"
-                        )
-                except Exception as ws_err:
-                    logger.error(
-                        f"Failed to emit assignment_timeout WebSocket event: {str(ws_err)}"
-                    )
+            # ✅ WebSocket emission removed — duplicate of state_timeouts.py's check_assignment_timeouts()
+            # which already publishes via EventPublisher → OutboxProcessor pipeline.
+            # The outbox handles WS delivery for connected users and FCM push for offline users.
+            # Direct legacy WS emissions here caused triple-events (outbox + emit_to_admins + emit_to_users).
             
             # Return unique incident IDs
             return list(set(incident_ids))
@@ -487,39 +438,8 @@ class ReassignmentService:
             # Notifications are handled by OutboxProcessor via status_changed event
             logger.info(f"✅ Status change event will be processed by OutboxProcessor for {len(admins)} admins")
             
-            # Create notification in database for each admin (user_id cannot be null)
-            for admin in admins:
-                admin_notification = Notification(
-                    user_id=admin.id,
-                    type="incident_no_workshop",
-                    title="Incidente sin taller disponible",
-                    message=f"Incidente #{incident_id} requiere intervención manual después de {attempt_count} intentos",
-                    data_json=json.dumps({
-                        "incident_id": incident_id,
-                        "attempts": attempt_count,
-                        "priority": incident.prioridad_ia,
-                        "category": incident.categoria_ia
-                    }),
-                    is_read=False
-                )
-                self.session.add(admin_notification)
-            
-            # Create notification in database for client
-            client_notification = Notification(
-                user_id=incident.client_id,
-                type="incident_no_workshop_client",
-                title="No hay talleres disponibles",
-                message=f"Por el momento no hay talleres disponibles para atender tu solicitud #{incident_id}. Puedes esperar a que se libere un taller o cancelar la solicitud si lo prefieres.",
-                data_json=json.dumps({
-                    "incident_id": incident_id,
-                    "priority": incident.prioridad_ia,
-                    "category": incident.categoria_ia,
-                    "can_cancel": True,
-                    "action": "view_incident"
-                }),
-                is_read=False
-            )
-            self.session.add(client_notification)
+            # Notificaciones persistentes y push se gestionan vía OutboxProcessor.
+            # Evita duplicación de registros en tabla notifications.
             
             # Update incident status
             await self.session.execute(
@@ -530,22 +450,24 @@ class ReassignmentService:
             
             await self.session.commit()
             
-            # ✅ Emit WebSocket event for status change to all users
-            from ...core.websocket_events import emit_to_all, EventTypes
-            
+            # Publish status change event via EventPublisher (outbox + immediate WS to relevant users)
             try:
-                await emit_to_all(
-                    event_type=EventTypes.INCIDENT_STATUS_CHANGED,
-                    data={
-                        "incident_id": incident_id,
-                        "estado_actual": "sin_taller_disponible",
-                        "new_status": "sin_taller_disponible",
-                        "timestamp": datetime.utcnow().isoformat()
-                    }
+                from ...shared.schemas.events.incident import IncidentStatusChangedEvent
+                from ...core.event_publisher import EventPublisher
+                
+                old_status = incident.estado_actual
+                status_event = IncidentStatusChangedEvent(
+                    incident_id=incident_id,
+                    old_status=old_status,
+                    new_status="sin_taller_disponible",
+                    changed_by=0,  # System
+                    changed_by_role="admin",
+                    reason="No hay talleres disponibles"
                 )
-                logger.info(f"✅ WebSocket event emitted: incident {incident_id} → sin_taller_disponible")
+                await EventPublisher.publish(self.session, status_event)
+                logger.info(f"✅ Published status_changed event for incident {incident_id} → sin_taller_disponible")
             except Exception as ws_err:
-                logger.error(f"Failed to emit status change WebSocket event: {str(ws_err)}")
+                logger.error(f"Failed to publish status change event: {str(ws_err)}")
             
             logger.warning(
                 f"⚠️ Administrators and client notified: incident {incident_id} has no available workshops "

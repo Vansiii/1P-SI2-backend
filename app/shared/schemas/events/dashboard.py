@@ -11,7 +11,7 @@ class DashboardMetricsUpdatedEvent(BaseEvent):
     """Event emitted when dashboard metrics are updated."""
     
     event_type: Literal["dashboard.metrics_updated"] = "dashboard.metrics_updated"
-    priority: EventPriority = Field(default=EventPriority.LOW)
+    priority: EventPriority = Field(default=EventPriority.HIGH)
     
     total_incidents: int = Field(..., description="Total number of incidents")
     active_incidents: int = Field(..., description="Number of active incidents")
@@ -24,7 +24,7 @@ class DashboardIncidentCountChangedEvent(BaseEvent):
     """Event emitted when incident count for a status changes."""
     
     event_type: Literal["dashboard.incident_count_changed"] = "dashboard.incident_count_changed"
-    priority: EventPriority = Field(default=EventPriority.MEDIUM)
+    priority: EventPriority = Field(default=EventPriority.HIGH)
     
     status: str = Field(..., description="Incident status")
     count: int = Field(..., description="Current count")
@@ -35,7 +35,7 @@ class DashboardActiveTechniciansChangedEvent(BaseEvent):
     """Event emitted when active technician count changes."""
     
     event_type: Literal["dashboard.active_technicians_changed"] = "dashboard.active_technicians_changed"
-    priority: EventPriority = Field(default=EventPriority.MEDIUM)
+    priority: EventPriority = Field(default=EventPriority.HIGH)
     
     active_count: int = Field(..., description="Number of active technicians")
     available_count: int = Field(..., description="Number of available technicians")

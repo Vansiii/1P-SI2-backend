@@ -146,7 +146,7 @@ class IncidentWorkStartedEvent(BaseEvent):
     """Event emitted when technician starts working on the incident."""
     
     event_type: Literal["incident.work_started"] = "incident.work_started"
-    priority: EventPriority = Field(default=EventPriority.MEDIUM)
+    priority: EventPriority = Field(default=EventPriority.HIGH)
     
     incident_id: int = Field(..., description="ID of the incident")
     technician_id: int = Field(..., description="ID of the technician")
@@ -184,7 +184,7 @@ class IncidentUpdatedEvent(BaseEvent):
     """Event emitted when an incident is updated with new information."""
     
     event_type: Literal["incident.updated"] = "incident.updated"
-    priority: EventPriority = Field(default=EventPriority.MEDIUM)
+    priority: EventPriority = Field(default=EventPriority.HIGH)
     
     incident_id: int = Field(..., description="ID of the incident")
     updated_fields: dict = Field(..., description="Dictionary of updated fields and their new values")

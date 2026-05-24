@@ -38,6 +38,9 @@ class NotificationFilter:
         "incident.no_workshop_available",
         "incident.assignment_timeout",
         "chat.message_sent",
+        "cancellation.requested",
+        "cancellation.approved",
+        "cancellation.rejected",
     }
     
     # Eventos INFORMATIVOS (solo WebSocket, no push)
@@ -56,6 +59,9 @@ class NotificationFilter:
     
     # Eventos TÉCNICOS (solo para admins)
     TECHNICAL_EVENTS = {
+        "incident.analysis_started",
+        "incident.analysis_completed",
+        "incident.analysis_failed",
         "incident.ai_analysis_started",
         "incident.ai_analysis_completed",
         "incident.ai_analysis_failed",
@@ -65,6 +71,7 @@ class NotificationFilter:
         "incident.evidence_text_added",
         "incident.photos_uploaded",
         "dashboard.metrics_updated",
+        "dashboard.alert_triggered",  # Alertas del dashboard
         "audit.action_logged",
     }
     
@@ -78,6 +85,31 @@ class NotificationFilter:
         "chat.user_stopped_typing",
         "chat.file_uploaded",  # Ya se notifica con message_sent
     }
+
+    @staticmethod
+    def _normalize_event_type(event_type: str) -> str:
+        """Normaliza aliases legacy de eventos al formato canónico."""
+        aliases = {
+            "incident_status_changed": "incident.status_changed",
+            "incident_status_change": "incident.status_changed",
+            "incident_assigned": "incident.assigned",
+            "incident_cancelled": "incident.cancelled",
+            "incident_no_workshop_available": "incident.no_workshop_available",
+            "incident_analysis_completed": "incident.analysis_completed",
+            "incident_analysis_started": "incident.analysis_started",
+            "incident_analysis_failed": "incident.analysis_failed",
+            "technician_assigned": "incident.technician_assigned",
+            "incident.technician_on_way": "incident.technician_assigned",
+        }
+        return aliases.get(event_type, event_type)
+
+    @staticmethod
+    def _normalize_user_type(user_type: str) -> str:
+        """Normaliza aliases de tipo de usuario."""
+        normalized = (user_type or "").strip().lower()
+        if normalized == "administrator":
+            return "admin"
+        return normalized
     
     @staticmethod
     def should_notify_user(
@@ -100,21 +132,24 @@ class NotificationFilter:
         Returns:
             True si el usuario debe recibir notificación
         """
+        event_type = NotificationFilter._normalize_event_type(event_type)
+        user_type = NotificationFilter._normalize_user_type(user_type)
+
         # Eventos silenciosos no notifican a nadie
         if event_type in NotificationFilter.SILENT_EVENTS:
             return False
         
         # Eventos técnicos solo para administradores
         if event_type in NotificationFilter.TECHNICAL_EVENTS:
-            return user_type == "administrator"
+            return user_type == "admin"
         
         # Dashboard events solo para administradores
         if event_type.startswith("dashboard."):
-            return user_type == "administrator"
+            return user_type == "admin"
         
         # Audit events solo para administradores
         if event_type.startswith("audit."):
-            return user_type == "administrator"
+            return user_type == "admin"
         
         # Chat messages: solo para participantes de la conversación
         if event_type == "chat.message_sent":
@@ -131,6 +166,28 @@ class NotificationFilter:
             # Filter out None values before checking
             valid_participants = [p for p in participants if p is not None]
             return user_id in valid_participants
+
+        if event_type == "cancellation.requested":
+            requester_id = event_data.get("requested_by")
+            if requester_id == user_id:
+                return False
+            participants = [
+                incident_participants.get("client_id"),
+                incident_participants.get("workshop_id"),
+            ]
+            valid_participants = [p for p in participants if p is not None]
+            return user_id in valid_participants
+
+        if event_type in {"cancellation.approved", "cancellation.rejected"}:
+            actor_id = event_data.get("approved_by") or event_data.get("rejected_by")
+            if actor_id == user_id:
+                return False
+            participants = [
+                incident_participants.get("client_id"),
+                incident_participants.get("workshop_id"),
+            ]
+            valid_participants = [p for p in participants if p is not None]
+            return user_id in valid_participants
         
         # Filtrado por tipo de usuario
         if user_type == "client":
@@ -145,7 +202,7 @@ class NotificationFilter:
             return NotificationFilter._should_notify_technician(
                 event_type, user_id, incident_participants
             )
-        elif user_type == "administrator":
+        elif user_type == "admin":
             return NotificationFilter._should_notify_admin(event_type)
         
         # Por defecto, no notificar
@@ -165,11 +222,13 @@ class NotificationFilter:
         # Eventos relevantes para clientes
         client_events = {
             "incident.analysis_completed",  # 1. Cuando se termina el análisis de la IA
-            "incident.assigned",            # 2. Cuando encuentra un taller
-            "incident.no_workshop_available",# 4. Cuando no se pudo encontrar un taller
-            "incident.technician_assigned",  # 3. Cuando el taller asigna el técnico
+            "incident.updated",             # 2. Actualizaciones relevantes del incidente
+            "incident.no_workshop_available",# 3. Cuando no se pudo encontrar un taller
+            "incident.technician_assigned",  # 4. Cuando el taller asigna el técnico
         }
         
+        if event_type.startswith("cancellation."):
+            return True
         return event_type in client_events
     
     @staticmethod
@@ -179,9 +238,12 @@ class NotificationFilter:
         incident_participants: dict
     ) -> bool:
         """Determina si notificar a un taller."""
-        # Solo notificar si es SU incidente asignado
-        if incident_participants.get("workshop_id") != user_id:
-            return False
+        # Para eventos finales de reasignación/sin taller, incident.workshop_id puede ser null.
+        # En esos casos el OutboxProcessor ya limita candidatos a talleres involucrados.
+        if event_type not in {"incident.no_workshop_available", "incident.status_changed"}:
+            # Solo notificar si es SU incidente asignado
+            if incident_participants.get("workshop_id") != user_id:
+                return False
         
         # Eventos relevantes para talleres
         workshop_events = {
@@ -190,8 +252,12 @@ class NotificationFilter:
             "incident.work_completed",
             "incident.technician_arrived",  # Informativo
             "incident.work_started",  # Informativo
+            "incident.no_workshop_available",
+            "incident.status_changed",
         }
         
+        if event_type.startswith("cancellation."):
+            return True
         return event_type in workshop_events
     
     @staticmethod
@@ -219,6 +285,7 @@ class NotificationFilter:
         admin_events = {
             "incident.no_workshop_available",
             "dashboard.critical_alert",
+            "dashboard.alert_triggered",  # Todas las alertas del dashboard
             "audit.security_event",
         }
         
@@ -237,6 +304,9 @@ class NotificationFilter:
         Returns:
             DeliveryMode (hybrid, websocket_only, push_only, silent)
         """
+        event_type = NotificationFilter._normalize_event_type(event_type)
+        user_type = NotificationFilter._normalize_user_type(user_type)
+
         # Eventos silenciosos
         if event_type in NotificationFilter.SILENT_EVENTS:
             return DeliveryMode.SILENT
@@ -251,14 +321,14 @@ class NotificationFilter:
         
         # Eventos técnicos para admins → WEBSOCKET_ONLY
         if event_type in NotificationFilter.TECHNICAL_EVENTS:
-            if user_type == "administrator":
+            if user_type == "admin":
                 return DeliveryMode.WEBSOCKET_ONLY
             else:
                 return DeliveryMode.SILENT
         
         # Dashboard events → WEBSOCKET_ONLY para admins
         if event_type.startswith("dashboard."):
-            if user_type == "administrator":
+            if user_type == "admin":
                 return DeliveryMode.WEBSOCKET_ONLY
             else:
                 return DeliveryMode.SILENT
@@ -285,11 +355,14 @@ class NotificationFilter:
         Returns:
             Set de user_ids que deben recibir la notificación
         """
+        event_type = NotificationFilter._normalize_event_type(event_type)
         filtered_recipients = set()
         
         for user_id in candidate_recipients:
             user_info = users_data.get(user_id, {})
-            user_type = user_info.get("user_type", "unknown")
+            user_type = NotificationFilter._normalize_user_type(
+                user_info.get("user_type", "unknown")
+            )
             
             # Aplicar filtro
             if NotificationFilter.should_notify_user(
@@ -317,6 +390,9 @@ class NotificationFilter:
         Returns:
             True si es crítico y debe enviar push
         """
+        event_type = NotificationFilter._normalize_event_type(event_type)
+        user_type = NotificationFilter._normalize_user_type(user_type)
+
         # Eventos críticos generales
         if event_type in NotificationFilter.CRITICAL_EVENTS:
             return True
@@ -341,7 +417,7 @@ class NotificationFilter:
                 "incident.technician_assigned",
                 "incident.cancelled",
             }
-        elif user_type == "administrator":
+        elif user_type == "admin":
             return event_type in {
                 "incident.no_workshop_available",
                 "dashboard.critical_alert",

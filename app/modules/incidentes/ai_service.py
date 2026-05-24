@@ -189,6 +189,36 @@ class IncidentAIService:
                 )
             # ═══════════════════════════════════════════════════════════════════════
             
+            # ═══════════════════════════════════════════════════════════════════════
+            # ✅ EMITIR EVENTO WEBSOCKET EN TIEMPO REAL (INCIDENT_UPDATED)
+            # ═══════════════════════════════════════════════════════════════════════
+            try:
+                from ...core.websocket_events import emit_to_incident_room, EventTypes
+                
+                await emit_to_incident_room(
+                    incident_id=incident.id,
+                    event_type=EventTypes.INCIDENT_UPDATED,
+                    data={
+                        "incident_id": incident.id,
+                        "updated_fields": {
+                            "categoria_ia": incident.categoria_ia,
+                            "prioridad_ia": incident.prioridad_ia,
+                            "resumen_ia": incident.resumen_ia,
+                            "es_ambiguo": incident.es_ambiguo,
+                        }
+                    }
+                )
+                
+                logger.info(
+                    f"✅ WebSocket event INCIDENT_UPDATED emitido para incidente {incident.id}"
+                )
+            except Exception as e:
+                logger.error(
+                    f"❌ Error emitiendo WebSocket event INCIDENT_UPDATED: {str(e)}",
+                    exc_info=True
+                )
+            # ═══════════════════════════════════════════════════════════════════════
+            
             logger.info(
                 f"✅ AI analysis completed for incident {incident.id}. "
                 f"Category: {incident.categoria_ia}, Priority: {incident.prioridad_ia}, "

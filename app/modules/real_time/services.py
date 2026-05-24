@@ -1,21 +1,20 @@
 """
 Real-time service for WebSocket integration with business logic.
 """
-import json
 from datetime import datetime, timedelta
 from typing import Optional, Dict
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
 
 from ...core.websocket import manager
-from ...core.websocket_events import emit_to_incident_room, emit_to_all, EventTypes
+from ...core.websocket_events import emit_to_incident_room, EventTypes
+from ...core.event_publisher import EventPublisher
+from ...shared.schemas.events.incident import IncidentStatusChangedEvent
 from ...core.logging import get_logger
 from ...models.incidente import Incidente
 from ...models.technician import Technician
 from ...models.technician_location_history import TechnicianLocationHistory
 from ...models.tracking_session import TrackingSession
-from ...models.notification import Notification
-from ..push_notifications.services import PushNotificationService, PushNotificationData
 
 logger = get_logger(__name__)
 
@@ -31,7 +30,6 @@ class RealTimeService:
 
     def __init__(self, session: AsyncSession):
         self.session = session
-        self.push_service = PushNotificationService(session)
 
     async def update_technician_location(
         self,
@@ -215,21 +213,7 @@ class RealTimeService:
                 logger.warning(f"Incident {incident_id} not found")
                 return False
 
-            # Create notification
-            notification = Notification(
-                user_id=incident.client_id,
-                type="incident_status_change",
-                title="Estado del incidente actualizado",
-                message=f"Tu incidente cambió a estado: {new_status}",
-                data_json=json.dumps({
-                    "incident_id": incident_id,
-                    "new_status": new_status,
-                    "changed_by": changed_by,
-                    "notes": notes
-                }),
-                created_at=datetime.utcnow()
-            )
-            self.session.add(notification)
+            # Notificaciones persistentes/push se gestionan vía OutboxProcessor.
 
             # Broadcast status change
             await manager.send_incident_status_change(
@@ -368,40 +352,7 @@ class RealTimeService:
             # Prepare workshop name
             workshop_name = technician.workshop.workshop_name if technician.workshop else "N/A"
 
-            # Create notifications
-            # Notify client
-            client_notification = Notification(
-                user_id=incident.client_id,
-                type="technician_assigned",
-                title="Técnico asignado",
-                message=f"Se asignó el técnico {technician.first_name} {technician.last_name}",
-                data_json=json.dumps({
-                    "incident_id": incident_id,
-                    "technician_id": technician_id,
-                    "technician_name": f"{technician.first_name} {technician.last_name}",
-                    "workshop_name": workshop_name
-                }),
-                created_at=datetime.utcnow()
-            )
-            self.session.add(client_notification)
-
-            # Notify technician
-            tech_notification = Notification(
-                user_id=technician_id,
-                type="incident_assigned",
-                title="Nuevo incidente asignado",
-                message=f"Se te asignó un nuevo incidente #{incident_id}",
-                data_json=json.dumps({
-                    "incident_id": incident_id,
-                    "client_name": f"{incident.client.first_name} {incident.client.last_name}" if incident.client else "N/A",
-                    "location": {
-                        "latitude": float(incident.latitude),
-                        "longitude": float(incident.longitude)
-                    }
-                }),
-                created_at=datetime.utcnow()
-            )
-            self.session.add(tech_notification)
+            # Notificaciones persistentes/push se gestionan vía OutboxProcessor.
 
             # ═══════════════════════════════════════════════════════════════════════
             # ✅ EMITIR EVENTO ESTANDARIZADO: technician_assigned
@@ -426,22 +377,16 @@ class RealTimeService:
                 data=technician_assigned_data
             )
             
-            # ✅ Emit to ALL users (so all workshops see the update in real-time)
-            await emit_to_all(
-                event_type=EventTypes.TECHNICIAN_ASSIGNED,
-                data=technician_assigned_data
+            # ✅ Publish status change event via EventPublisher (secure, scoped delivery)
+            status_event = IncidentStatusChangedEvent(
+                incident_id=incident_id,
+                old_status=incident_before.estado_actual,
+                new_status="en_proceso",
+                changed_by=assigned_by,
+                changed_by_role="admin",
+                reason=f"Technician {technician.first_name} {technician.last_name} assigned"
             )
-            
-            # ✅ Also emit status change event
-            await emit_to_all(
-                event_type=EventTypes.INCIDENT_STATUS_CHANGED,
-                data={
-                    "incident_id": incident_id,
-                    "estado_actual": "en_proceso",
-                    "new_status": "en_proceso",
-                    "timestamp": datetime.utcnow().isoformat()
-                }
-            )
+            await EventPublisher.publish(self.session, status_event)
             
             # ═══════════════════════════════════════════════════════════════════════
             # ✅ NOTIFICACIONES MANEJADAS POR OUTBOX PROCESSOR
@@ -550,19 +495,7 @@ class RealTimeService:
                 select(Incidente).where(Incidente.id == incident_id)
             )
 
-            # Create notification for client
-            notification = Notification(
-                user_id=incident.client_id,
-                type="technician_arrived",
-                title="El técnico ha llegado",
-                message="El técnico ha llegado a tu ubicación y comenzará el servicio",
-                data_json=json.dumps({
-                    "incident_id": incident_id,
-                    "technician_id": technician_id
-                }),
-                created_at=datetime.utcnow()
-            )
-            self.session.add(notification)
+            # Notificaciones persistentes/push se gestionan vía OutboxProcessor.
 
             # ✅ Emit WebSocket events
             arrived_data = {
@@ -578,11 +511,16 @@ class RealTimeService:
                 data=arrived_data
             )
             
-            # ✅ Emit to ALL users
-            await emit_to_all(
-                event_type=EventTypes.TECHNICIAN_ARRIVED,
-                data=arrived_data
+            # ✅ Publish status change event via EventPublisher (secure, scoped delivery)
+            status_event = IncidentStatusChangedEvent(
+                incident_id=incident_id,
+                old_status=incident_before.estado_actual,
+                new_status="en_proceso",
+                changed_by=technician_id,
+                changed_by_role="technician",
+                reason="Technician arrived at incident location"
             )
+            await EventPublisher.publish(self.session, status_event)
             
             # Broadcast arrival (legacy - mantener por compatibilidad)
             await manager.send_technician_arrived(
