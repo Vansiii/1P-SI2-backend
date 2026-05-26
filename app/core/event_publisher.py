@@ -107,7 +107,8 @@ class EventPublisher:
                 version=event.version,
                 priority=event.priority,
                 processed=False,
-                retry_count=0
+                retry_count=0,
+                ws_immediate_sent=False
             )
             
             # Add to session (will be committed with business operation)
@@ -124,10 +125,8 @@ class EventPublisher:
             )
             
             # 🚀 For HIGH priority events, send immediate WebSocket notification
-            # ⚠️ DISABLED for chat.message_sent - OutboxProcessor handles it with full payload
             if (send_immediate and 
-                event.priority == EventPriority.HIGH and 
-                event.event_type != "chat.message_sent"):
+                event.priority == EventPriority.HIGH):
                 await EventPublisher._send_immediate_websocket(session, event)
             
             return outbox_event
@@ -146,134 +145,183 @@ class EventPublisher:
     ):
         """
         Send immediate WebSocket notification for HIGH priority events.
-        
-        This provides low-latency delivery to online users while the
-        OutboxProcessor handles FCM fallback for offline users.
-        
-        Args:
-            session: Database session
-            event: Event to send
+
+        CRITICAL FIX: Uses the outbox event's own event_id for deduplication
+        so the OutboxProcessor won't re-deliver the same event via WS.
+        Broadcasts via send_personal_message (with dedup enabled) so the
+        server-side dedup cache is populated, preventing the OutboxProcessor
+        from sending the same event again via WebSocket.
+
+        Individual user sends replace workshop broadcasts entirely to avoid
+        double-delivery to workshop members (who are also in the recipients set).
         """
         try:
             from ..core.websocket import manager as ws_manager
+            from ..core.websocket_events import _build_event_payload
             from ..models.incidente import Incidente
             from ..models.user import User
-            import json
-            
-            # Parse event data
+
             event_data = json.loads(event.json())
             incident_id = event_data.get("incident_id")
-            
-            if not incident_id:
-                # No incident_id, skip immediate delivery
-                return
-            
-            # Determine recipients based on event type
+
+            # Use the outbox event's own event_id so dedup is consistent
+            ws_payload = _build_event_payload(event.event_type, event_data, event_id=str(event.event_id))
+
             recipients = set()
-            
-            # Get incident to find participants
+
+            # Handle notification.* events (have user_id instead of incident_id)
+            if event.event_type.startswith("notification."):
+                user_id = event_data.get("user_id")
+                if user_id:
+                    recipients.add(user_id)
+                    if ws_manager.is_user_connected(user_id):
+                        try:
+                            await ws_manager.send_personal_message(
+                                user_id, ws_payload, check_dedup=True
+                            )
+                            logger.debug(
+                                f"Sent immediate WS notification event to user {user_id}"
+                            )
+                        except Exception as e:
+                            logger.warning(
+                                f"Failed immediate WS notification to user {user_id}: {str(e)}"
+                            )
+                return
+
+            # Handle dashboard.* events (broadcast to all admins)
+            if event.event_type.startswith("dashboard."):
+                from sqlalchemy import select
+                admin_result = await session.execute(
+                    select(User.id).where(User.user_type == "admin")
+                )
+                admin_ids = admin_result.scalars().all()
+                for admin_id in admin_ids:
+                    recipients.add(admin_id)
+                    if ws_manager.is_user_connected(admin_id):
+                        try:
+                            await ws_manager.send_personal_message(
+                                admin_id, ws_payload, check_dedup=True
+                            )
+                        except Exception as e:
+                            logger.debug(
+                                f"Failed immediate WS dashboard to admin {admin_id}: {str(e)}"
+                            )
+                if recipients:
+                    logger.info(
+                        f"Sent immediate WS for dashboard event {event.event_type} "
+                        f"to {len(recipients)} admins"
+                    )
+                return
+
+            if not incident_id:
+                return
+
             incident = await session.get(Incidente, incident_id)
             if incident:
-                # Add client
                 if incident.client_id:
                     recipients.add(incident.client_id)
-                
-                # Add workshop
                 if incident.taller_id:
                     recipients.add(incident.taller_id)
-                
-                # Add technician
                 if incident.tecnico_id:
                     recipients.add(incident.tecnico_id)
-            
-            # For incident.assigned events, add workshop_id from payload
-            if event.event_type == "incident.assigned":
-                workshop_id = event_data.get("workshop_id")
-                if workshop_id:
-                    recipients.add(workshop_id)
-            
-            # For incident.assignment_accepted/rejected, add workshop_id from payload
-            if event.event_type in ("incident.assignment_accepted", "incident.assignment_rejected"):
-                workshop_id = event_data.get("workshop_id")
-                if workshop_id:
-                    recipients.add(workshop_id)
-            
-            # For incident.assigned events, add workshop_id from payload
-            if event.event_type == "incident.assigned":
-                workshop_id = event_data.get("workshop_id")
-                if workshop_id:
-                    recipients.add(workshop_id)
-                    logger.info(f"✅ Added workshop {workshop_id} to recipients for incident.assigned event")
-            
-            # For incident.assignment_accepted/rejected, add workshop_id from payload
-            if event.event_type in ("incident.assignment_accepted", "incident.assignment_rejected"):
-                workshop_id = event_data.get("workshop_id")
-                if workshop_id:
-                    recipients.add(workshop_id)
-                    logger.info(f"✅ Added workshop {workshop_id} to recipients for {event.event_type} event")
-            
-            # For incident.assignment_accepted, notify ALL workshops with pending assignments
-            # so they can remove the incident from their list
+
+            # For cancellation.* events, also include the original requester
+            # (incident.taller_id may have been cleared by _cancel_incident_and_reassign).
+            requested_by = event_data.get("requested_by")
+            if requested_by:
+                recipients.add(requested_by)
+
+            workshop_id = event_data.get("workshop_id")
+            if workshop_id:
+                recipients.add(workshop_id)
+
             if event.event_type == "incident.assignment_accepted":
                 from ..models.assignment_attempt import AssignmentAttempt
                 from sqlalchemy import select, and_
-                
-                # Get all workshops with pending assignments for this incident
+
                 result = await session.execute(
                     select(AssignmentAttempt.workshop_id)
                     .where(
                         and_(
                             AssignmentAttempt.incident_id == incident_id,
-                            AssignmentAttempt.status == 'pending'
+                            AssignmentAttempt.status.in_(["pending", "timeout", "no_response"])
                         )
                     )
                     .distinct()
                 )
-                pending_workshops = [row[0] for row in result.all()]
-                
-                # Add all pending workshops to recipients
-                recipients.update(pending_workshops)
-                logger.info(
-                    f"✅ Added {len(pending_workshops)} workshops with pending assignments "
-                    f"to recipients for incident.assignment_accepted event: {pending_workshops}"
-                )
-            
-            # For chat messages, exclude sender
+                affected_workshops = [row[0] for row in result.all()]
+                recipients.update(affected_workshops)
+
+                if affected_workshops:
+                    logger.info(
+                        f"Notifying {len(affected_workshops)} workshops with pending/timeout "
+                        f"assignments for incident {incident_id}"
+                    )
+
             if event.event_type == "chat.message_sent":
                 sender_id = event_data.get("sender_id")
-                if sender_id and sender_id in recipients:
-                    recipients.remove(sender_id)
-                    logger.debug(f"Excluded sender {sender_id} from immediate WebSocket recipients")
-            
-            # Add administrators for critical events
-            if event.event_type.startswith(("incident.created", "incident.cancelled", "incident.status_changed")):
+                if sender_id:
+                    recipients.discard(sender_id)
+
+            admin_event_prefixes = (
+                "incident.created", "incident.cancelled",
+                "incident.status_changed", "incident.assigned",
+                "incident.assignment_accepted", "incident.assignment_rejected",
+                "incident.assignment_timeout", "incident.no_workshop_available"
+            )
+            if event.event_type.startswith(admin_event_prefixes):
                 from sqlalchemy import select
                 admin_result = await session.execute(
-                    select(User.id).where(User.user_type == "administrator")
+                    select(User.id).where(User.user_type == "admin")
                 )
                 admin_ids = admin_result.scalars().all()
                 recipients.update(admin_ids)
-            
-            # Send to online recipients via WebSocket
+
             online_count = 0
+            sent_user_ids = set()
             for user_id in recipients:
                 if ws_manager.is_user_connected(user_id):
                     try:
-                        logger.info(f"🚀 Sending immediate WebSocket to user {user_id}: {event.event_type}")
-                        await ws_manager.send_to_user(user_id, event_data)
+                        await ws_manager.send_personal_message(
+                            user_id, ws_payload, check_dedup=True
+                        )
                         online_count += 1
-                        logger.info(f"✅ Immediate WebSocket sent successfully to user {user_id}")
+                        sent_user_ids.add(user_id)
                     except Exception as e:
-                        logger.warning(f"Failed immediate WebSocket to user {user_id}: {str(e)}")
-            
+                        logger.warning(
+                            f"Failed immediate WebSocket to user {user_id}: {str(e)}"
+                        )
+
+            # Broadcast to workshop rooms for workshop-relevant events
+            # Workshop staff (beyond the owner) need to receive notifications
+            target_workshop = workshop_id or (incident.taller_id if incident else None)
+            workshop_event_prefixes = (
+                "incident.assigned", "incident.assignment_accepted",
+                "incident.status_changed", "incident.work_started",
+                "incident.work_completed", "incident.cancelled",
+                "incident.technician_on_way", "incident.technician_arrived",
+                "incident.photos_uploaded"
+            )
+            if target_workshop and event.event_type.startswith(workshop_event_prefixes):
+                try:
+                    await ws_manager.broadcast_to_workshop(
+                        target_workshop, ws_payload
+                    )
+                    logger.debug(
+                        f"Broadcasted {event.event_type} to workshop room {target_workshop}"
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Failed workshop room broadcast: {str(e)}"
+                    )
+
             if online_count > 0:
                 logger.info(
-                    f"🚀 Sent immediate WebSocket for {event.event_type} to {online_count} online users "
-                    f"(event_id={event.event_id})"
+                    f"Sent immediate WebSocket for {event.event_type} "
+                    f"to {online_count} online users (event_id={event.event_id})"
                 )
-            
+
         except Exception as e:
-            # Don't fail the entire publish operation if immediate delivery fails
             logger.warning(
                 f"Failed to send immediate WebSocket for {event.event_type}: {str(e)}"
             )

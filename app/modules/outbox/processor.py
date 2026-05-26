@@ -20,6 +20,7 @@ from ...models.outbox_event import OutboxEvent, EventPriority
 from ...models.event_log import EventLog
 from ...models.user import User
 from ...models.incidente import Incidente
+from ...models.message import Message
 from .delivery_strategies import DeliveryStrategyFactory
 from .notification_filter import NotificationFilter, DeliveryMode
 
@@ -240,10 +241,24 @@ class OutboxProcessor:
         )
         
         if not recipients:
-            logger.warning(
-                f"No recipients found for event {outbox_event.event_type} "
-                f"(event_id={outbox_event.event_id})"
-            )
+            # Check if this is a silent event by design
+            from .notification_filter import NotificationFilter
+            if outbox_event.event_type in NotificationFilter.SILENT_EVENTS:
+                logger.debug(
+                    f"🔇 Silent event {outbox_event.event_type} - no recipients by design "
+                    f"(event_id={outbox_event.event_id})"
+                )
+            elif outbox_event.event_type.startswith("dashboard."):
+                # Dashboard events without recipients means no active admins
+                logger.debug(
+                    f"📊 Dashboard event {outbox_event.event_type} - no active administrators "
+                    f"(event_id={outbox_event.event_id})"
+                )
+            else:
+                logger.warning(
+                    f"No recipients found for event {outbox_event.event_type} "
+                    f"(event_id={outbox_event.event_id})"
+                )
             # Mark as processed anyway (no recipients)
             await self._mark_processed(session, outbox_event)
             return
@@ -300,6 +315,25 @@ class OutboxProcessor:
         incident_id = event_data.get("incident_id")
         
         logger.info(f"🔍 Determining recipients for {event_type}, incident_id={incident_id}")
+
+        # Chat receipts (delivered/read) target only the original sender.
+        if event_type in {"chat.message_delivered", "chat.message_read"}:
+            sender_id = event_data.get("sender_id")
+            if sender_id:
+                candidate_recipients.add(sender_id)
+            else:
+                message_id = event_data.get("message_id")
+                if message_id:
+                    message = await session.get(Message, message_id)
+                    if message:
+                        candidate_recipients.add(message.sender_id)
+                        event_data["sender_id"] = message.sender_id
+                        if not incident_id:
+                            incident_id = message.incident_id
+                            event_data["incident_id"] = message.incident_id
+                            incident_participants["client_id"] = None
+                            incident_participants["workshop_id"] = None
+                            incident_participants["technician_id"] = None
         
         if incident_id:
             # Get incident participants
@@ -342,6 +376,15 @@ class OutboxProcessor:
             workshop_ids = attempt_result.scalars().all()
             candidate_recipients.update(workshop_ids)
         
+        # For incident.status_changed, include workshop from payload when present.
+        # This is required for transitions like mutual_cancellation where incident.taller_id
+        # is already null in DB but the previous workshop still needs the update.
+        if event_type == "incident.status_changed":
+            status_workshop_id = event_data.get("workshop_id")
+            if status_workshop_id:
+                candidate_recipients.add(status_workshop_id)
+                incident_participants["workshop_id"] = status_workshop_id
+
         # For incident.status_changed to 'sin_taller_disponible', add workshops
         if event_type == "incident.status_changed":
             new_status = event_data.get("new_status")
@@ -355,10 +398,45 @@ class OutboxProcessor:
                 workshop_ids = attempt_result.scalars().all()
                 candidate_recipients.update(workshop_ids)
         
-        # For incident.no_workshop_available, add admins
+        # For incident.no_workshop_available, add workshops that participated
+        # (so they can remove stale pending cards) and admins for monitoring.
         if event_type == "incident.no_workshop_available" and incident_id:
+            from ...models.assignment_attempt import AssignmentAttempt
+            attempt_result = await session.execute(
+                select(AssignmentAttempt.workshop_id).where(
+                    AssignmentAttempt.incident_id == incident_id
+                ).distinct()
+            )
+            workshop_ids = attempt_result.scalars().all()
+            candidate_recipients.update(workshop_ids)
+
             admin_result = await session.execute(
-                select(User.id).where(User.user_type == "administrator")
+                select(User.id).where(User.user_type == "admin")
+            )
+            admin_ids = admin_result.scalars().all()
+            candidate_recipients.update(admin_ids)
+
+        # For incident lifecycle updates that must refresh admin monitoring cards,
+        # include admins as recipients (WebSocket-only by NotificationFilter).
+        admin_incident_events = {
+            "incident.assigned",
+            "incident.assignment_accepted",
+            "incident.assignment_rejected",
+            "incident.status_changed",
+            "incident.technician_on_way",
+            "incident.technician_arrived",
+            "incident.work_started",
+            "incident.work_completed",
+            "incident.cancelled",
+        }
+        if event_type in admin_incident_events:
+            admin_result = await session.execute(
+                select(User.id).where(
+                    and_(
+                        User.user_type == "admin",
+                        User.is_active == True
+                    )
+                )
             )
             admin_ids = admin_result.scalars().all()
             candidate_recipients.update(admin_ids)
@@ -373,7 +451,7 @@ class OutboxProcessor:
         # Add administrators for critical system events
         if event_type.startswith(("incident.created", "incident.cancelled", "audit.")):
             admin_result = await session.execute(
-                select(User.id).where(User.user_type == "administrator")
+                select(User.id).where(User.user_type == "admin")
             )
             admin_ids = admin_result.scalars().all()
             candidate_recipients.update(admin_ids)
@@ -381,10 +459,19 @@ class OutboxProcessor:
         # Dashboard events go to all admins
         if event_type.startswith("dashboard."):
             admin_result = await session.execute(
-                select(User.id).where(User.user_type == "administrator")
+                select(User.id).where(
+                    and_(
+                        User.user_type == "admin",
+                        User.is_active == True
+                    )
+                )
             )
             admin_ids = admin_result.scalars().all()
-            candidate_recipients.update(admin_ids)
+            if admin_ids:
+                candidate_recipients.update(admin_ids)
+                logger.debug(f"📊 Dashboard event will be sent to {len(admin_ids)} administrators")
+            else:
+                logger.debug(f"📊 No active administrators found for dashboard event {event_type}")
         
         # Notification events have explicit recipient
         if event_type.startswith("notification."):
@@ -446,19 +533,31 @@ class OutboxProcessor:
         """
         Deliver event to a specific user using appropriate delivery strategy.
         
-        This method has been refactored to use the Delivery Strategies Pattern.
-        No more "assumed delivery" logic - all deliveries are verified.
-        
-        Args:
-            session: Database session
-            outbox_event: Event to deliver
-            user_id: User ID to deliver to
-            event_data: Event payload data
-            
-        Returns:
-            True if delivery succeeded, False otherwise
+        All delivery strategies have been refactored for verified delivery.
+        The outbox event's event_id is injected into the event_data so that
+        server-side deduplication can match the immediate WS delivery.
         """
-        # Get appropriate delivery strategy for this event type
+        # Idempotency guard: avoid duplicate delivery of same event_id to same user.
+        already_delivered = await session.scalar(
+            select(EventLog.id).where(
+                and_(
+                    EventLog.event_id == outbox_event.event_id,
+                    EventLog.delivered_to == user_id
+                )
+            ).limit(1)
+        )
+        if already_delivered:
+            logger.info(
+                f"⏭️ Skipping duplicate delivery for event {outbox_event.event_id} "
+                f"to user {user_id} (already in event_log)"
+            )
+            return True
+
+        # CRITICAL: Inject event_id so WS dedup matches immediate delivery
+        # Convert UUID to string to ensure JSON serialization
+        event_data["event_id"] = str(outbox_event.event_id)
+        event_data["event_type"] = outbox_event.event_type
+
         strategy = self.strategy_factory.get_strategy(outbox_event.event_type)
         
         logger.debug(
@@ -466,10 +565,8 @@ class OutboxProcessor:
             f"to user {user_id}"
         )
         
-        # Execute delivery via strategy
         result = await strategy.deliver(session, user_id, event_data)
         
-        # Log delivery if successful
         if result.success:
             await self._log_delivery(
                 session,
@@ -479,11 +576,10 @@ class OutboxProcessor:
             )
             
             logger.info(
-                f"✅ Delivered event {outbox_event.event_type} to user {user_id} "
+                f"Delivered event {outbox_event.event_type} to user {user_id} "
                 f"via {result.channel}"
             )
             
-            # Publish chat.message_delivered event if applicable
             if outbox_event.event_type == "chat.message_sent":
                 await self._publish_message_delivered_event(
                     session,
@@ -493,7 +589,7 @@ class OutboxProcessor:
                 )
         else:
             logger.warning(
-                f"❌ Failed to deliver event {outbox_event.event_type} to user {user_id}: "
+                f"Failed to deliver event {outbox_event.event_type} to user {user_id}: "
                 f"{result.reason}"
             )
         
@@ -524,6 +620,8 @@ class OutboxProcessor:
             
             delivered_event = ChatMessageDeliveredEvent(
                 message_id=message_id,
+                incident_id=event_data.get("incident_id"),
+                sender_id=event_data.get("sender_id"),
                 delivered_to=delivered_to,
                 delivered_at=datetime.utcnow()
             )
@@ -542,69 +640,18 @@ class OutboxProcessor:
             )
     
     def _get_notification_title(self, event_type: str) -> str:
-        """Get notification title based on event type - Professional and minimalist."""
-        title_map = {
-            "incident.created": "Solicitud Recibida",
-            "incident.analysis_completed": "Diagnóstico de IA Completado",
-            "incident.assigned": "Taller Asignado",
-            "incident.technician_assigned": "Técnico Asignado",
-            "incident.assignment_accepted": "Solicitud Aceptada",
-            "incident.assignment_rejected": "Solicitud Rechazada",
-            "incident.assignment_timeout": "Tiempo de Espera Agotado",
-            "incident.technician_on_way": "Técnico en Camino",
-            "incident.technician_arrived": "Técnico en Sitio",
-            "incident.work_started": "Servicio Iniciado",
-            "incident.work_completed": "Servicio Finalizado",
-            "incident.cancelled": "Solicitud Cancelada",
-            "incident.no_workshop_available": "Sin Talleres Disponibles",
-            "chat.message_sent": "Nuevo mensaje",
-            "notification.received": "Notificación",
-        }
-        return title_map.get(event_type, "Actualización")
-    
+        """DEPRECATED: Delegates to NotificationFormatter in delivery_strategies.py."""
+        from .delivery_strategies import NotificationFormatter
+        return NotificationFormatter.get_title(event_type)
+
     def _get_notification_body(self, event_data: dict) -> str:
-        """Get notification body from event data - Professional and context-aware."""
+        """DEPRECATED: Delegates to NotificationFormatter in delivery_strategies.py."""
         event_type = event_data.get("event_type", "")
-        incident_id = event_data.get("incident_id", "")
-        
-        # Custom messages based on event type
-        body_map = {
-            "incident.analysis_completed": "El análisis inicial de tu solicitud está listo.",
-            "incident.assigned": f"Hemos asignado un taller para tu solicitud #{incident_id}",
-            "incident.technician_assigned": "Se ha asignado un técnico a tu solicitud",
-            "incident.assignment_accepted": f"El taller ha aceptado tu solicitud #{incident_id}",
-            "incident.assignment_rejected": f"Buscando alternativa para tu solicitud #{incident_id}",
-            "incident.assignment_timeout": f"Reasignando tu solicitud #{incident_id}",
-            
-            "incident.technician_on_way": "El técnico se dirige a tu ubicación",
-            "incident.technician_arrived": "El técnico ha llegado al lugar",
-            "incident.work_started": "El servicio ha iniciado",
-            "incident.work_completed": "El servicio ha sido completado",
-            
-            "incident.searching_workshop": "Buscando el mejor taller disponible para tu solicitud",
-            "incident.no_workshop_available": "No hay talleres disponibles. Puedes esperar o cancelar la solicitud",
-            "incident.reassignment_started": "Buscando un nuevo taller para tu solicitud",
-            
-            "incident.cancelled": f"La solicitud #{incident_id} ha sido cancelada",
-            
-            "chat.message_sent": event_data.get("content", "Tienes un nuevo mensaje")[:100],
-        }
-        
-        # Return custom message or extract from event data
-        if event_type in body_map:
-            return body_map[event_type]
-        
-        # Fallback: try to extract meaningful message from event data
-        if "message" in event_data:
-            return event_data["message"][:100]
-        elif "description" in event_data:
-            return event_data["description"][:100]
-        elif "body" in event_data:
-            return event_data["body"][:100]
-        elif "content" in event_data:
-            return event_data["content"][:100]
-        else:
-            return "Tienes una actualización"
+        if event_type == "chat.message_sent":
+            content = event_data.get("content", "")
+            return content[:100] if content else "Tienes un nuevo mensaje"
+        from .delivery_strategies import NotificationFormatter
+        return NotificationFormatter.get_body(event_data)
     
     async def _log_delivery(
         self,

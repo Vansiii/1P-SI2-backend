@@ -126,3 +126,8 @@ credentials/
 # Docker secrets (if using Docker in future)
 docker-compose.override.yml
 .dockerignore.local
+
+# Copilot skills and agent artifacts
+.agents/
+skills-lock.json
+.kiro/

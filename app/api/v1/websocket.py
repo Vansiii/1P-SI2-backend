@@ -3,10 +3,10 @@ WebSocket endpoints for real-time communication.
 """
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
-from typing import Optional, Dict
+from sqlalchemy import select, and_
+from typing import Optional, Dict, List
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from ...core.websocket import manager
 from ...core.database import get_db_session
@@ -31,6 +31,34 @@ MAX_AUTH_FAILURES = 5  # Maximum failed attempts
 AUTH_FAILURE_WINDOW = 60  # Time window in seconds (1 minute)
 BLOCK_DURATION = 300  # Block duration in seconds (5 minutes)
 
+# Message rate limiting
+MAX_WS_MESSAGES_PER_WINDOW = 60  # Max messages per user per window
+WS_MESSAGE_WINDOW_SECONDS = 10  # Sliding window for message rate limiting
+# Structure: {user_id: List[datetime]}
+_ws_message_tracker: Dict[int, List[datetime]] = {}
+
+
+def check_ws_message_rate(user_id: int) -> bool:
+    """
+    Verifica si un usuario excede el límite de mensajes WebSocket.
+
+    Retorna True si el límite NO se ha excedido, False si está rate limited.
+    """
+    now = datetime.now(timezone.utc)
+    if user_id not in _ws_message_tracker:
+        _ws_message_tracker[user_id] = []
+
+    window_start = now - timedelta(seconds=WS_MESSAGE_WINDOW_SECONDS)
+    recent_messages = [t for t in _ws_message_tracker[user_id] if t > window_start]
+    _ws_message_tracker[user_id] = recent_messages
+
+    if len(recent_messages) >= MAX_WS_MESSAGES_PER_WINDOW:
+        logger.warning(f"Rate limit exceeded for user {user_id}: {len(recent_messages)} messages in {WS_MESSAGE_WINDOW_SECONDS}s")
+        return False
+
+    _ws_message_tracker[user_id].append(now)
+    return True
+
 
 def check_rate_limit(user_id: int) -> tuple[bool, Optional[int]]:
     """
@@ -44,7 +72,7 @@ def check_rate_limit(user_id: int) -> tuple[bool, Optional[int]]:
         - is_allowed: True if user can attempt connection, False if blocked
         - seconds_until_unblock: Seconds remaining in block, or None if not blocked
     """
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     
     if user_id not in _auth_failure_tracker:
         return True, None
@@ -81,7 +109,7 @@ def record_auth_failure(user_id: int):
     Args:
         user_id: User ID that failed authentication
     """
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     
     if user_id not in _auth_failure_tracker:
         _auth_failure_tracker[user_id] = {
@@ -241,7 +269,7 @@ async def websocket_tracking_endpoint(
         # IMPORTANTE: Para workshops, permitir acceso a su propio user_id
         has_access = (
             user.id == user_id or 
-            user.user_type == "administrator" or
+            user.user_type == "admin" or
             (user.user_type == "workshop" and user.id == user_id)
         )
         
@@ -266,12 +294,13 @@ async def websocket_tracking_endpoint(
         
         # Store user type for later use
         user_type = user.user_type
+        workshop_id = user.id if user_type == 'workshop' else None
         
         # Break out of the session context - we don't need it anymore
         break
     
-    # Connect user with user type
-    await manager.connect(websocket, user_id, user_type=user_type)
+    # Connect user with user type and optional workshop_id
+    await manager.connect(websocket, user_id, user_type=user_type, workshop_id=workshop_id)
     
     try:
         while True:
@@ -282,6 +311,10 @@ async def websocket_tracking_endpoint(
             except Exception as receive_error:
                 logger.error(f"❌ Error receiving message from user {user_id}: {type(receive_error).__name__}: {str(receive_error)}")
                 raise
+            
+            if not check_ws_message_rate(user_id):
+                logger.warning(f"Rate limited user {user_id} - dropping message")
+                continue
             
             try:
                 message = json.loads(data)
@@ -297,40 +330,86 @@ async def websocket_tracking_endpoint(
                     logger.debug(f"Received ping from user {user_id}, responding with pong")
                     await manager.send_personal_message(user_id, {
                         "type": "pong",
-                        "timestamp": datetime.utcnow().isoformat()
+                        "timestamp": datetime.now(timezone.utc).isoformat()
                     })
                     
                 elif message_type == "get_missed_events":
-                    # Client is requesting missed events (mobile feature)
-                    # For now, just acknowledge the request
-                    # TODO: Implement missed events recovery from database
-                    logger.info(f"📥 Received get_missed_events from user {user_id}, responding with empty list")
+                    # Client requesting missed events (events that occurred while disconnected)
+                    since_str = message.get("since")
+                    limit = message.get("limit", 100)
+                    logger.info(
+                        f"📥 User {user_id} requesting missed events "
+                        f"(since={since_str}, limit={limit})"
+                    )
                     try:
+                        async for db_session in get_db_session():
+                            from ...models.event_log import EventLog
+                            
+                            
+                            query = select(EventLog).where(
+                                EventLog.delivered_to == user_id
+                            )
+                            if since_str:
+                                try:
+                                    since = datetime.fromisoformat(since_str)
+                                    query = query.where(EventLog.delivered_at > since)
+                                except (ValueError, TypeError):
+                                    pass
+                            
+                            query = query.order_by(
+                                EventLog.delivered_at.asc()
+                            ).limit(limit)
+                            
+                            result = await db_session.execute(query)
+                            events = result.scalars().all()
+                            
+                            events_data = []
+                            for evt in events:
+                                try:
+                                    events_data.append(json.loads(evt.payload))
+                                except (json.JSONDecodeError, TypeError):
+                                    events_data.append({
+                                        "event_type": evt.event_type,
+                                        "event_id": str(evt.event_id),
+                                        "delivered_at": evt.delivered_at.isoformat() if evt.delivered_at else None
+                                    })
+                            
+                            await manager.send_personal_message(user_id, {
+                                "type": "missed_events_response",
+                                "events": events_data,
+                                "count": len(events_data),
+                                "timestamp": datetime.now(timezone.utc).isoformat()
+                            })
+                            logger.info(
+                                f"✅ Sent {len(events_data)} missed events to user {user_id}"
+                            )
+                            break
+                    except Exception as e:
+                        logger.error(
+                            f"❌ Error fetching missed events for user {user_id}: {str(e)}",
+                            exc_info=True
+                        )
                         await manager.send_personal_message(user_id, {
                             "type": "missed_events_response",
-                            "events": [],  # Empty for now
-                            "timestamp": datetime.utcnow().isoformat()
+                            "events": [],
+                            "count": 0,
+                            "error": str(e),
+                            "timestamp": datetime.now(timezone.utc).isoformat()
                         })
-                        logger.info(f"✅ Sent missed_events_response to user {user_id}")
-                    except Exception as send_error:
-                        logger.error(f"❌ Error sending missed_events_response to user {user_id}: {str(send_error)}")
-                        raise
                     
                 elif message_type == "join_incident":
                     # User wants to join an incident room
                     incident_id = message.get("incident_id")
                     if incident_id:
-                        # Create a session just for this query
                         async for db_session in get_db_session():
-                            # Verify user has access to this incident
                             incident = await db_session.scalar(
                                 select(Incidente).where(Incidente.id == incident_id)
                             )
                             if incident and (
-                                incident.client_id == user_id or 
+                                incident.client_id == user_id or
                                 incident.tecnico_id == user_id or
-                                incident.taller_id == user_id or  # Workshop access
-                                user_type in ("administrator", "workshop")
+                                incident.taller_id == user_id or
+                                user_type == "administrator"
                             ):
                                 await manager.join_incident_room(user_id, incident_id)
                             else:
@@ -345,6 +424,75 @@ async def websocket_tracking_endpoint(
                     incident_id = message.get("incident_id")
                     if incident_id:
                         await manager.leave_incident_room(user_id, incident_id)
+                
+                elif message_type == "location_update":
+                    # Technician sending location update via WebSocket for real-time tracking
+                    if user_type == "technician":
+                        location = message.get("location", {})
+                        latitude = location.get("latitude")
+                        longitude = location.get("longitude")
+                        ws_incident_id = message.get("incident_id")
+
+                        if latitude is not None and longitude is not None and ws_incident_id is not None:
+                            async for db_session in get_db_session():
+                                incident = await db_session.scalar(
+                                    select(Incidente).where(Incidente.id == ws_incident_id)
+                                )
+                                if incident and incident.tecnico_id == user_id:
+                                    await manager.send_location_update(
+                                        incident_id=ws_incident_id,
+                                        technician_id=user_id,
+                                        latitude=latitude,
+                                        longitude=longitude,
+                                        accuracy=location.get("accuracy"),
+                                        speed=location.get("speed"),
+                                        heading=location.get("heading")
+                                    )
+                                    logger.debug(
+                                        f"📍 WS location update: tech={user_id} "
+                                        f"incident={ws_incident_id} ({latitude}, {longitude})"
+                                    )
+                                break
+                        else:
+                            logger.warning(
+                                f"Incomplete location_update from user {user_id}: "
+                                f"lat={latitude}, lon={longitude}, incident={ws_incident_id}"
+                            )
+                    else:
+                        logger.warning(
+                            f"Non-technician user {user_id} ({user_type}) "
+                            f"attempted to send location_update"
+                        )
+                
+                elif message_type == "typing_start":
+                    # User started typing in an incident
+                    incident_id = message.get("incident_id")
+                    if incident_id:
+                        await emit_to_incident_room(
+                            incident_id=incident_id,
+                            event_type=EventTypes.CHAT_USER_TYPING,
+                            data={
+                                "user_id": user_id,
+                                "incident_id": incident_id,
+                                "timestamp": datetime.now(timezone.utc).isoformat()
+                            },
+                            exclude_user=user_id
+                        )
+                
+                elif message_type == "typing_stop":
+                    # User stopped typing in an incident
+                    incident_id = message.get("incident_id")
+                    if incident_id:
+                        await emit_to_incident_room(
+                            incident_id=incident_id,
+                            event_type=EventTypes.CHAT_USER_STOPPED_TYPING,
+                            data={
+                                "user_id": user_id,
+                                "incident_id": incident_id,
+                                "timestamp": datetime.now(timezone.utc).isoformat()
+                            },
+                            exclude_user=user_id
+                        )
                 
                 else:
                     logger.warning(f"Unknown message type: {message_type} from user {user_id}")
@@ -361,7 +509,7 @@ async def websocket_tracking_endpoint(
         logger.error(f"❌ WebSocket error for user {user_id}: {type(e).__name__}: {str(e)}", exc_info=True)
     finally:
         logger.info(f"🔌 Cleaning up WebSocket connection for user {user_id}")
-        manager.disconnect(user_id)
+        manager.disconnect_socket(user_id, websocket)
 
 
 @router.websocket("/ws/incidents/{incident_id}")
@@ -468,7 +616,7 @@ async def websocket_incident_endpoint(
             incident.client_id == user.id or 
             incident.taller_id == user.id or  # Workshop access
             incident.tecnico_id == user.id or
-            user.user_type == "administrator"
+            user.user_type == "admin"
         )
         
         logger.info(f"Access check: client_id={incident.client_id}, taller_id={incident.taller_id}, tecnico_id={incident.tecnico_id}, user_id={user.id}, has_access={has_access}")
@@ -500,7 +648,7 @@ async def websocket_incident_endpoint(
     logger.info(f"✅ WebSocket connection authenticated for user {user_id} on incident {incident_id}")
     
     # Connect user and join incident room with user type
-    await manager.connect(websocket, user_id, user_type=user_type)
+    await manager.connect(websocket, user_id, user_type=user_type, workshop_id=incident.taller_id)
     await manager.join_incident_room(user_id, incident_id)
     
     try:
@@ -567,12 +715,12 @@ async def websocket_incident_endpoint(
                     # User started typing — broadcast to incident room excluding sender
                     await emit_to_incident_room(
                         incident_id=incident_id,
-                        event_type=EventTypes.USER_TYPING,
+                        event_type=EventTypes.CHAT_USER_TYPING,
                         data={
                             "user_id": user_id,
                             "user_name": f"{user_first_name} {user_last_name}",
                             "incident_id": incident_id,
-                            "timestamp": datetime.utcnow().isoformat()
+                            "timestamp": datetime.now(timezone.utc).isoformat()
                         },
                         exclude_user=user_id
                     )
@@ -581,27 +729,80 @@ async def websocket_incident_endpoint(
                     # User stopped typing — broadcast to incident room excluding sender
                     await emit_to_incident_room(
                         incident_id=incident_id,
-                        event_type=EventTypes.USER_STOPPED_TYPING,
+                        event_type=EventTypes.CHAT_USER_STOPPED_TYPING,
                         data={
                             "user_id": user_id,
                             "user_name": f"{user_first_name} {user_last_name}",
                             "incident_id": incident_id,
-                            "timestamp": datetime.utcnow().isoformat()
+                            "timestamp": datetime.now(timezone.utc).isoformat()
                         },
                         exclude_user=user_id
                     )
 
                 elif message_type == "get_missed_events":
-                    # Client requesting missed events (e.g., messages, status updates)
-                    logger.debug(f"User {user.id} requesting missed events for incident {incident_id}")
+                    # Client requesting missed events for a specific incident
+                    since_str = message.get("since")
+                    limit = message.get("limit", 100)
+                    logger.debug(
+                        f"User {user.id} requesting missed events for incident {incident_id}"
+                    )
                     
-                    # Send acknowledgment that request was received
-                    await manager.send_personal_message(user.id, {
-                        "type": "missed_events_response",
-                        "incident_id": incident_id,
-                        "events": [],  # TODO: Implement actual missed events logic
-                        "timestamp": datetime.utcnow().isoformat()
-                    })
+                    try:
+                        async for db_session in get_db_session():
+                            from ...models.event_log import EventLog
+                            
+                            query = select(EventLog).where(
+                                and_(
+                                    EventLog.delivered_to == user.id,
+                                    EventLog.payload.contains(str(incident_id))
+                                )
+                            )
+                            if since_str:
+                                try:
+                                    since = datetime.fromisoformat(since_str)
+                                    query = query.where(EventLog.delivered_at > since)
+                                except (ValueError, TypeError):
+                                    pass
+                            
+                            query = query.order_by(
+                                EventLog.delivered_at.asc()
+                            ).limit(limit)
+                            
+                            result = await db_session.execute(query)
+                            events = result.scalars().all()
+                            
+                            events_data = []
+                            for evt in events:
+                                try:
+                                    events_data.append(json.loads(evt.payload))
+                                except (json.JSONDecodeError, TypeError):
+                                    events_data.append({
+                                        "event_type": evt.event_type,
+                                        "event_id": str(evt.event_id),
+                                        "delivered_at": evt.delivered_at.isoformat() if evt.delivered_at else None
+                                    })
+                            
+                            await manager.send_personal_message(user.id, {
+                                "type": "missed_events_response",
+                                "incident_id": incident_id,
+                                "events": events_data,
+                                "count": len(events_data),
+                                "timestamp": datetime.now(timezone.utc).isoformat()
+                            })
+                            break
+                    except Exception as e:
+                        logger.error(
+                            f"❌ Error fetching missed events for incident {incident_id}: {str(e)}",
+                            exc_info=True
+                        )
+                        await manager.send_personal_message(user.id, {
+                            "type": "missed_events_response",
+                            "incident_id": incident_id,
+                            "events": [],
+                            "count": 0,
+                            "error": str(e),
+                            "timestamp": datetime.now(timezone.utc).isoformat()
+                        })
 
                 elif message_type == "ping":
                     # Client sending ping for connection health check
@@ -610,7 +811,7 @@ async def websocket_incident_endpoint(
                     # Respond with pong
                     await manager.send_personal_message(user.id, {
                         "type": "pong",
-                        "timestamp": datetime.utcnow().isoformat()
+                        "timestamp": datetime.now(timezone.utc).isoformat()
                     })
 
                 else:
@@ -626,7 +827,7 @@ async def websocket_incident_endpoint(
     except Exception as e:
         logger.error(f"WebSocket error for user {user.id} in incident {incident_id}: {str(e)}")
     finally:
-        manager.disconnect(user.id)
+        manager.disconnect_socket(user.id, websocket)
 
 
 @router.get("/ws/status")
@@ -650,7 +851,7 @@ async def rate_limit_status():
     Get rate limiting status for all tracked users.
     Useful for debugging and monitoring.
     """
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     status_list = []
     
     for user_id, tracker in _auth_failure_tracker.items():

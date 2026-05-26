@@ -55,6 +55,9 @@ from .workshop_settlement import WorkshopSettlement
 from .platform_commission import PlatformCommission
 from .stripe_event_log import StripeEventLog
 
+# Modelos de calificación de servicios (CU06)
+from .service_rating import ServiceRating
+
 __all__ = [
     # Base
     "Base",
@@ -110,5 +113,7 @@ __all__ = [
     "WorkshopSettlement",
     "PlatformCommission",
     "StripeEventLog",
+    # Calificación de servicios (CU06)
+    "ServiceRating",
 ]
 

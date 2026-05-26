@@ -27,7 +27,7 @@ class CancellationRequest(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    incident_id: Mapped[int] = mapped_column(ForeignKey("incidentes.id"), nullable=False, unique=True, index=True)
+    incident_id: Mapped[int] = mapped_column(ForeignKey("incidentes.id"), nullable=False, index=True)
     
     # Quién solicitó la cancelación
     requested_by: Mapped[str] = mapped_column(String(20), nullable=False)  # 'client' o 'workshop'

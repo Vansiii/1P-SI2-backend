@@ -30,6 +30,7 @@ class CancellationApprovedEvent(BaseEvent):
     
     incident_id: int = Field(..., description="ID of the incident")
     cancellation_request_id: int = Field(..., description="ID of the cancellation request")
+    requested_by: int = Field(..., description="User ID who requested the cancellation")
     approved_by: int = Field(..., description="User ID who approved")
     approved_by_role: str = Field(..., description="Role of the approver")
     approved_at: datetime = Field(default_factory=datetime.utcnow)
@@ -43,6 +44,7 @@ class CancellationRejectedEvent(BaseEvent):
     
     incident_id: int = Field(..., description="ID of the incident")
     cancellation_request_id: int = Field(..., description="ID of the cancellation request")
+    requested_by: int = Field(..., description="User ID who requested the cancellation")
     rejected_by: int = Field(..., description="User ID who rejected")
     rejected_by_role: str = Field(..., description="Role of the rejector")
     reason: Optional[str] = Field(None, description="Rejection reason")

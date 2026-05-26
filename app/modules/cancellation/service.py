@@ -1,10 +1,12 @@
 """
 Service para gestión de cancelaciones mutuas de incidentes.
 """
+import asyncio
 from datetime import datetime, timedelta, UTC
 from typing import Optional
 
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, desc, func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...core import get_logger, NotFoundException, ValidationException, ForbiddenException
@@ -15,10 +17,13 @@ from ...shared.schemas.events.cancellation import (
     CancellationApprovedEvent,
     CancellationRejectedEvent
 )
+from ...shared.schemas.events.incident import IncidentStatusChangedEvent
+from ...shared.schemas.events.dashboard import (
+    DashboardIncidentCountChangedEvent,
+    DashboardActiveTechniciansChangedEvent,
+)
 from ...models.cancellation_request import CancellationRequest
 from ...models.incidente import Incidente
-from ...models.user import User
-from ..push_notifications.services import PushNotificationService, PushNotificationData
 
 logger = get_logger(__name__)
 
@@ -28,7 +33,6 @@ class CancellationService:
     
     def __init__(self, session: AsyncSession):
         self.session = session
-        self.push_service = PushNotificationService(session)
     
     async def request_cancellation(
         self,
@@ -62,39 +66,42 @@ class CancellationService:
         if not incident:
             raise NotFoundException(f"Incidente {incident_id} no encontrado")
         
-        # Validar que el incidente esté asignado o en proceso
-        if incident.estado_actual not in ["asignado", "en_proceso"]:
+        # Validar que el incidente esté en una etapa activa donde cancelar tenga sentido
+        # (chat de cancelación puede ocurrir antes o durante la ejecución técnica).
+        if incident.estado_actual not in [
+            "pendiente", "sin_taller_disponible",
+            "asignado", "aceptado", "en_camino", "en_proceso"
+        ]:
             raise ValidationException(
                 f"No se puede cancelar un incidente en estado '{incident.estado_actual}'"
             )
         
-        # Validate state transition using State Machine
-        state_machine = IncidentStateMachine()
-        current_state = IncidentState(incident.estado_actual)
-        target_state = IncidentState.CANCELADO
-        
-        # Determine user role
-        user_role = UserRole.CLIENTE if user_type == "client" else UserRole.TALLER
-        
-        can_transition, error_message = state_machine.can_transition(
-            from_state=current_state,
-            to_state=target_state,
-            user_role=user_role,
-            incident=incident
-        )
-        
-        if not can_transition:
-            logger.warning(f"State transition validation failed for cancellation request: {error_message}")
-            raise ValidationException(f"Cannot request cancellation: {error_message}")
-        
+        # Validar rol permitido para solicitar cancelación mutua
+        if user_type not in {"client", "workshop"}:
+            raise ForbiddenException("Solo cliente o taller pueden solicitar cancelación mutua")
+
         # Validar permisos
         if user_type == "client" and incident.client_id != user_id:
             raise ForbiddenException("No tienes permiso para cancelar este incidente")
         elif user_type == "workshop" and incident.taller_id != user_id:
             raise ForbiddenException("No tienes permiso para cancelar este incidente")
+
+        # Obtener la última solicitud para manejar idempotencia y reutilización.
+        latest_request = await self.session.scalar(
+            select(CancellationRequest)
+            .where(CancellationRequest.incident_id == incident_id)
+            .order_by(desc(CancellationRequest.created_at), desc(CancellationRequest.id))
+            .limit(1)
+        )
+
+        # Si ya hay una pendiente vigente, devolverla para evitar 400 redundante.
+        if latest_request and latest_request.status == "pending":
+            now = datetime.now(UTC)
+            if latest_request.expires_at > now:
+                return latest_request
         
-        # Verificar que no exista una solicitud pendiente
-        existing_request = await self.session.scalar(
+        # Verificar que no exista una solicitud pendiente no expirada
+        existing_pending = await self.session.scalar(
             select(CancellationRequest).where(
                 and_(
                     CancellationRequest.incident_id == incident_id,
@@ -103,27 +110,64 @@ class CancellationService:
             )
         )
         
-        if existing_request:
-            raise ValidationException(
-                "Ya existe una solicitud de cancelación pendiente para este incidente"
-            )
+        if existing_pending:
+            now = datetime.now(UTC)
+            if existing_pending.expires_at <= now:
+                existing_pending.status = "expired"
+                await self.session.commit()
+                logger.info(
+                    f"Solicitud de cancelación {existing_pending.id} expirada automáticamente "
+                    f"para incidente {incident_id}"
+                )
+            else:
+                raise ValidationException(
+                    "Ya existe una solicitud de cancelación pendiente para este incidente"
+                )
         
         # Validar longitud del motivo
         if len(reason.strip()) < 10:
             raise ValidationException("El motivo debe tener al menos 10 caracteres")
         
         # Crear solicitud de cancelación
-        cancellation_request = CancellationRequest(
-            incident_id=incident_id,
-            requested_by=user_type,
-            requested_by_user_id=user_id,
-            reason=reason.strip(),
-            status="pending",
-            expires_at=datetime.now(UTC) + timedelta(hours=24)
-        )
+        if latest_request and latest_request.status in ("accepted", "rejected", "expired"):
+            cancellation_request = latest_request
+            cancellation_request.requested_by = user_type
+            cancellation_request.requested_by_user_id = user_id
+            cancellation_request.reason = reason.strip()
+            cancellation_request.status = "pending"
+            cancellation_request.response_by_user_id = None
+            cancellation_request.response_message = None
+            cancellation_request.responded_at = None
+            cancellation_request.created_at = datetime.now(UTC)
+            cancellation_request.expires_at = datetime.now(UTC) + timedelta(hours=24)
+        else:
+            cancellation_request = CancellationRequest(
+                incident_id=incident_id,
+                requested_by=user_type,
+                requested_by_user_id=user_id,
+                reason=reason.strip(),
+                status="pending",
+                expires_at=datetime.now(UTC) + timedelta(hours=24)
+            )
         
         self.session.add(cancellation_request)
-        await self.session.commit()
+        try:
+            await self.session.commit()
+        except IntegrityError:
+            await self.session.rollback()
+            pending_request = await self.session.scalar(
+                select(CancellationRequest).where(
+                    and_(
+                        CancellationRequest.incident_id == incident_id,
+                        CancellationRequest.status == "pending"
+                    )
+                )
+            )
+            if pending_request:
+                return pending_request
+            raise ValidationException(
+                "Ya existe una solicitud de cancelación pendiente para este incidente"
+            )
         await self.session.refresh(cancellation_request)
         
         logger.info(
@@ -159,13 +203,7 @@ class CancellationService:
             )
         # ═══════════════════════════════════════════════════════════════════════
         
-        # Enviar notificación push a la otra parte
-        await self._send_cancellation_request_notification(
-            incident=incident,
-            requester_id=user_id,
-            requester_type=user_type,
-            reason=reason
-        )
+        # Notificaciones persistentes/push gestionadas por OutboxProcessor.
         
         return cancellation_request
     
@@ -244,7 +282,11 @@ class CancellationService:
         # Si fue aceptada, anular el incidente y buscar nuevo taller ANTES del commit
         # para que sea transaccional
         if accept:
-            await self._cancel_incident_and_reassign(incident)
+            await self._cancel_incident_and_reassign(
+                incident=incident,
+                changed_by_user_id=user_id,
+                changed_by_role=user_type,
+            )
         
         # Commit después de todas las operaciones para que sea transaccional
         await self.session.commit()
@@ -262,6 +304,7 @@ class CancellationService:
                 cancellation_approved_event = CancellationApprovedEvent(
                     incident_id=cancellation_request.incident_id,
                     cancellation_request_id=request_id,
+                    requested_by=cancellation_request.requested_by_user_id,
                     approved_by=user_id,
                     approved_by_role=user_type,
                     approved_at=cancellation_request.responded_at
@@ -279,6 +322,7 @@ class CancellationService:
                 cancellation_rejected_event = CancellationRejectedEvent(
                     incident_id=cancellation_request.incident_id,
                     cancellation_request_id=request_id,
+                    requested_by=cancellation_request.requested_by_user_id,
                     rejected_by=user_id,
                     rejected_by_role=user_type,
                     reason=response_message,
@@ -301,18 +345,59 @@ class CancellationService:
             )
         # ═══════════════════════════════════════════════════════════════════════
         
-        # Enviar notificación push al solicitante (después del commit exitoso)
-        await self._send_cancellation_response_notification(
-            incident=incident,
-            cancellation_request=cancellation_request,
-            accept=accept,
-            responder_id=user_id,
-            responder_type=user_type
-        )
+        # Notificaciones persistentes/push gestionadas por OutboxProcessor.
         
         return cancellation_request
     
-    async def _cancel_incident_and_reassign(self, incident: Incidente) -> None:
+    async def _publish_incident_count_changed(self, status: str, delta: int) -> None:
+        """Publicar cambio de contador por estado para dashboard admin."""
+        try:
+            count = await self.session.scalar(
+                select(func.count(Incidente.id)).where(Incidente.estado_actual == status)
+            ) or 0
+
+            event = DashboardIncidentCountChangedEvent(
+                status=status,
+                count=count,
+                delta=delta,
+            )
+            await EventPublisher.publish(self.session, event)
+        except Exception as e:
+            logger.error(
+                f"Error publicando dashboard.incident_count_changed ({status}): {str(e)}",
+                exc_info=True,
+            )
+
+    async def _publish_active_technicians_changed(self) -> None:
+        """Publicar cambio de contadores de técnicos para dashboard admin."""
+        try:
+            from ...models.technician import Technician
+
+            active_count = await self.session.scalar(
+                select(func.count(Technician.id)).where(Technician.is_on_duty == True)
+            ) or 0
+            available_count = await self.session.scalar(
+                select(func.count(Technician.id)).where(Technician.is_available == True)
+            ) or 0
+
+            event = DashboardActiveTechniciansChangedEvent(
+                active_count=active_count,
+                available_count=available_count,
+                on_duty_count=active_count,
+            )
+            await EventPublisher.publish(self.session, event)
+        except Exception as e:
+            logger.error(
+                f"Error publicando dashboard.active_technicians_changed: {str(e)}",
+                exc_info=True,
+            )
+
+    async def _cancel_incident_and_reassign(
+        self,
+        incident: Incidente,
+        changed_by_user_id: int,
+        changed_by_role: str,
+    ) -> None:
         """
         Anular incidente y buscar nuevo taller.
         
@@ -341,6 +426,9 @@ class CancellationService:
         if not can_transition:
             logger.error(f"State transition validation failed for cancellation: {error_message}")
             raise ValidationException(f"Cannot cancel and reassign incident: {error_message}")
+
+        old_status = incident.estado_actual
+        old_workshop_id = incident.taller_id
         
         # Guardar rechazo
         rechazo = RechazoTaller(
@@ -393,18 +481,19 @@ class CancellationService:
                     f"Técnico {incident.tecnico_id} liberado (is_on_duty=False, is_available=True) por cancelación mutua"
                 )
                 
-                # Notificar cambio de disponibilidad via WebSocket
-                from ...core.websocket import manager
-                if technician.workshop_id:
-                    await manager.send_personal_message(technician.workshop_id, {
-                        "type": "technician_status_update",
-                        "data": {
-                            "technician_id": incident.tecnico_id,
-                            "is_available": True,
-                            "is_on_duty": False,
-                            "timestamp": datetime.now(UTC).isoformat()
-                        }
-                    })
+                # Notificar cambio de disponibilidad via EventPublisher
+                from ...core.event_publisher import EventPublisher
+                from ...shared.schemas.events.incident import IncidentTechnicianArrivedEvent
+                
+                technician_event_data = {
+                    "incident_id": incident.id,
+                    "technician_id": incident.tecnico_id,
+                    "technician_name": f"{technician.first_name} {technician.last_name}" if technician else "Unknown",
+                    "new_status": "available",
+                    "old_status": "on_duty",
+                    "timestamp": datetime.now(UTC).isoformat(),
+                    "workshop_id": technician.workshop_id,
+                }
         
         # Limpiar asignación y volver a pendiente
         incident.taller_id = None
@@ -415,193 +504,85 @@ class CancellationService:
         
         await self.session.commit()
         
-        # ✅ Emitir evento WebSocket para actualización en tiempo real
-        from ...core.websocket_events import emit_to_all, EventTypes
+        # Publicar eventos canónicos por outbox para que admin/web/mobile
+        # reciban el cambio de estado y métricas en tiempo real.
         
         try:
-            await emit_to_all(
-                event_type=EventTypes.INCIDENT_STATUS_CHANGED,
-                data={
-                    "incident_id": incident.id,
-                    "estado_actual": "pendiente",
-                    "new_status": "pendiente",
-                    "reason": "mutual_cancellation",
-                    "timestamp": datetime.now(UTC).isoformat()
-                }
+            status_event = IncidentStatusChangedEvent(
+                incident_id=incident.id,
+                old_status=old_status,
+                new_status="pendiente",
+                workshop_id=old_workshop_id,
+                changed_by=changed_by_user_id,
+                changed_by_role=changed_by_role,
+                reason="mutual_cancellation",
             )
-            logger.info(f"✅ WebSocket event emitted: incident {incident.id} → pendiente (mutual cancellation)")
-        except Exception as ws_err:
-            logger.error(f"Failed to emit status change WebSocket event: {str(ws_err)}")
+            await EventPublisher.publish(self.session, status_event)
+
+            await self._publish_incident_count_changed(status=old_status, delta=-1)
+            await self._publish_incident_count_changed(status="pendiente", delta=+1)
+            await self._publish_active_technicians_changed()
+
+            await self.session.commit()
+            logger.info(
+                f"✅ Realtime mutual cancellation events published: "
+                f"incident {incident.id} {old_status} → pendiente"
+            )
+        except Exception as publish_err:
+            logger.error(
+                f"Failed to publish mutual cancellation realtime events: {str(publish_err)}",
+                exc_info=True,
+            )
         
         logger.info(
             f"Incidente {incident.id} anulado por cancelación mutua. "
             f"Volviendo a estado pendiente para nueva asignación."
         )
         
-        # Trigger automatic reassignment immediately
-        # Ejecutar reasignación automática inmediatamente después de la cancelación
+        # Trigger automatic reassignment asynchronously with a delay
+        # to let the admin dashboard and clients see the "pendiente" state change
+        # before the incident is re-assigned.
+        asyncio.create_task(self._delayed_reassignment(incident_id=incident.id))
+    async def _delayed_reassignment(self, incident_id: int) -> None:
+        """
+        Execute reassignment after a short delay so that admin dashboard
+        and clients can observe the 'pendiente' state transition before
+        the incident is re-assigned.
+        """
         try:
-            from ...modules.assignment.services import IntelligentAssignmentService
-            
-            logger.info(f"Iniciando reasignación automática inmediata para incidente {incident.id}")
-            
-            # Usar la sesión actual para la reasignación
-            assignment_service = IntelligentAssignmentService(self.session)
-            result = await assignment_service.assign_incident_automatically(
-                incident_id=incident.id,
-                force_ai_analysis=False
-            )
-            
-            if result.success:
+            await asyncio.sleep(3)  # Let real-time events propagate first
+
+            from ...core.database import get_session_factory
+            session_factory = get_session_factory()
+            async with session_factory() as session:
+                from ...modules.assignment.services import IntelligentAssignmentService
+
                 logger.info(
-                    f"✅ Reasignación automática exitosa para incidente {incident.id}: "
-                    f"workshop={result.assigned_workshop.workshop_name if result.assigned_workshop else 'N/A'}"
+                    f"🔄 Iniciando reasignación diferida para incidente {incident_id}"
                 )
-                
-                # ═══════════════════════════════════════════════════════════════════════
-                # ✅ NOTIFICACIONES MANEJADAS POR OUTBOX PROCESSOR
-                # assignment_service.assign_incident_automatically ya publica los eventos
-                # incident.assigned y incident.no_workshop_available.
-                # NO enviar notificaciones duplicadas aquí.
-                # ═══════════════════════════════════════════════════════════════════════
-                    
-            else:
-                logger.warning(
-                    f"⚠️ Reasignación automática falló para incidente {incident.id}: "
-                    f"{result.error_message}"
+                assignment_service = IntelligentAssignmentService(session)
+                result = await assignment_service.assign_incident_automatically(
+                    incident_id=incident_id,
+                    force_ai_analysis=False,
                 )
-                
-                # ═══════════════════════════════════════════════════════════════════════
-                # ✅ NOTIFICACIONES MANEJADAS POR OUTBOX PROCESSOR
-                # ═══════════════════════════════════════════════════════════════════════
-                        
+
+                if result.success:
+                    await session.commit()
+                    logger.info(
+                        f"✅ Reasignación diferida exitosa para incidente {incident_id}: "
+                        f"workshop={result.assigned_workshop.workshop_name if result.assigned_workshop else 'N/A'}"
+                    )
+                else:
+                    logger.warning(
+                        f"⚠️ Reasignación diferida falló para incidente {incident_id}: "
+                        f"{result.error_message}"
+                    )
         except Exception as e:
             logger.error(
-                f"❌ Error en reasignación automática para incidente {incident.id}: {str(e)}",
-                exc_info=True
+                f"❌ Error en reasignación diferida para incidente {incident_id}: {str(e)}",
+                exc_info=True,
             )
-            
-            # ═══════════════════════════════════════════════════════════════════════
-            # ✅ NOTIFICACIONES MANEJADAS POR OUTBOX PROCESSOR
-            # ═══════════════════════════════════════════════════════════════════════    
-    async def _send_cancellation_request_notification(
-        self,
-        incident: Incidente,
-        requester_id: int,
-        requester_type: str,
-        reason: str
-    ) -> None:
-        """
-        Enviar notificación push cuando se solicita cancelación.
-        
-        Args:
-            incident: Incidente
-            requester_id: ID del solicitante
-            requester_type: Tipo de solicitante ('client' o 'workshop')
-            reason: Motivo de la cancelación
-        """
-        try:
-            # Determinar destinatario
-            recipient_id = None
-            requester_name = ""
-            
-            if requester_type == "client":
-                # Cliente solicita, notificar al taller
-                recipient_id = incident.taller_id
-                requester_name = "El cliente"
-            else:
-                # Taller solicita, notificar al cliente
-                recipient_id = incident.client_id
-                requester_name = "El taller"
-            
-            if not recipient_id:
-                logger.warning(f"No se pudo determinar destinatario para notificación de cancelación")
-                return
-            
-            # Truncar motivo para notificación
-            reason_preview = reason[:80] + "..." if len(reason) > 80 else reason
-            
-            # Enviar notificación
-            notification_data = PushNotificationData(
-                title="🔔 Solicitud de Cancelación",
-                body=f"{requester_name} solicita cancelar el servicio: {reason_preview}",
-                data={
-                    "type": "cancellation_request",
-                    "incident_id": str(incident.id),
-                    "requester_id": str(requester_id),
-                    "requester_type": requester_type,
-                    "click_action": f"/incidents/{incident.id}/chat"  # For mobile apps
-                },
-                click_action=None  # Set to None for web push
-            )
-            
-            await self.push_service.send_to_user(
-                user_id=recipient_id,
-                notification_data=notification_data,
-                save_to_db=True
-            )
-            
-            logger.info(f"Notificación de solicitud de cancelación enviada para incidente {incident.id}")
-            
-        except Exception as e:
-            logger.error(f"Error enviando notificación de solicitud de cancelación: {str(e)}")
-    
-    async def _send_cancellation_response_notification(
-        self,
-        incident: Incidente,
-        cancellation_request: CancellationRequest,
-        accept: bool,
-        responder_id: int,
-        responder_type: str
-    ) -> None:
-        """
-        Enviar notificación push cuando se responde a cancelación.
-        
-        Args:
-            incident: Incidente
-            cancellation_request: Solicitud de cancelación
-            accept: Si fue aceptada o rechazada
-            responder_id: ID del que responde
-            responder_type: Tipo del que responde ('client' o 'workshop')
-        """
-        try:
-            # Destinatario es el solicitante original
-            recipient_id = cancellation_request.requested_by_user_id
-            responder_name = "El cliente" if responder_type == "client" else "El taller"
-            
-            if accept:
-                title = "✅ Cancelación Aceptada"
-                body = f"{responder_name} aceptó cancelar el servicio. El sistema buscará un nuevo taller automáticamente."
-            else:
-                title = "❌ Cancelación Rechazada"
-                body = f"{responder_name} rechazó la cancelación. El servicio continúa normalmente."
-            
-            # Enviar notificación
-            notification_data = PushNotificationData(
-                title=title,
-                body=body,
-                data={
-                    "type": "cancellation_response",
-                    "incident_id": str(incident.id),
-                    "accept": str(accept),
-                    "responder_id": str(responder_id),
-                    "responder_type": responder_type,
-                    "click_action": f"/incidents/{incident.id}/chat"  # For mobile apps
-                },
-                click_action=None  # Set to None for web push
-            )
-            
-            await self.push_service.send_to_user(
-                user_id=recipient_id,
-                notification_data=notification_data,
-                save_to_db=True
-            )
-            
-            logger.info(f"Notificación de respuesta de cancelación enviada para incidente {incident.id}")
-            
-        except Exception as e:
-            logger.error(f"Error enviando notificación de respuesta de cancelación: {str(e)}")
-    
+
     async def get_pending_cancellation(
         self,
         incident_id: int

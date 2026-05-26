@@ -825,47 +825,6 @@ class IncidenteService:
         await self.session.commit()
         # ═══════════════════════════════════════════════════════════════════════
         
-        # ═══════════════════════════════════════════════════════════════════════
-        # ✅ EMISIÓN DIRIGIDA DE EVENTO WEBSOCKET (solo a participantes del incidente)
-        # Corrige el bug de emit_to_all que enviaba datos a todos los usuarios.
-        # ═══════════════════════════════════════════════════════════════════════
-        try:
-            from ...core.websocket_events import emit_to_users, EventTypes
-            
-            # Preparar payload del evento
-            event_data = {
-                "incident_id": incidente_id,
-                "workshop_id": taller_id,
-                "workshop_name": incidente.workshop.workshop_name if incidente.workshop else "Unknown",
-                "technician_id": suggested_technician_id if suggested_technician_id else None,
-                "technician_name": technician_name if suggested_technician_id else None,
-                "old_status": estado_anterior,
-                "new_status": nuevo_estado,
-                "estado_actual": nuevo_estado,
-                "timestamp": datetime.now(UTC).isoformat()
-            }
-            
-            # Emitir solo a los participantes del incidente: cliente y taller
-            participants = [p for p in [incidente.client_id, taller_id] if p is not None]
-            if participants:
-                await emit_to_users(
-                    user_ids=participants,
-                    event_type=EventTypes.ASSIGNMENT_ACCEPTED,
-                    data=event_data
-                )
-            
-            logger.info(
-                f"✅ WebSocket event ASSIGNMENT_ACCEPTED emitted to participants {participants} "
-                f"for incident {incidente_id} → workshop {taller_id} (estado: {nuevo_estado})"
-            )
-            
-        except Exception as ws_err:
-            # ⚠️ NO fallar la operación si WebSocket falla
-            logger.error(
-                f"❌ Error emitting WebSocket event ASSIGNMENT_ACCEPTED: {str(ws_err)}", 
-                exc_info=True
-            )
-        
         return incidente
     
     async def reject_incidente(
@@ -969,35 +928,6 @@ class IncidenteService:
                 f"✅ Evento ASSIGNMENT_REJECTED publicado al outbox para incidente {incidente_id}",
                 incidente_id=incidente_id,
                 taller_id=taller_id
-            )
-            
-            # ✅ EMISIÓN DIRIGIDA DE EVENTO WEBSOCKET (solo al cliente del incidente)
-            # El taller ya sabe que rechazó; el cliente necesita saber que se busca otro taller.
-            from ...core.websocket_events import emit_to_users, EventTypes
-            
-            # Preparar payload del evento
-            event_data = {
-                "incident_id": incidente_id,
-                "workshop_id": taller_id,
-                "workshop_name": workshop_name,
-                "rejection_reason": motivo,
-                "old_status": incidente.estado_actual,
-                "new_status": "rechazado",
-                "estado_actual": "rechazado",
-                "timestamp": datetime.now(UTC).isoformat()
-            }
-            
-            # Emitir solo al cliente (el taller que rechazó ya lo sabe)
-            if incidente.client_id:
-                await emit_to_users(
-                    user_ids=[incidente.client_id],
-                    event_type=EventTypes.ASSIGNMENT_REJECTED,
-                    data=event_data
-                )
-            
-            logger.info(
-                f"✅ WebSocket event ASSIGNMENT_REJECTED emitted to client {incidente.client_id} "
-                f"for incident {incidente_id} → workshop {taller_id}"
             )
             
         except Exception as e:
@@ -1520,38 +1450,10 @@ class IncidenteService:
         await self.session.refresh(incidente)
         
         # ═══════════════════════════════════════════════════════════════════════
-        # ✅ EMIT WEBSOCKET EVENT FOR REAL-TIME UPDATE (CANCELLATION)
-        # ═══════════════════════════════════════════════════════════════════════
-        try:
-            from ...core.websocket_events import emit_to_all, EventTypes
-            
-            await emit_to_all(
-                event_type=EventTypes.INCIDENT_CANCELLED,
-                data={
-                    "incident_id": incidente_id,
-                    "old_status": estado_anterior,
-                    "new_status": "cancelado",
-                    "estado_actual": "cancelado",
-                    "cancelled_by": user_id,
-                    "cancelled_by_role": user_type,
-                    "cancellation_reason": motivo or "Sin motivo especificado",
-                    "timestamp": datetime.now(UTC).isoformat()
-                }
-            )
-            
-            logger.info(
-                f"✅ WebSocket event emitted: incident {incidente_id} cancelled {estado_anterior} → cancelado"
-            )
-            
-        except Exception as ws_err:
-            # ⚠️ NO fallar la operación si WebSocket falla
-            logger.error(
-                f"❌ Failed to emit WebSocket event for incident {incidente_id}: {str(ws_err)}"
-            )
-        # ═══════════════════════════════════════════════════════════════════════
-        
-        # ═══════════════════════════════════════════════════════════════════════
         # ✅ PUBLICAR EVENTO DE CANCELACIÓN AL OUTBOX
+        # EventPublisher._send_immediate_websocket() handles real-time WS delivery
+        # for HIGH priority events to incident participants ONLY (not global broadcast).
+        # OutboxProcessor handles FCM fallback for offline users.
         # ═══════════════════════════════════════════════════════════════════════
         
         try:
@@ -1674,8 +1576,25 @@ class IncidenteService:
             user_id=user_id,
         )
 
-        # Note: Evidence deletion events can be added later if needed
-        # For now, we focus on the main incident lifecycle events
+        try:
+            from ...shared.schemas.events.evidence import EvidenceDeletedEvent
+
+            event = EvidenceDeletedEvent(
+                evidence_id=evidencia_id,
+                incident_id=incident_id,
+                evidence_type=evidencia.tipo,
+                deleted_by=user_id
+            )
+            await EventPublisher.publish(self.session, event)
+            await self.session.commit()
+            logger.info(
+                f"Published evidence.deleted event for evidencia {evidencia_id}"
+            )
+        except Exception as e:
+            logger.error(
+                f"Failed to publish evidence.deleted event: {str(e)}",
+                exc_info=True
+            )
 
     async def _cancel_pending_timeouts(self, incidente_id: int) -> None:
         """
@@ -2134,7 +2053,10 @@ class IncidenteService:
         changed_by_role: Optional[str] = None
     ) -> None:
         """
-        Helper method to emit WebSocket event for incident status changes.
+        Emit WebSocket event for incident status changes to incident participants ONLY.
+
+        Uses emit_to_incident_room instead of emit_to_all to prevent privacy leaks.
+        The EventPublisher outbox handles reliable delivery + FCM fallback for offline users.
         
         Args:
             incident_id: ID of the incident
@@ -2144,10 +2066,11 @@ class IncidenteService:
             changed_by_role: Role of the user who made the change (optional)
         """
         try:
-            from ...core.websocket_events import emit_to_all, EventTypes
+            from ...core.websocket_events import emit_to_incident_room, EventTypes
             from datetime import datetime, UTC
             
-            await emit_to_all(
+            await emit_to_incident_room(
+                incident_id=incident_id,
                 event_type=EventTypes.INCIDENT_STATUS_CHANGED,
                 data={
                     "incident_id": incident_id,
@@ -2157,15 +2080,16 @@ class IncidenteService:
                     "changed_by": changed_by,
                     "changed_by_role": changed_by_role,
                     "timestamp": datetime.now(UTC).isoformat()
-                }
+                },
+                exclude_user=changed_by
             )
             
             logger.info(
-                f"✅ WebSocket event emitted: incident {incident_id} status changed {old_status} → {new_status}"
+                f"✅ WebSocket event emitted to incident room: {incident_id} "
+                f"status changed {old_status} → {new_status}"
             )
             
         except Exception as ws_err:
-            # ⚠️ NO fallar la operación si WebSocket falla
             logger.error(
                 f"❌ Failed to emit WebSocket event for incident {incident_id}: {str(ws_err)}"
             )

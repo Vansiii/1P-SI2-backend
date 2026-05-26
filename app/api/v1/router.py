@@ -43,8 +43,12 @@ from ...modules.payments.router import router as payments_router
 from ...modules.payments.workshop_router import router as payments_workshop_router
 from ...modules.payments.admin_router import router as payments_admin_router
 
+# Ratings module router (CU06)
+from ...modules.ratings.router import router as ratings_router
+
 # Import admin routers
 from .admin import ai_analytics_router
+from ...modules.admin_monitoring.router import router as admin_monitoring_router
 
 # Create main v1 router
 api_router = APIRouter(prefix="/api/v1")
@@ -260,6 +264,12 @@ api_router.include_router(
     tags=["Admin - AI Analytics"],
 )
 
+# Admin Monitoring routes
+api_router.include_router(
+    admin_monitoring_router,
+    tags=["Admin - Monitoring"],
+)
+
 # Payment module routes
 api_router.include_router(
     payments_router,
@@ -274,6 +284,12 @@ api_router.include_router(
 api_router.include_router(
     payments_admin_router,
     tags=["Admin - Finance"],
+)
+
+# Ratings routes (CU06)
+api_router.include_router(
+    ratings_router,
+    tags=["Ratings"],
 )
 
 __all__ = ["api_router"]

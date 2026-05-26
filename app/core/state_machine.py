@@ -153,7 +153,13 @@ class IncidentStateMachine:
             allowed_roles=[UserRole.CLIENTE, UserRole.ADMIN],
             description="Cliente cancela después de asignación"
         ),
-        
+        Transition(
+            from_state=IncidentState.ASIGNADO,
+            to_state=IncidentState.PENDIENTE,
+            allowed_roles=[UserRole.ADMIN],
+            description="Reasignación por cancelación mutua"
+        ),
+
         # From RECHAZADO
         Transition(
             from_state=IncidentState.RECHAZADO,
@@ -227,7 +233,13 @@ class IncidentStateMachine:
             allowed_roles=[UserRole.TALLER, UserRole.ADMIN],
             description="Cancelación durante el trabajo (requiere aprobación)"
         ),
-        
+        Transition(
+            from_state=IncidentState.EN_PROCESO,
+            to_state=IncidentState.PENDIENTE,
+            allowed_roles=[UserRole.ADMIN],
+            description="Reasignación por cancelación mutua"
+        ),
+
         # From COMPLETADO
         Transition(
             from_state=IncidentState.COMPLETADO,

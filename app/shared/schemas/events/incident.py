@@ -110,6 +110,10 @@ class IncidentStatusChangedEvent(BaseEvent):
     incident_id: int = Field(..., description="ID of the incident")
     old_status: str = Field(..., description="Previous status")
     new_status: str = Field(..., description="New status")
+    workshop_id: Optional[int] = Field(
+        None,
+        description="Related workshop ID (used when incident is unassigned during transition)"
+    )
     changed_by: int = Field(..., description="User ID who changed the status")
     changed_by_role: str = Field(..., description="Role of the user (client, technician, admin)")
     reason: Optional[str] = Field(None, description="Reason for status change")
@@ -146,7 +150,7 @@ class IncidentWorkStartedEvent(BaseEvent):
     """Event emitted when technician starts working on the incident."""
     
     event_type: Literal["incident.work_started"] = "incident.work_started"
-    priority: EventPriority = Field(default=EventPriority.MEDIUM)
+    priority: EventPriority = Field(default=EventPriority.HIGH)
     
     incident_id: int = Field(..., description="ID of the incident")
     technician_id: int = Field(..., description="ID of the technician")
@@ -184,7 +188,7 @@ class IncidentUpdatedEvent(BaseEvent):
     """Event emitted when an incident is updated with new information."""
     
     event_type: Literal["incident.updated"] = "incident.updated"
-    priority: EventPriority = Field(default=EventPriority.MEDIUM)
+    priority: EventPriority = Field(default=EventPriority.HIGH)
     
     incident_id: int = Field(..., description="ID of the incident")
     updated_fields: dict = Field(..., description="Dictionary of updated fields and their new values")
