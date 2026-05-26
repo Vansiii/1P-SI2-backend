@@ -225,6 +225,12 @@ class EventPublisher:
                 if incident.tecnico_id:
                     recipients.add(incident.tecnico_id)
 
+            # For cancellation.* events, also include the original requester
+            # (incident.taller_id may have been cleared by _cancel_incident_and_reassign).
+            requested_by = event_data.get("requested_by")
+            if requested_by:
+                recipients.add(requested_by)
+
             workshop_id = event_data.get("workshop_id")
             if workshop_id:
                 recipients.add(workshop_id)
@@ -238,17 +244,17 @@ class EventPublisher:
                     .where(
                         and_(
                             AssignmentAttempt.incident_id == incident_id,
-                            AssignmentAttempt.status == 'pending'
+                            AssignmentAttempt.status.in_(["pending", "timeout", "no_response"])
                         )
                     )
                     .distinct()
                 )
-                pending_workshops = [row[0] for row in result.all()]
-                recipients.update(pending_workshops)
+                affected_workshops = [row[0] for row in result.all()]
+                recipients.update(affected_workshops)
 
-                if pending_workshops:
+                if affected_workshops:
                     logger.info(
-                        f"Notifying {len(pending_workshops)} workshops with pending "
+                        f"Notifying {len(affected_workshops)} workshops with pending/timeout "
                         f"assignments for incident {incident_id}"
                     )
 

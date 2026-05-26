@@ -507,6 +507,8 @@ async def check_tracking_timeouts() -> List[int]:
             logger.debug(f"🔍 Checking {len(sessions_data)} active tracking sessions for dynamic timeout")
             
             for tracking_session, incident, assignment_attempt in sessions_data:
+                session_id = tracking_session.id
+                incident_id = incident.id
                 try:
                     # Get incident details
                     category = incident.categoria_ia or "otros"
@@ -564,15 +566,16 @@ async def check_tracking_timeouts() -> List[int]:
                                     f"(is_on_duty=False, is_available=True) due to tracking timeout"
                                 )
                         
-                        # ✅ UPDATE INCIDENT: Mark as completed if still in progress
+                        # ✅ UPDATE INCIDENT: Mark as resolved if still in progress
+                        # NOTE: "completado" is not a persisted DB state in this schema.
                         if incident.estado_actual in ["en_camino", "en_proceso"]:
                             old_status = incident.estado_actual
-                            incident.estado_actual = "completado"
+                            incident.estado_actual = "resuelto"
                             incident.updated_at = now
                             
                             logger.info(
-                                f"✅ Incident {incident.id} auto-completed due to tracking timeout "
-                                f"({old_status} → completado)"
+                                f"✅ Incident {incident.id} auto-resolved due to tracking timeout "
+                                f"({old_status} → resuelto)"
                             )
                             
                             # Publish status change event
@@ -580,7 +583,7 @@ async def check_tracking_timeouts() -> List[int]:
                             status_event = IncidentStatusChangedEvent(
                                 incident_id=incident.id,
                                 old_status=old_status,
-                                new_status="completado",
+                                new_status="resuelto",
                                 changed_by=0,  # System
                                 changed_by_role="admin",
                                 reason=(
@@ -611,8 +614,10 @@ async def check_tracking_timeouts() -> List[int]:
                             )
                     
                 except Exception as e:
+                    # Reset failed transaction state so next iterations can continue safely.
+                    await session.rollback()
                     logger.error(
-                        f"Error processing tracking timeout for session {tracking_session.id}: {str(e)}",
+                        f"Error processing tracking timeout for session {session_id} (incident {incident_id}): {str(e)}",
                         exc_info=True
                     )
                     continue

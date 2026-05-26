@@ -350,10 +350,16 @@ class ChatService:
                 try:
                     read_event = ChatMessageReadEvent(
                         message_id=message.id,
+                        incident_id=incident_id,
+                        sender_id=message.sender_id,
                         read_by=user_id,
                         read_at=read_at_time
                     )
-                    await EventPublisher.publish(self.session, read_event)
+                    await EventPublisher.publish(
+                        self.session,
+                        read_event,
+                        send_immediate=True
+                    )
                 except Exception as e:
                     logger.error(f"Error publishing read event for message {message.id}: {str(e)}")
             
@@ -830,11 +836,17 @@ class ChatService:
             try:
                 message_read_event = ChatMessageReadEvent(
                     message_id=message_id,
+                    incident_id=message.incident_id,
+                    sender_id=message.sender_id,
                     read_by=user_id,
                     read_at=message.read_at
                 )
                 
-                await EventPublisher.publish(self.session, message_read_event)
+                await EventPublisher.publish(
+                    self.session,
+                    message_read_event,
+                    send_immediate=True
+                )
                 await self.session.commit()
                 
                 logger.info(

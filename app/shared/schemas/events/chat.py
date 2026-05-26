@@ -27,9 +27,17 @@ class ChatMessageDeliveredEvent(BaseEvent):
     """Event emitted when a message is delivered to recipient."""
     
     event_type: Literal["chat.message_delivered"] = "chat.message_delivered"
-    priority: EventPriority = Field(default=EventPriority.LOW)
+    priority: EventPriority = Field(default=EventPriority.HIGH)
     
     message_id: int = Field(..., description="ID of the message")
+    incident_id: Optional[int] = Field(
+        default=None,
+        description="ID of the incident (optional for backward compatibility)"
+    )
+    sender_id: Optional[int] = Field(
+        default=None,
+        description="Original sender user ID (receipt target)"
+    )
     delivered_to: int = Field(..., description="User ID who received it")
     delivered_at: datetime = Field(default_factory=datetime.utcnow)
 
@@ -38,9 +46,17 @@ class ChatMessageReadEvent(BaseEvent):
     """Event emitted when a message is read by recipient."""
     
     event_type: Literal["chat.message_read"] = "chat.message_read"
-    priority: EventPriority = Field(default=EventPriority.LOW)
+    priority: EventPriority = Field(default=EventPriority.HIGH)
     
     message_id: int = Field(..., description="ID of the message")
+    incident_id: Optional[int] = Field(
+        default=None,
+        description="ID of the incident (optional for backward compatibility)"
+    )
+    sender_id: Optional[int] = Field(
+        default=None,
+        description="Original sender user ID (receipt target)"
+    )
     read_by: int = Field(..., description="User ID who read it")
     read_at: datetime = Field(default_factory=datetime.utcnow)
 

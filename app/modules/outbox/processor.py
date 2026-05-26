@@ -20,6 +20,7 @@ from ...models.outbox_event import OutboxEvent, EventPriority
 from ...models.event_log import EventLog
 from ...models.user import User
 from ...models.incidente import Incidente
+from ...models.message import Message
 from .delivery_strategies import DeliveryStrategyFactory
 from .notification_filter import NotificationFilter, DeliveryMode
 
@@ -314,6 +315,25 @@ class OutboxProcessor:
         incident_id = event_data.get("incident_id")
         
         logger.info(f"🔍 Determining recipients for {event_type}, incident_id={incident_id}")
+
+        # Chat receipts (delivered/read) target only the original sender.
+        if event_type in {"chat.message_delivered", "chat.message_read"}:
+            sender_id = event_data.get("sender_id")
+            if sender_id:
+                candidate_recipients.add(sender_id)
+            else:
+                message_id = event_data.get("message_id")
+                if message_id:
+                    message = await session.get(Message, message_id)
+                    if message:
+                        candidate_recipients.add(message.sender_id)
+                        event_data["sender_id"] = message.sender_id
+                        if not incident_id:
+                            incident_id = message.incident_id
+                            event_data["incident_id"] = message.incident_id
+                            incident_participants["client_id"] = None
+                            incident_participants["workshop_id"] = None
+                            incident_participants["technician_id"] = None
         
         if incident_id:
             # Get incident participants
@@ -356,6 +376,15 @@ class OutboxProcessor:
             workshop_ids = attempt_result.scalars().all()
             candidate_recipients.update(workshop_ids)
         
+        # For incident.status_changed, include workshop from payload when present.
+        # This is required for transitions like mutual_cancellation where incident.taller_id
+        # is already null in DB but the previous workshop still needs the update.
+        if event_type == "incident.status_changed":
+            status_workshop_id = event_data.get("workshop_id")
+            if status_workshop_id:
+                candidate_recipients.add(status_workshop_id)
+                incident_participants["workshop_id"] = status_workshop_id
+
         # For incident.status_changed to 'sin_taller_disponible', add workshops
         if event_type == "incident.status_changed":
             new_status = event_data.get("new_status")
@@ -383,6 +412,31 @@ class OutboxProcessor:
 
             admin_result = await session.execute(
                 select(User.id).where(User.user_type == "admin")
+            )
+            admin_ids = admin_result.scalars().all()
+            candidate_recipients.update(admin_ids)
+
+        # For incident lifecycle updates that must refresh admin monitoring cards,
+        # include admins as recipients (WebSocket-only by NotificationFilter).
+        admin_incident_events = {
+            "incident.assigned",
+            "incident.assignment_accepted",
+            "incident.assignment_rejected",
+            "incident.status_changed",
+            "incident.technician_on_way",
+            "incident.technician_arrived",
+            "incident.work_started",
+            "incident.work_completed",
+            "incident.cancelled",
+        }
+        if event_type in admin_incident_events:
+            admin_result = await session.execute(
+                select(User.id).where(
+                    and_(
+                        User.user_type == "admin",
+                        User.is_active == True
+                    )
+                )
             )
             admin_ids = admin_result.scalars().all()
             candidate_recipients.update(admin_ids)
@@ -566,6 +620,8 @@ class OutboxProcessor:
             
             delivered_event = ChatMessageDeliveredEvent(
                 message_id=message_id,
+                incident_id=event_data.get("incident_id"),
+                sender_id=event_data.get("sender_id"),
                 delivered_to=delivered_to,
                 delivered_at=datetime.utcnow()
             )

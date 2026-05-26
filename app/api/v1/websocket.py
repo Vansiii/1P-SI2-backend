@@ -509,7 +509,7 @@ async def websocket_tracking_endpoint(
         logger.error(f"❌ WebSocket error for user {user_id}: {type(e).__name__}: {str(e)}", exc_info=True)
     finally:
         logger.info(f"🔌 Cleaning up WebSocket connection for user {user_id}")
-        manager.disconnect(user_id)
+        manager.disconnect_socket(user_id, websocket)
 
 
 @router.websocket("/ws/incidents/{incident_id}")
@@ -827,7 +827,7 @@ async def websocket_incident_endpoint(
     except Exception as e:
         logger.error(f"WebSocket error for user {user.id} in incident {incident_id}: {str(e)}")
     finally:
-        manager.disconnect(user.id)
+        manager.disconnect_socket(user.id, websocket)
 
 
 @router.get("/ws/status")

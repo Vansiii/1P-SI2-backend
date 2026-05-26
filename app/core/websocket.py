@@ -1,7 +1,7 @@
 """
 WebSocket connection manager for real-time communication.
 """
-from typing import Dict, List, Set, Optional
+from typing import Dict, List, Set, Optional, Tuple
 from fastapi import WebSocket, WebSocketDisconnect
 from datetime import datetime, timezone, timedelta
 import json
@@ -29,7 +29,8 @@ class ConnectionManager:
     MAX_EMITTED_EVENT_IDS = 5000
 
     def __init__(self):
-        self.active_connections: Dict[int, WebSocket] = {}
+        # Multiple concurrent sockets per user (web + mobile, tracking + incident)
+        self.active_connections: Dict[int, Set[WebSocket]] = {}
 
         self.incident_rooms: Dict[int, Set[int]] = {}
         self.workshop_rooms: Dict[int, Set[int]] = {}
@@ -38,7 +39,7 @@ class ConnectionManager:
         self.tracking_connections: Dict[int, WebSocket] = {}
         self.admin_user_ids: Set[int] = set()
 
-        self.heartbeat_tasks: Dict[int, asyncio.Task] = {}
+        self.heartbeat_tasks: Dict[Tuple[int, int], asyncio.Task] = {}
 
         self._emitted_event_ids: Dict[str, Set[str]] = {}
         self._event_id_timestamps: Dict[str, datetime] = {}
@@ -53,13 +54,9 @@ class ConnectionManager:
             user_type: Tipo de usuario ('admin', 'workshop', 'client', 'technician')
             workshop_id: ID del taller (si aplica, para workshop_room)
         """
-        if user_id in self.active_connections:
-            try:
-                await self.active_connections[user_id].close()
-            except Exception:
-                pass
-
-        self.active_connections[user_id] = websocket
+        if user_id not in self.active_connections:
+            self.active_connections[user_id] = set()
+        self.active_connections[user_id].add(websocket)
 
         if user_type in ('admin', 'administrator'):
             self.admin_user_ids.add(user_id)
@@ -72,47 +69,74 @@ class ConnectionManager:
         if user_type == 'technician':
             await self.join_technician_room(user_id)
 
-        self.heartbeat_tasks[user_id] = asyncio.create_task(
+        heartbeat_key = (user_id, id(websocket))
+        self.heartbeat_tasks[heartbeat_key] = asyncio.create_task(
             self._heartbeat(websocket, user_id)
         )
 
-        logger.info(f"WebSocket connected: user_id={user_id}, user_type={user_type}")
+        logger.info(
+            f"WebSocket connected: user_id={user_id}, user_type={user_type}, "
+            f"sockets={len(self.active_connections.get(user_id, set()))}"
+        )
 
     def disconnect(self, user_id: int):
         """
         Desconectar un usuario del WebSocket y limpiar todos sus rooms.
         """
-        if user_id in self.heartbeat_tasks:
-            self.heartbeat_tasks[user_id].cancel()
-            del self.heartbeat_tasks[user_id]
+        sockets = list(self.active_connections.get(user_id, set()))
+        for websocket in sockets:
+            self.disconnect_socket(user_id, websocket, close_socket=False)
+        self._cleanup_user_if_no_connections(user_id)
+        logger.info(f"WebSocket disconnected (all sockets): user_id={user_id}")
 
-        if user_id in self.active_connections:
-            del self.active_connections[user_id]
+    def disconnect_socket(self, user_id: int, websocket: WebSocket, close_socket: bool = False):
+        """
+        Disconnect only one socket for a user. Keeps other sockets alive.
+        """
+        heartbeat_key = (user_id, id(websocket))
+        task = self.heartbeat_tasks.pop(heartbeat_key, None)
+        if task:
+            task.cancel()
+
+        user_sockets = self.active_connections.get(user_id)
+        if user_sockets and websocket in user_sockets:
+            user_sockets.discard(websocket)
+            if close_socket:
+                try:
+                    asyncio.create_task(websocket.close())
+                except Exception:
+                    pass
+            if not user_sockets:
+                self.active_connections.pop(user_id, None)
+
+        self._cleanup_user_if_no_connections(user_id)
+
+    def _cleanup_user_if_no_connections(self, user_id: int):
+        """
+        Remove user from rooms/admin sets only when no sockets remain.
+        """
+        if self.active_connections.get(user_id):
+            return
 
         self.admin_user_ids.discard(user_id)
 
         if user_id in self.tracking_connections:
             del self.tracking_connections[user_id]
 
-        # Clean incident rooms
         for incident_id in list(self.incident_rooms.keys()):
             if user_id in self.incident_rooms[incident_id]:
                 self.incident_rooms[incident_id].remove(user_id)
                 if not self.incident_rooms[incident_id]:
                     del self.incident_rooms[incident_id]
 
-        # Clean workshop rooms
         for workshop_id in list(self.workshop_rooms.keys()):
             if user_id in self.workshop_rooms[workshop_id]:
                 self.workshop_rooms[workshop_id].remove(user_id)
                 if not self.workshop_rooms[workshop_id]:
                     del self.workshop_rooms[workshop_id]
 
-        # Clean technician rooms
         if user_id in self.technician_rooms:
             del self.technician_rooms[user_id]
-
-        logger.info(f"WebSocket disconnected: user_id={user_id}")
 
     async def join_incident_room(self, user_id: int, incident_id: int):
         """
@@ -169,17 +193,10 @@ class ConnectionManager:
         """
         if workshop_id not in self.workshop_rooms:
             return
-        disconnected_users = []
         for user_id in self.workshop_rooms[workshop_id]:
             if exclude_user and user_id == exclude_user:
                 continue
-            if user_id in self.active_connections:
-                try:
-                    await self.send_personal_message(user_id, message)
-                except Exception:
-                    disconnected_users.append(user_id)
-        for uid in disconnected_users:
-            self.disconnect(uid)
+            await self.send_personal_message(user_id, message)
 
     async def send_to_technician(self, technician_id: int, message: dict):
         """
@@ -240,7 +257,8 @@ class ConnectionManager:
         """
         Enviar mensaje a un usuario específico con deduplicación opcional.
         """
-        if user_id not in self.active_connections:
+        sockets = list(self.active_connections.get(user_id, set()))
+        if not sockets:
             logger.debug(f"User {user_id} not connected, skipping message")
             return
 
@@ -250,17 +268,22 @@ class ConnectionManager:
                 logger.debug(f"Skipping duplicate event {event_id} for user {user_id}")
                 return
 
-        try:
-            websocket = self.active_connections[user_id]
-            if websocket.client_state.name == 'CONNECTED':
-                await websocket.send_json(message)
-            else:
-                logger.warning(f"WebSocket for user {user_id} not CONNECTED: {websocket.client_state.name}")
-        except Exception as e:
-            logger.error(f"Error sending message to user {user_id}: {type(e).__name__}: {str(e)}")
-            error_msg = str(e).lower()
-            if "not connected" in error_msg or "closed" in error_msg or "disconnected" in error_msg:
-                self.disconnect(user_id)
+        disconnected_sockets: List[WebSocket] = []
+        for websocket in sockets:
+            try:
+                if websocket.client_state.name == 'CONNECTED':
+                    await websocket.send_json(message)
+                else:
+                    logger.warning(
+                        f"WebSocket for user {user_id} not CONNECTED: {websocket.client_state.name}"
+                    )
+                    disconnected_sockets.append(websocket)
+            except Exception as e:
+                logger.error(f"Error sending message to user {user_id}: {type(e).__name__}: {str(e)}")
+                disconnected_sockets.append(websocket)
+
+        for socket in disconnected_sockets:
+            self.disconnect_socket(user_id, socket)
 
     async def send_to_user(self, user_id: int, message: dict):
         """
@@ -280,21 +303,10 @@ class ConnectionManager:
         if incident_id not in self.incident_rooms:
             return
         
-        disconnected_users = []
-        
         for user_id in self.incident_rooms[incident_id]:
             if exclude_user and user_id == exclude_user:
                 continue
-            
-            if user_id in self.active_connections:
-                try:
-                    await self.send_personal_message(user_id, message)
-                except Exception as e:
-                    logger.error(f"Error broadcasting to user {user_id}: {str(e)}")
-                    disconnected_users.append(user_id)
-        
-        for user_id in disconnected_users:
-            self.disconnect(user_id)
+            await self.send_personal_message(user_id, message)
 
     async def broadcast_to_all(self, message: dict):
         """
@@ -304,17 +316,8 @@ class ConnectionManager:
         Args:
             message: Diccionario con el mensaje
         """
-        disconnected_users = []
-        
         for user_id in list(self.active_connections.keys()):
-            try:
-                await self.send_personal_message(user_id, message)
-            except Exception as e:
-                logger.error(f"Error broadcasting to user {user_id}: {str(e)}")
-                disconnected_users.append(user_id)
-        
-        for user_id in disconnected_users:
-            self.disconnect(user_id)
+            await self.send_personal_message(user_id, message)
 
     async def broadcast_to_admins(self, message: dict):
         """
@@ -324,18 +327,8 @@ class ConnectionManager:
         Args:
             message: Diccionario con el mensaje
         """
-        disconnected_users = []
-        
         for user_id in list(self.admin_user_ids):
-            if user_id in self.active_connections:
-                try:
-                    await self.send_personal_message(user_id, message)
-                except Exception as e:
-                    logger.error(f"Error broadcasting to admin {user_id}: {str(e)}")
-                    disconnected_users.append(user_id)
-        
-        for user_id in disconnected_users:
-            self.disconnect(user_id)
+            await self.send_personal_message(user_id, message)
         
         logger.debug(f"Broadcast to {len(self.admin_user_ids)} admins")
 
@@ -484,7 +477,8 @@ class ConnectionManager:
                 await asyncio.sleep(30)  # Ping cada 30 segundos
                 try:
                     # Check if user is still in active connections
-                    if user_id not in self.active_connections:
+                    user_sockets = self.active_connections.get(user_id, set())
+                    if websocket not in user_sockets:
                         logger.debug(f"🛑 User {user_id} no longer in active connections, stopping heartbeat")
                         break
                     
@@ -513,7 +507,7 @@ class ConnectionManager:
 
     def is_user_connected(self, user_id: int) -> bool:
         """Verificar si un usuario está conectado."""
-        return user_id in self.active_connections
+        return bool(self.active_connections.get(user_id))
 
 
 # Instancia global del ConnectionManager

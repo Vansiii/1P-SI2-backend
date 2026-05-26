@@ -371,6 +371,11 @@ class StrategyConfig:
         Returns:
             StrategyType enum value
         """
+        # Chat receipts are transport-level realtime updates.
+        # They must not create push notifications.
+        if event_type in {"chat.message_delivered", "chat.message_read"}:
+            return StrategyType.WEBSOCKET
+
         # Critical events need both channels
         if event_type in StrategyConfig.CRITICAL_EVENTS:
             return StrategyType.HYBRID

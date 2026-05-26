@@ -79,8 +79,6 @@ class NotificationFilter:
     SILENT_EVENTS = {
         "tracking.location_updated",
         "tracking.updated",
-        "chat.message_delivered",
-        "chat.message_read",
         "chat.user_typing",
         "chat.user_stopped_typing",
         "chat.file_uploaded",  # Ya se notifica con message_sent
@@ -167,6 +165,11 @@ class NotificationFilter:
             valid_participants = [p for p in participants if p is not None]
             return user_id in valid_participants
 
+        # Chat receipts: solo al emisor original del mensaje (sin push duplicado).
+        if event_type in {"chat.message_delivered", "chat.message_read"}:
+            sender_id = event_data.get("sender_id")
+            return sender_id == user_id
+
         if event_type == "cancellation.requested":
             requester_id = event_data.get("requested_by")
             if requester_id == user_id:
@@ -185,6 +188,7 @@ class NotificationFilter:
             participants = [
                 incident_participants.get("client_id"),
                 incident_participants.get("workshop_id"),
+                event_data.get("requested_by"),  # May have been reset on incident
             ]
             valid_participants = [p for p in participants if p is not None]
             return user_id in valid_participants
@@ -284,6 +288,15 @@ class NotificationFilter:
         # Admins reciben eventos críticos del sistema
         admin_events = {
             "incident.no_workshop_available",
+            "incident.assigned",
+            "incident.assignment_accepted",
+            "incident.assignment_rejected",
+            "incident.status_changed",
+            "incident.technician_on_way",
+            "incident.technician_arrived",
+            "incident.work_started",
+            "incident.work_completed",
+            "incident.cancelled",
             "dashboard.critical_alert",
             "dashboard.alert_triggered",  # Todas las alertas del dashboard
             "audit.security_event",

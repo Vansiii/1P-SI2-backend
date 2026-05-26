@@ -30,25 +30,47 @@ async def get_system_metrics(db: AsyncSession) -> Dict:
     Optimized with a single query using conditional aggregation.
     """
     try:
+        pending_aliases = ['pendiente', 'pending']
+        assigned_aliases = ['asignado', 'assigned']
+        in_progress_aliases = ['en_proceso', 'in_progress', 'en proceso', 'en_progreso', 'aceptado']
+        on_way_aliases = ['en_camino', 'on_way', 'en camino']
+        on_site_aliases = ['en_sitio', 'on_site', 'en sitio']
+        resolved_aliases = ['resuelto', 'resolved', 'completado', 'completed']
+        no_workshop_aliases = [
+            'sin_taller_disponible',
+            'sin_taller',
+            'sin_taller_asignado',
+            'sin taller disponible',
+            'sin taller asignado',
+            'no_workshop_available',
+        ]
+        # Normalize state in SQL to avoid case/spacing mismatches from legacy data.
+        normalized_status = func.lower(func.trim(Incidente.estado_actual))
+
         # Count incidents by status using conditional aggregation
         incident_counts = await db.execute(
             select(
-                func.count().label('total'),
-                func.sum(case((Incidente.estado_actual == 'pendiente', 1), else_=0)).label('pendiente'),
-                func.sum(case((Incidente.estado_actual == 'asignado', 1), else_=0)).label('asignado'),
-                func.sum(case((Incidente.estado_actual == 'en_proceso', 1), else_=0)).label('en_proceso'),
-                func.sum(case((Incidente.estado_actual == 'en_camino', 1), else_=0)).label('en_camino'),
-                func.sum(case((Incidente.estado_actual == 'en_sitio', 1), else_=0)).label('en_sitio'),
-                func.sum(case((Incidente.estado_actual == 'sin_taller_disponible', 1), else_=0)).label('sin_taller'),
+                func.sum(case((normalized_status.in_(pending_aliases), 1), else_=0)).label('pendiente'),
+                func.sum(case((normalized_status.in_(assigned_aliases), 1), else_=0)).label('asignado'),
+                func.sum(case((normalized_status.in_(in_progress_aliases), 1), else_=0)).label('en_proceso'),
+                func.sum(case((normalized_status.in_(on_way_aliases), 1), else_=0)).label('en_camino'),
+                func.sum(case((normalized_status.in_(on_site_aliases), 1), else_=0)).label('en_sitio'),
+                func.sum(case((normalized_status.in_(no_workshop_aliases), 1), else_=0)).label('sin_taller'),
+                func.sum(case((
+                    or_(
+                        normalized_status.in_(pending_aliases),
+                        normalized_status.in_(assigned_aliases),
+                        normalized_status.in_(in_progress_aliases),
+                        normalized_status.in_(on_way_aliases),
+                        normalized_status.in_(on_site_aliases),
+                        normalized_status.in_(no_workshop_aliases),
+                    ),
+                    1
+                ), else_=0)).label('total'),
                 func.sum(case((and_(
-                    Incidente.estado_actual == 'resuelto',
+                    normalized_status.in_(resolved_aliases),
                     Incidente.updated_at >= datetime.utcnow().date()
                 ), 1), else_=0)).label('resuelto_hoy')
-            ).where(
-                Incidente.estado_actual.in_([
-                    'pendiente', 'asignado', 'en_proceso', 'en_camino', 
-                    'en_sitio', 'sin_taller_disponible'
-                ])
             )
         )
         
