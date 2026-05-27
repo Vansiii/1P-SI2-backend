@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...core.database import get_db
-from ...core.dependencies import get_current_user, require_permission
+from ...core.dependencies import get_current_user, require_permission, get_tenant_context, TenantContext
 from ...core.permissions import Permission
 from ...core.responses import success_response
 from ...core.exceptions import NotFoundError, ValidationError
@@ -20,8 +20,51 @@ from .schemas import (
     RemoveSpecialtyRequest
 )
 from ...models.user import User
+from ...models.technician import Technician
 
 router = APIRouter(prefix="/technicians", tags=["technician-management"])
+
+
+async def _verify_technician_belongs_to_workshop(
+    technician_id: int,
+    db: AsyncSession,
+    current_user,
+):
+    user_type = current_user.get("user_type") if isinstance(current_user, dict) else getattr(current_user, "user_type", None)
+    current_id = int(current_user.get("sub")) if isinstance(current_user, dict) else getattr(current_user, "id", None)
+
+    if user_type in ("admin", "administrator"):
+        tech = await db.get(Technician, technician_id)
+        if not tech:
+            raise HTTPException(status_code=404, detail="Tecnico no encontrado")
+        return tech
+
+    result = await db.execute(
+        __import__("sqlalchemy").select(Technician).where(Technician.id == technician_id)
+    )
+    tech = result.scalar_one_or_none()
+    if not tech:
+        raise HTTPException(status_code=404, detail="Tecnico no encontrado")
+
+    if user_type == "workshop" and tech.workshop_id != current_id:
+        raise HTTPException(status_code=403, detail="Este tecnico no pertenece a tu taller")
+
+    if user_type == "technician" and current_id != technician_id:
+        raise HTTPException(status_code=403, detail="Solo puedes ver tu propio perfil")
+
+    return tech
+
+
+async def _verify_workshop_access(
+    workshop_id: int,
+    current_user,
+) -> None:
+    user_type = current_user.get("user_type") if isinstance(current_user, dict) else getattr(current_user, "user_type", None)
+    current_id = int(current_user.get("sub")) if isinstance(current_user, dict) else getattr(current_user, "id", None)
+    if user_type in ("admin", "administrator"):
+        return
+    if user_type == "workshop" and workshop_id != current_id:
+        raise HTTPException(status_code=403, detail="No puedes acceder a tecnicos de otro taller")
 
 
 @router.patch("/{technician_id}/availability", status_code=status.HTTP_200_OK)
@@ -31,16 +74,8 @@ async def update_technician_availability(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Update technician availability status.
-    
-    This endpoint:
-    - Updates the technician's availability
-    - Validates that technician has no active services when setting unavailable
-    - Updates last_seen_at timestamp
-    
-    **Permissions:** Technician (own profile), workshop admin, or system admin
-    """
+    await _verify_technician_belongs_to_workshop(technician_id, db, current_user)
+
     # Verify permissions
     if current_user.user_type not in ["admin", "workshop"] and current_user.id != technician_id:
         raise HTTPException(
@@ -83,13 +118,8 @@ async def get_technician_workload(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Get current workload for a technician.
-    
-    Returns information about active incidents and tracking sessions.
-    
-    **Permissions:** Technician (own profile), workshop admin, or system admin
-    """
+    await _verify_technician_belongs_to_workshop(technician_id, db, current_user)
+
     service = TechnicianManagementService(db)
     workload = await service.get_technician_workload(technician_id)
     return workload
@@ -103,13 +133,8 @@ async def get_technician_statistics(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Get statistics for a technician.
-    
-    Returns incident counts and resolution rate.
-    
-    **Permissions:** Technician (own profile), workshop admin, or system admin
-    """
+    await _verify_technician_belongs_to_workshop(technician_id, db, current_user)
+
     service = TechnicianManagementService(db)
     
     stats = await service.get_technician_statistics(
@@ -128,13 +153,8 @@ async def get_available_technicians(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
-    """
-    Get available technicians for a workshop.
-    
-    Optionally filter by specialty.
-    
-    **Permissions:** Workshop admin or system admin
-    """
+    await _verify_workshop_access(workshop_id, current_user)
+
     service = TechnicianManagementService(db)
     
     technicians = await service.get_available_technicians(
@@ -171,11 +191,8 @@ async def get_workshop_technicians(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission(Permission.TECHNICIAN_VIEW_OWN_WORKSHOP))
 ):
-    """
-    Get all technicians for a workshop.
-    
-    **Permissions:** Workshop admin or system admin
-    """
+    await _verify_workshop_access(workshop_id, current_user)
+
     service = TechnicianManagementService(db)
     
     technicians = await service.get_workshop_technicians(
@@ -217,11 +234,8 @@ async def assign_specialty_to_technician(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission(Permission.TECHNICIAN_UPDATE))
 ):
-    """
-    Assign a specialty to a technician.
-    
-    **Permissions:** Workshop admin or system admin
-    """
+    await _verify_technician_belongs_to_workshop(technician_id, db, current_user)
+
     service = TechnicianManagementService(db)
     
     success = await service.assign_specialty(
@@ -246,11 +260,8 @@ async def remove_specialty_from_technician(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(require_permission(Permission.TECHNICIAN_UPDATE))
 ):
-    """
-    Remove a specialty from a technician.
-    
-    **Permissions:** Workshop admin or system admin
-    """
+    await _verify_technician_belongs_to_workshop(technician_id, db, current_user)
+
     service = TechnicianManagementService(db)
     
     success = await service.remove_specialty(

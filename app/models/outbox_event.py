@@ -6,7 +6,7 @@ guaranteeing eventual consistency between database state and emitted events.
 """
 
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, Index, Enum as SQLEnum
+from sqlalchemy import Column, Integer, String, Text, Boolean, DateTime, ForeignKey, Index, Enum as SQLEnum
 from sqlalchemy.dialects.postgresql import UUID
 import uuid
 import enum
@@ -52,6 +52,9 @@ class OutboxEvent(Base):
     
     # Primary key
     id = Column(Integer, primary_key=True, index=True)
+    
+    # Tenant isolation
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     
     # Event identification
     event_id = Column(

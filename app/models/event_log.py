@@ -6,7 +6,7 @@ enabling event recovery, debugging, and analytics.
 """
 
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text, DateTime, Index
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Index
 from sqlalchemy.dialects.postgresql import UUID
 import uuid
 
@@ -38,6 +38,9 @@ class EventLog(Base):
     
     # Primary key
     id = Column(Integer, primary_key=True, index=True)
+    
+    # Tenant isolation
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     
     # Event identification
     event_id = Column(

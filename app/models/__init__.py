@@ -8,6 +8,7 @@ from .administrator import Administrator
 from .assignment_attempt import AssignmentAttempt
 from .audit_log import AuditLog
 from .base import Base
+from .cancellation_request import CancellationRequest
 from .client import Client
 from .login_attempt import LoginAttempt
 from .password_reset_token import PasswordResetToken
@@ -18,6 +19,12 @@ from .two_factor_auth import TwoFactorAuth
 from .user import User
 from .workshop import Workshop
 from .workshop_schedule import WorkshopSchedule
+
+# Modelos de tenant y suscripción (CU29-CU31)
+from .tenant import Tenant
+from .subscription_plan import SubscriptionPlan
+from .tenant_subscription import TenantSubscription
+from .subscription_invoice import SubscriptionInvoice
 
 # Modelos de eventos (Outbox Pattern)
 from .outbox_event import OutboxEvent, EventPriority
@@ -115,5 +122,10 @@ __all__ = [
     "StripeEventLog",
     # Calificación de servicios (CU06)
     "ServiceRating",
+    # Tenant y Suscripción (CU29-CU31)
+    "Tenant",
+    "SubscriptionPlan",
+    "TenantSubscription",
+    "SubscriptionInvoice",
 ]
 

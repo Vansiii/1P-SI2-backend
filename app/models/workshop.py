@@ -20,6 +20,10 @@ class Workshop(User):
 
     id: Mapped[int] = mapped_column(ForeignKey("users.id"), primary_key=True)
     
+    # Tenant relationship
+    tenant_id: Mapped[int | None] = mapped_column(ForeignKey("tenants.id"), nullable=True, index=True)
+    nit: Mapped[str | None] = mapped_column(String(20), nullable=True, unique=True)
+    
     # Información del taller
     workshop_name: Mapped[str] = mapped_column(String(120), nullable=False, index=True)
     owner_name: Mapped[str] = mapped_column(String(120), nullable=False)  # Nombre del propietario
@@ -37,6 +41,7 @@ class Workshop(User):
     is_verified: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=True)  # Auto-verify workshops
     
     # Relaciones
+    tenant = relationship("Tenant", foreign_keys=[tenant_id], uselist=False, viewonly=True)
     technicians = relationship("Technician", back_populates="workshop", foreign_keys="[Technician.workshop_id]")
     incidentes = relationship("Incidente", back_populates="workshop")
     

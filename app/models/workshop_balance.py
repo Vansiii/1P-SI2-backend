@@ -11,6 +11,7 @@ class WorkshopBalance(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     workshop_id = Column(Integer, ForeignKey("workshops.id"), nullable=False, unique=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     
     # Balance
     available_balance = Column(Numeric(10, 2), nullable=False, default=0.00)
@@ -51,6 +52,7 @@ class Withdrawal(Base):
     id = Column(Integer, primary_key=True, index=True)
     workshop_balance_id = Column(Integer, ForeignKey("workshop_balances.id"), nullable=False)
     workshop_id = Column(Integer, ForeignKey("workshops.id"), nullable=False)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     
     # Withdrawal details
     amount = Column(Numeric(10, 2), nullable=False)

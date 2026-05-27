@@ -429,6 +429,12 @@ async def notify_assignment_timeout(
     if not incidente:
         raise NotFoundException(f"Incidente {incidente_id} no encontrado")
     
+    # 1.5. Verificar que el usuario actual pertenece al taller asignado (o es admin)
+    if current_user.user_type == "workshop" and incidente.taller_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Este incidente no esta asignado a tu taller")
+    if current_user.user_type not in ("workshop", "admin", "administrator"):
+        raise HTTPException(status_code=403, detail="No tienes permisos para esta accion")
+    
     # 2. Verificar que el incidente está en estado pendiente
     if incidente.estado_actual != "pendiente":
         logger.warning(
@@ -859,6 +865,15 @@ async def get_incidente_rechazos(
     if not incidente:
         from ...core import NotFoundException
         raise NotFoundException(f"Incidente con ID {incidente_id} no encontrado")
+    
+    # Verificar ownership: workshop solo ve rechazos de incidentes de su taller
+    if current_user.user_type == "workshop" and incidente.taller_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Este incidente no pertenece a tu taller")
+    if current_user.user_type not in ("workshop", "admin", "administrator", "client"):
+        raise HTTPException(status_code=403, detail="No tienes permisos para esta accion")
+    # Cliente solo ve rechazos de sus propios incidentes
+    if current_user.user_type == "client" and incidente.client_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Este incidente no te pertenece")
     
     # Obtener rechazos con información del taller
     result = await session.execute(

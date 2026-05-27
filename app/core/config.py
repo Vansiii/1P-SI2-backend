@@ -206,6 +206,16 @@ class Settings(BaseSettings):
         default=100.00, alias="MIN_WITHDRAWAL_AMOUNT",
         description="Minimum amount for workshop withdrawal requests"
     )
+
+    # Tenant & Subscription Configuration (CU29-CU31)
+    default_plan_id: int = Field(
+        default=1, alias="DEFAULT_PLAN_ID",
+        description="Default subscription plan ID for new tenants"
+    )
+    grace_period_hours: int = Field(
+        default=48, alias="GRACE_PERIOD_HOURS",
+        description="Grace period in hours before suspending tenant for non-payment"
+    )
     
     # Logging
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")

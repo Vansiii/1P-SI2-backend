@@ -31,6 +31,7 @@ class Message(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     incident_id: Mapped[int] = mapped_column(ForeignKey("incidentes.id"), nullable=False, index=True)
     sender_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    tenant_id: Mapped[int | None] = mapped_column(ForeignKey("tenants.id"), nullable=True, index=True)
     
     # Contenido del mensaje
     message: Mapped[str] = mapped_column(Text, nullable=False)

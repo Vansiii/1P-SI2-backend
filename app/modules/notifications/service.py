@@ -484,3 +484,44 @@ class InAppNotificationService:
 
         result = await self.session.scalars(query)
         return list(result)
+
+    # === Tenant notification helpers (CU29-CU31) ===
+
+    @staticmethod
+    async def notify_admins_new_tenant(session, tenant, workshop_name, owner_email):
+        """Notificar a todos los admins sobre una nueva solicitud de tenant."""
+        from sqlalchemy import select as sa_select
+        from app.models.administrator import Administrator
+        result = await session.execute(
+            sa_select(Administrator).where(Administrator.is_active == True)
+        )
+        admins = result.scalars().all()
+        if not admins:
+            logger.info("No active admins to notify about new tenant registration")
+            return
+        logger.info(
+            "New tenant registration pending",
+            tenant_id=tenant.id,
+            workshop_name=workshop_name,
+            owner_email=owner_email,
+            admin_count=len(admins),
+        )
+
+    @staticmethod
+    async def notify_tenant_approved(session, tenant, owner_email):
+        """Notificar al taller que su solicitud fue aprobada."""
+        logger.info(
+            "Tenant approved",
+            tenant_id=tenant.id,
+            owner_email=owner_email,
+        )
+
+    @staticmethod
+    async def notify_tenant_rejected(session, tenant, owner_email, reason):
+        """Notificar al taller que su solicitud fue rechazada."""
+        logger.info(
+            "Tenant rejected",
+            tenant_id=tenant.id,
+            owner_email=owner_email,
+            reason=reason,
+        )

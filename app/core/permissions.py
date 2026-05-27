@@ -162,6 +162,22 @@ class Permission(str, Enum):
     ADMIN_CONFIGURE_COMMISSION = "admin:configure_commission"
     ADMIN_VIEW_AUDIT_LOG = "admin:view_audit_log"
     ADMIN_MANAGE_PERMISSIONS = "admin:manage_permissions"  # Gestionar permisos de roles
+    
+    # ========== MÓDULO 11: TENANT Y SUSCRIPCIÓN (CU29-CU31) ==========
+    # CU29: Registrar Taller como Tenant
+    TENANT_REGISTER = "tenant:register"
+    TENANT_APPROVE = "tenant:approve"
+    TENANT_REJECT = "tenant:reject"
+    TENANT_VIEW_REQUESTS = "tenant:view_requests"
+    TENANT_MANAGE = "tenant:manage"  # Suspender, reactivar, cancelar
+    
+    # CU31: Gestionar Suscripción
+    SUBSCRIPTION_VIEW_OWN = "subscription:view_own"
+    SUBSCRIPTION_SUBSCRIBE = "subscription:subscribe"
+    SUBSCRIPTION_CHANGE = "subscription:change"
+    SUBSCRIPTION_CANCEL = "subscription:cancel"
+    SUBSCRIPTION_REACTIVATE = "subscription:reactivate"
+    SUBSCRIPTION_MANAGE = "subscription:manage"  # Admin: ver todas, suspender
 
 
 # Mapeo de permisos por rol basado en casos de uso
@@ -261,6 +277,16 @@ ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
         Permission.TECHNICIAN_DELETE,
         Permission.TECHNICIAN_VIEW_LOCATION,
         Permission.TECHNICIAN_VIEW_OWN_WORKSHOP,
+        
+        # CU29: Registrar como Tenant
+        Permission.TENANT_REGISTER,
+        
+        # CU31: Gestionar Suscripción
+        Permission.SUBSCRIPTION_VIEW_OWN,
+        Permission.SUBSCRIPTION_SUBSCRIBE,
+        Permission.SUBSCRIPTION_CHANGE,
+        Permission.SUBSCRIPTION_CANCEL,
+        Permission.SUBSCRIPTION_REACTIVATE,
     },
     
     # A4: Técnico de Taller (Usuario de la App Móvil)
@@ -349,6 +375,16 @@ ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
         Permission.ADMIN_CONFIGURE_COMMISSION,
         Permission.ADMIN_VIEW_AUDIT_LOG,
         Permission.ADMIN_MANAGE_PERMISSIONS,  # Gestionar permisos de roles
+        
+        # CU29: Gestión de Tenants
+        Permission.TENANT_APPROVE,
+        Permission.TENANT_REJECT,
+        Permission.TENANT_VIEW_REQUESTS,
+        Permission.TENANT_MANAGE,
+        
+        # CU31: Gestión de Suscripciones
+        Permission.SUBSCRIPTION_MANAGE,
+        Permission.SUBSCRIPTION_VIEW_OWN,
         
         # Permisos adicionales para monitoreo y gestión
         Permission.VEHICLE_VIEW_OWN,  # Ver vehículos de todos los clientes

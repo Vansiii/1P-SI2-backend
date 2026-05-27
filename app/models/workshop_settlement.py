@@ -14,6 +14,7 @@ class WorkshopSettlement(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     workshop_id = Column(Integer, ForeignKey("workshops.id"), nullable=False, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     
     # Period
     period_start = Column(DateTime, nullable=False)

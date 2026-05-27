@@ -27,6 +27,7 @@ class TechnicianLocationHistory(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     technician_id: Mapped[int] = mapped_column(ForeignKey("technicians.id"), nullable=False, index=True)
+    tenant_id: Mapped[int | None] = mapped_column(ForeignKey("tenants.id"), nullable=True, index=True)
     
     # Coordenadas GPS
     latitude: Mapped[float] = mapped_column(Numeric(10, 8), nullable=False)

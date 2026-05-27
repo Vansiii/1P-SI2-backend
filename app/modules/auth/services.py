@@ -28,6 +28,7 @@ from ...models.client import Client
 from ...models.login_attempt import LoginAttempt
 from ...models.refresh_token import RefreshToken
 from ...models.technician import Technician
+from ...models.tenant import Tenant
 from ...models.user import User
 from ...models.workshop import Workshop
 from ...modules.notifications.service import NotificationService
@@ -51,6 +52,32 @@ from .schemas import (
 )
 
 logger = get_logger(__name__)
+
+
+async def _resolve_tenant_claims(session: AsyncSession, user: User) -> dict[str, Any]:
+    """Resolve tenant_id and tenant_status for JWT additional_claims."""
+    if user.user_type == UserType.WORKSHOP:
+        result = await session.execute(
+            select(Workshop.tenant_id).where(Workshop.id == user.id)
+        )
+        tenant_id = result.scalar_one_or_none()
+        if tenant_id:
+            tenant = await session.get(Tenant, tenant_id)
+            return {'tenant_id': tenant_id, 'tenant_status': tenant.status if tenant else 'active'}
+    elif user.user_type == UserType.TECHNICIAN:
+        result = await session.execute(
+            select(Technician.workshop_id).where(Technician.id == user.id)
+        )
+        workshop_id = result.scalar_one_or_none()
+        if workshop_id:
+            result2 = await session.execute(
+                select(Workshop.tenant_id).where(Workshop.id == workshop_id)
+            )
+            tenant_id = result2.scalar_one_or_none()
+            if tenant_id:
+                tenant = await session.get(Tenant, tenant_id)
+                return {'tenant_id': tenant_id, 'tenant_status': tenant.status if tenant else 'active'}
+    return {}
 
 
 class RegistrationService:
@@ -132,10 +159,12 @@ class RegistrationService:
         await self.session.refresh(user)
         
         # Generate tokens
+        additional_claims = await _resolve_tenant_claims(self.session, user)
         access_token, expires_at, jti = create_access_token(
             subject=str(user.id),
             email=user.email,
             user_type=user.user_type,
+            additional_claims=additional_claims,
         )
         
         refresh_token, refresh_token_hash = create_refresh_token()
@@ -507,6 +536,10 @@ class AuthService:
     @staticmethod
     def _remaining_seconds(until: datetime) -> int:
         return max(0, math.ceil((until - datetime.now(UTC)).total_seconds()))
+
+    async def _resolve_tenant_claims(self, user: User) -> dict[str, Any]:
+        """Resolve tenant_id and tenant_status for JWT additional_claims."""
+        return await _resolve_tenant_claims(self.session, user)
     
     async def login(
         self,
@@ -635,14 +668,16 @@ class AuthService:
             )
         
         # Generate tokens
+        additional_claims = await self._resolve_tenant_claims(user)
         access_token, expires_at, jti = create_access_token(
             subject=str(user.id),
             email=user.email,
             user_type=user.user_type,
+            additional_claims=additional_claims,
         )
-        
+
         refresh_token, refresh_token_hash = create_refresh_token()
-        
+
         # Save refresh token
         refresh_token_record = RefreshToken(
             user_id=user.id,
@@ -650,13 +685,13 @@ class AuthService:
             jti=jti,
             expires_at=datetime.now(UTC) + timedelta(days=7),
         )
-        
+
         self.session.add(refresh_token_record)
         await self.session.commit()
-        
+
         # Update last login
         await self.user_repo.update_last_login(user.id)
-        
+
         # If user is a technician, update online status and broadcast
         if user.user_type == UserType.TECHNICIAN:
             try:
@@ -715,14 +750,16 @@ class AuthService:
             raise UserNotFoundException(f"Usuario con email {email}")
         
         # Generate tokens
+        additional_claims = await self._resolve_tenant_claims(user)
         access_token, expires_at, jti = create_access_token(
             subject=str(user.id),
             email=user.email,
             user_type=user.user_type,
+            additional_claims=additional_claims,
         )
-        
+
         refresh_token, refresh_token_hash = create_refresh_token()
-        
+
         # Save refresh token
         refresh_token_record = RefreshToken(
             user_id=user.id,
@@ -730,16 +767,16 @@ class AuthService:
             jti=jti,
             expires_at=datetime.now(UTC) + timedelta(days=7),
         )
-        
+
         self.session.add(refresh_token_record)
         await self.session.commit()
-        
+
         # Update last login
         await self.user_repo.update_last_login(user.id)
-        
+
         # Clear failed login attempts counter after successful 2FA login
         await self._clear_failed_login_attempts(email)
-        
+
         # If user is a technician, update online status and broadcast
         if user.user_type == UserType.TECHNICIAN:
             try:

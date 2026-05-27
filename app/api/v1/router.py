@@ -46,6 +46,14 @@ from ...modules.payments.admin_router import router as payments_admin_router
 # Ratings module router (CU06)
 from ...modules.ratings.router import router as ratings_router
 
+# Tenant module routers (CU29-CU31)
+from ...modules.tenants.router import router as tenants_router
+from ...modules.tenants.router import admin_router as tenants_admin_router
+from ...modules.tenants.router import workshop_sub_router
+from ...modules.tenants.router import admin_sub_router
+from ...modules.tenants.router import plan_admin_router
+from ...modules.tenants.webhook_router import router as webhook_router
+
 # Import admin routers
 from .admin import ai_analytics_router
 from ...modules.admin_monitoring.router import router as admin_monitoring_router
@@ -290,6 +298,42 @@ api_router.include_router(
 api_router.include_router(
     ratings_router,
     tags=["Ratings"],
+)
+
+# Tenant routes (CU29-CU31)
+api_router.include_router(
+    tenants_router,
+    tags=["Tenants"],
+)
+
+# Tenant admin routes
+api_router.include_router(
+    tenants_admin_router,
+    tags=["Admin - Tenants"],
+)
+
+# Workshop subscription routes
+api_router.include_router(
+    workshop_sub_router,
+    tags=["Workshop - Subscription"],
+)
+
+# Admin subscription routes
+api_router.include_router(
+    admin_sub_router,
+    tags=["Admin - Subscriptions"],
+)
+
+# Stripe webhook routes
+api_router.include_router(
+    webhook_router,
+    tags=["Webhooks"],
+)
+
+# Plan management routes (Admin CRUD)
+api_router.include_router(
+    plan_admin_router,
+    tags=["Admin - Plans"],
 )
 
 __all__ = ["api_router"]

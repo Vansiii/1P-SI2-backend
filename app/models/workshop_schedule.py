@@ -1,4 +1,4 @@
-﻿from datetime import time
+from datetime import time
 
 from sqlalchemy import Boolean, CheckConstraint, ForeignKey, Integer, Time, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
@@ -20,6 +20,7 @@ class WorkshopSchedule(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     workshop_id: Mapped[int] = mapped_column(ForeignKey("workshops.id"), nullable=False, index=True)
+    tenant_id: Mapped[int | None] = mapped_column(ForeignKey("tenants.id"), nullable=True, index=True)
     
     # Día de la semana (0=Lunes, 1=Martes, ..., 6=Domingo)
     day_of_week: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
