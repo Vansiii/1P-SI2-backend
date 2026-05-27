@@ -22,6 +22,7 @@ from ...models.administrator import Administrator
 from ...models.client import Client
 from ...models.revoked_token import RevokedToken
 from ...models.technician import Technician
+from ...models.tenant import Tenant
 from ...models.user import User
 from ...models.workshop import Workshop
 from ...modules.auth.schemas import TokenPayload
@@ -207,6 +208,31 @@ async def get_current_workshop_user(
         if not workshop.is_active:
             logger.info("Inactive workshop attempted access", user_id=user_id, email=workshop.email)
             raise AccountLockedException()
+
+        # Verificar estado del tenant asociado
+        if workshop.tenant_id:
+            tenant = await session.get(Tenant, workshop.tenant_id)
+            if tenant and tenant.status == "pending":
+                raise AuthorizationException(
+                    message="Tu cuenta esta pendiente de aprobacion. Solo puedes acceder a tu perfil.",
+                    required_permission="workshop_access",
+                )
+            if tenant and tenant.status == "suspended":
+                raise AuthorizationException(
+                    message="Tu cuenta ha sido suspendida. Contacta al administrador.",
+                    required_permission="workshop_access",
+                )
+            if tenant and tenant.status == "rejected":
+                reason = tenant.rejection_reason or "Sin motivo especificado"
+                raise AuthorizationException(
+                    message=f"Tu solicitud fue rechazada. Motivo: {reason}",
+                    required_permission="workshop_access",
+                )
+            if tenant and tenant.status == "canceled":
+                raise AuthorizationException(
+                    message="Tu cuenta ha sido cancelada.",
+                    required_permission="workshop_access",
+                )
 
         return workshop
         

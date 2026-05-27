@@ -14,6 +14,7 @@ class WorkshopFinancialMovement(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     workshop_id = Column(Integer, ForeignKey("workshops.id"), nullable=False, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     transaction_id = Column(Integer, ForeignKey("transactions.id"), nullable=True)
     withdrawal_id = Column(Integer, ForeignKey("withdrawals.id"), nullable=True)
     

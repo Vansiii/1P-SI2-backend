@@ -26,6 +26,8 @@ from .schemas import (
     UpdateProfileRequest,
     WorkshopRegistrationRequest,
 )
+from ...modules.tenants.schemas import WorkshopTenantRegistrationRequest
+from ...modules.tenants.services import TenantRegistrationService
 from .services import AuthService, ProfileService, RegistrationService
 
 logger = get_logger(__name__)
@@ -68,32 +70,41 @@ async def register_client(
 @router.post(
     "/register/workshop",
     status_code=status.HTTP_201_CREATED,
-    summary="Register new workshop",
-    description="Register a new workshop user account",
+    summary="Register new workshop as tenant",
+    description="Register a new workshop. Creates User, Workshop, Tenant, and Subscription. "
+                "Workshop can login immediately with limited access until admin approval.",
 )
 async def register_workshop(
-    request: WorkshopRegistrationRequest,
+    request: WorkshopTenantRegistrationRequest,
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Register a new workshop user."""
-    registration_service = RegistrationService(session)
-    workshop, token_response = await registration_service.register_workshop(request)
-    
+    """Register a new workshop tenant (pending approval)."""
+    try:
+        service = TenantRegistrationService(session)
+        result = await service.register_workshop(request)
+    except EmailAlreadyExistsException as e:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"El email {e.email} ya esta registrado",
+        )
+    except Exception as e:
+        error_msg = str(e)
+        if "NIT" in error_msg:
+            raise HTTPException(status_code=409, detail=error_msg)
+        if "contrasena" in error_msg.lower():
+            raise HTTPException(status_code=400, detail=error_msg)
+        logger.exception("Error registering workshop tenant")
+        raise HTTPException(status_code=500, detail="Error interno al registrar taller")
+
+    message = "Taller registrado exitosamente. "
+    if result.get("checkout_url"):
+        message += "Redirigiendo al pago para activar tu suscripcion."
+    else:
+        message += "Puedes iniciar sesion y configurar tu perfil. Las funcionalidades se activaran cuando un administrador apruebe tu cuenta."
+
     return create_success_response(
-        data={
-            "user": {
-                "id": workshop.id,
-                "email": workshop.email,
-                "user_type": workshop.user_type,
-                "workshop_name": workshop.workshop_name,
-                "owner_name": workshop.owner_name,
-                "latitude": float(workshop.latitude) if workshop.latitude else None,
-                "longitude": float(workshop.longitude) if workshop.longitude else None,
-                "coverage_radius_km": float(workshop.coverage_radius_km) if workshop.coverage_radius_km else None,
-            },
-            "tokens": token_response.model_dump(),
-        },
-        message="Taller registrado exitosamente",
+        data=result,
+        message=message,
         status_code=status.HTTP_201_CREATED,
     )
 
@@ -433,12 +444,19 @@ async def get_profile(
                     "workshop_name": workshop.workshop_name,
                     "owner_name": workshop.owner_name,
                     "address": workshop.address,
-                    "direccion": workshop.address,  # Alias para compatibilidad
+                    "direccion": workshop.address,
                     "workshop_phone": workshop.workshop_phone,
                     "latitude": float(workshop.latitude) if workshop.latitude else None,
                     "longitude": float(workshop.longitude) if workshop.longitude else None,
                     "coverage_radius_km": float(workshop.coverage_radius_km) if workshop.coverage_radius_km else None,
+                    "tenant_id": workshop.tenant_id,
                 })
+
+                if workshop.tenant_id:
+                    from ...models.tenant import Tenant
+                    tenant = await session.get(Tenant, workshop.tenant_id)
+                    if tenant:
+                        user_data["tenant_status"] = tenant.status
                 
         elif current_user.user_type == "technician":
             result = await session.execute(

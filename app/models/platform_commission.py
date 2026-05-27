@@ -15,6 +15,7 @@ class PlatformCommission(Base):
     id = Column(Integer, primary_key=True, index=True)
     transaction_id = Column(Integer, ForeignKey("transactions.id"), nullable=False, unique=True)
     workshop_id = Column(Integer, ForeignKey("workshops.id"), nullable=False, index=True)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     
     # Financial breakdown
     total_amount = Column(Numeric(10, 2), nullable=False)       # Amount charged to client

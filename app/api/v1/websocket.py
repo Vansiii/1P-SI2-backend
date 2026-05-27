@@ -296,6 +296,20 @@ async def websocket_tracking_endpoint(
         user_type = user.user_type
         workshop_id = user.id if user_type == 'workshop' else None
         
+        # CU30: Verificar que el tenant del workshop esta activo
+        if user_type == 'workshop':
+            from ...models.workshop import Workshop
+            from ...models.tenant import Tenant
+            result = await session.execute(
+                select(Workshop.tenant_id).where(Workshop.id == user.id)
+            )
+            tenant_id = result.scalar_one_or_none()
+            if tenant_id:
+                tenant = await session.get(Tenant, tenant_id)
+                if tenant and tenant.status in ('suspended', 'canceled'):
+                    await websocket.close(code=4003, reason=f"Tenant {tenant.status}")
+                    return
+        
         # Break out of the session context - we don't need it anymore
         break
     
@@ -640,6 +654,20 @@ async def websocket_incident_endpoint(
         user_type = user.user_type
         user_first_name = user.first_name
         user_last_name = user.last_name
+        
+        # CU30: Verificar que el tenant del workshop esta activo
+        if user_type == 'workshop':
+            from ...models.workshop import Workshop
+            from ...models.tenant import Tenant
+            result = await session.execute(
+                select(Workshop.tenant_id).where(Workshop.id == user.id)
+            )
+            tenant_ws_id = result.scalar_one_or_none()
+            if tenant_ws_id:
+                tenant = await session.get(Tenant, tenant_ws_id)
+                if tenant and tenant.status in ('suspended', 'canceled'):
+                    await websocket.close(code=4003, reason=f"Tenant {tenant.status}")
+                    return
         
         # Break out of the session context
         break

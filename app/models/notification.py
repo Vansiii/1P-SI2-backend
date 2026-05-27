@@ -32,6 +32,7 @@ class Notification(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    tenant_id: Mapped[int | None] = mapped_column(ForeignKey("tenants.id"), nullable=True, index=True)
     
     # Contenido
     type: Mapped[str] = mapped_column(String(50), nullable=False)  # incident_assigned, status_change, etc.

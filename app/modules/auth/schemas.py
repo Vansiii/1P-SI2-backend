@@ -26,6 +26,8 @@ class TokenPayload(BaseCreateSchema):
     exp: datetime = Field(..., description="Expiration time")
     iat: datetime | None = Field(None, description="Issued at")
     iss: str | None = Field(None, description="Issuer")
+    tenant_id: int | None = Field(None, description="Tenant ID (CU29-CU31)")
+    tenant_status: str | None = Field(None, description="Tenant status")
 
 
 class BaseUserRegistrationRequest(BaseCreateSchema):

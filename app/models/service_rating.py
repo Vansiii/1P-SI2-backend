@@ -28,6 +28,9 @@ class ServiceRating(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     
+    # Tenant isolation
+    tenant_id: Mapped[int | None] = mapped_column(ForeignKey("tenants.id"), nullable=True, index=True)
+    
     # Relaciones principales
     incident_id: Mapped[int] = mapped_column(
         ForeignKey("incidentes.id", ondelete="CASCADE"),

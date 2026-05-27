@@ -1,4 +1,4 @@
-﻿from datetime import datetime
+from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Numeric, String, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -22,6 +22,9 @@ class Technician(User):
     __tablename__ = "technicians"
 
     id: Mapped[int] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    
+    # Tenant isolation
+    tenant_id: Mapped[int | None] = mapped_column(ForeignKey("tenants.id"), nullable=True, index=True)
     
     # Relación con el taller
     workshop_id: Mapped[int] = mapped_column(ForeignKey("workshops.id"), nullable=False, index=True)

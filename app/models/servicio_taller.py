@@ -1,4 +1,4 @@
-﻿from sqlalchemy import CheckConstraint, ForeignKey, Numeric, UniqueConstraint
+from sqlalchemy import CheckConstraint, ForeignKey, Numeric, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .base import Base
@@ -19,5 +19,6 @@ class ServicioTaller(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     taller_id: Mapped[int] = mapped_column(ForeignKey("workshops.id"), nullable=False, index=True)
     servicio_id: Mapped[int] = mapped_column(ForeignKey("servicios.id"), nullable=False, index=True)
+    tenant_id: Mapped[int | None] = mapped_column(ForeignKey("tenants.id"), nullable=True, index=True)
     precio: Mapped[float] = mapped_column(Numeric(10, 2), nullable=False)  # Precio del servicio en este taller
 

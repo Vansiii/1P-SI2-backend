@@ -66,7 +66,8 @@ class EventPublisher:
         event: BaseEvent,
         *,
         commit: bool = False,
-        send_immediate: bool = True
+        send_immediate: bool = True,
+        tenant_id: int | None = None,
     ) -> OutboxEvent:
         """
         Publish a single event to the outbox.
@@ -108,7 +109,8 @@ class EventPublisher:
                 priority=event.priority,
                 processed=False,
                 retry_count=0,
-                ws_immediate_sent=False
+                ws_immediate_sent=False,
+                tenant_id=tenant_id,
             )
             
             # Add to session (will be committed with business operation)

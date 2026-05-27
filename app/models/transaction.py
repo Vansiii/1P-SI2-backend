@@ -13,6 +13,7 @@ class Transaction(Base):
     incident_id = Column(Integer, ForeignKey("incidentes.id"), nullable=False)
     workshop_id = Column(Integer, ForeignKey("workshops.id"), nullable=False)
     client_id = Column(Integer, ForeignKey("clients.id"), nullable=False)
+    tenant_id = Column(Integer, ForeignKey("tenants.id"), nullable=True, index=True)
     
     # Amounts
     amount = Column(Numeric(10, 2), nullable=False)  # Total amount
