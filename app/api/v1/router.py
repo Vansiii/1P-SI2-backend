@@ -46,6 +46,14 @@ from ...modules.payments.admin_router import router as payments_admin_router
 # Ratings module router (CU06)
 from ...modules.ratings.router import router as ratings_router
 
+# Service catalog module (CU28)
+from ...modules.service_catalog.router import router as service_catalog_router
+from ...modules.service_catalog.router import public_router as catalog_public_router
+
+# Workshop selection module (CU27)
+from ...modules.workshop_selection.router import router as workshop_selection_router
+from ...modules.workshop_selection.router import public_workshop_router
+
 # Tenant module routers (CU29-CU31)
 from ...modules.tenants.router import router as tenants_router
 from ...modules.tenants.router import admin_router as tenants_admin_router
@@ -298,6 +306,29 @@ api_router.include_router(
 api_router.include_router(
     ratings_router,
     tags=["Ratings"],
+)
+
+# Service catalog routes (CU28)
+api_router.include_router(
+    service_catalog_router,
+    tags=["Workshop - Catalog"],
+)
+
+# Catalog public routes (CU28)
+api_router.include_router(
+    catalog_public_router,
+    tags=["Catalog - Public"],
+)
+
+# Workshop selection routes (CU27)
+api_router.include_router(
+    workshop_selection_router,
+    tags=["Workshop Selection"],
+)
+
+api_router.include_router(
+    public_workshop_router,
+    tags=["Workshop - Public"],
 )
 
 # Tenant routes (CU29-CU31)

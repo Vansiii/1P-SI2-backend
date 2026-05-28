@@ -162,7 +162,8 @@ class IncidenteService:
             direccion_referencia=request.direccion_referencia,
             descripcion=request.descripcion,
             estado_actual="pendiente",
-            es_ambiguo=False,  # Se actualizará cuando se procese con IA
+            es_ambiguo=False,
+            assignment_mode=request.assignment_mode,
         )
         
         # Agregar a la sesión y hacer flush
@@ -285,105 +286,113 @@ class IncidenteService:
             estado="pendiente"
         )
 
-        # Trigger asynchronous AI processing and automatic assignment without delaying the incident response.
+        # Trigger asynchronous AI processing without delaying the incident response.
+        # For manual mode: AI analysis still runs (for categorization) but auto-assignment is skipped.
         try:
             from .ai_service import IncidentAIService
 
             IncidentAIService.schedule_incident_processing(created_incidente.id)
             
-            # Schedule automatic assignment after AI processing using asyncio
-            import asyncio
-            from ...modules.assignment.services import IntelligentAssignmentService
-            
-            # Create background task for automatic assignment
-            async def auto_assign_after_ai():
-                """Background task to assign incident after AI processing completes."""
-                try:
-                    # Wait for AI processing to complete with timeout
-                    from ...core.database import get_session_factory
-                    from ...core.config import get_settings
-                    session_factory = get_session_factory()
-                    settings = get_settings()
-                    
-                    check_interval = 2  # Revisar cada 2 segundos
-                    elapsed_seconds = 0
-                    max_wait_seconds = settings.ai_assignment_wait_timeout_seconds  # ✅ TIMEOUT MÁXIMO
-                    
-                    logger.info(
-                        f"⏳ Waiting for AI analysis to complete for incident {created_incidente.id} "
-                        f"(max wait: {max_wait_seconds}s)..."
-                    )
-                    
-                    # Esperar hasta el timeout máximo
-                    while elapsed_seconds < max_wait_seconds:
-                        await asyncio.sleep(check_interval)
-                        elapsed_seconds += check_interval
+            if created_incidente.assignment_mode != 'manual':
+                
+                # Schedule automatic assignment after AI processing using asyncio
+                import asyncio
+                from ...modules.assignment.services import IntelligentAssignmentService
+                
+                # Create background task for automatic assignment
+                async def auto_assign_after_ai():
+                    """Background task to assign incident after AI processing completes."""
+                    try:
+                        # Wait for AI processing to complete with timeout
+                        from ...core.database import get_session_factory
+                        from ...core.config import get_settings
+                        session_factory = get_session_factory()
+                        settings = get_settings()
                         
-                        # Check if AI analysis is complete
-                        async with session_factory() as check_session:
-                            from ...models.incidente import Incidente
-                            from sqlalchemy import select
-                            
-                            result = await check_session.execute(
-                                select(Incidente).where(Incidente.id == created_incidente.id)
-                            )
-                            incident = result.scalar_one_or_none()
-                            
-                            # AI is complete if prioridad_ia and categoria_ia are set
-                            if incident and incident.prioridad_ia and incident.categoria_ia:
-                                logger.info(
-                                    f"✅ AI analysis complete for incident {created_incidente.id} "
-                                    f"(prioridad={incident.prioridad_ia}, categoria={incident.categoria_ia}) "
-                                    f"after {elapsed_seconds} seconds"
-                                )
-                                
-                                # Note: AI analysis completion event will be published by the AI service
-                                # when it completes the analysis
-                                
-                                break
-                            
-                            # Log de progreso cada 30 segundos
-                            if elapsed_seconds % 30 == 0:
-                                logger.info(
-                                    f"⏳ Still waiting for AI analysis for incident {created_incidente.id} "
-                                    f"({elapsed_seconds}/{max_wait_seconds} seconds elapsed)..."
-                                )
-                    
-                    # ✅ TIMEOUT: Si llegamos aquí sin completar, proceder sin IA
-                    if elapsed_seconds >= max_wait_seconds:
-                        logger.warning(
-                            f"⚠️ AI analysis TIMEOUT for incident {created_incidente.id} "
-                            f"after {max_wait_seconds} seconds. Proceeding with assignment without AI priority."
-                        )
-                        # Continuar con asignación usando prioridad por defecto
-                    
-                    # Now assign with AI-determined priority (or default if timeout)
-                    async with session_factory() as bg_session:
-                        assignment_service = IntelligentAssignmentService(bg_session)
-                        result = await assignment_service.assign_incident_automatically(
-                            incident_id=created_incidente.id,
-                            force_ai_analysis=False  # AI already ran (or timed out)
+                        check_interval = 2  # Revisar cada 2 segundos
+                        elapsed_seconds = 0
+                        max_wait_seconds = settings.ai_assignment_wait_timeout_seconds  # ✅ TIMEOUT MÁXIMO
+                        
+                        logger.info(
+                            f"⏳ Waiting for AI analysis to complete for incident {created_incidente.id} "
+                            f"(max wait: {max_wait_seconds}s)..."
                         )
                         
-                        if result.success:
-                            logger.info(
-                                f"✅ Automatic assignment successful for new incident {created_incidente.id}: "
-                                f"workshop={result.assigned_workshop.workshop_name}, "
-                                f"technician={result.assigned_technician.first_name} {result.assigned_technician.last_name}"
-                            )
-                        else:
+                        # Esperar hasta el timeout máximo
+                        while elapsed_seconds < max_wait_seconds:
+                            await asyncio.sleep(check_interval)
+                            elapsed_seconds += check_interval
+                            
+                            # Check if AI analysis is complete
+                            async with session_factory() as check_session:
+                                from ...models.incidente import Incidente
+                                from sqlalchemy import select
+                                
+                                result = await check_session.execute(
+                                    select(Incidente).where(Incidente.id == created_incidente.id)
+                                )
+                                incident = result.scalar_one_or_none()
+                                
+                                # AI is complete if prioridad_ia and categoria_ia are set
+                                if incident and incident.prioridad_ia and incident.categoria_ia:
+                                    logger.info(
+                                        f"✅ AI analysis complete for incident {created_incidente.id} "
+                                        f"(prioridad={incident.prioridad_ia}, categoria={incident.categoria_ia}) "
+                                        f"after {elapsed_seconds} seconds"
+                                    )
+                                    
+                                    # Note: AI analysis completion event will be published by the AI service
+                                    # when it completes the analysis
+                                    
+                                    break
+                                
+                                # Log de progreso cada 30 segundos
+                                if elapsed_seconds % 30 == 0:
+                                    logger.info(
+                                        f"⏳ Still waiting for AI analysis for incident {created_incidente.id} "
+                                        f"({elapsed_seconds}/{max_wait_seconds} seconds elapsed)..."
+                                    )
+                        
+                        # ✅ TIMEOUT: Si llegamos aquí sin completar, proceder sin IA
+                        if elapsed_seconds >= max_wait_seconds:
                             logger.warning(
-                                f"⚠️ Automatic assignment failed for new incident {created_incidente.id}: "
-                                f"{result.error_message}"
+                                f"⚠️ AI analysis TIMEOUT for incident {created_incidente.id} "
+                                f"after {max_wait_seconds} seconds. Proceeding with assignment without AI priority."
+                            )
+                            # Continuar con asignación usando prioridad por defecto
+                        
+                        # Now assign with AI-determined priority (or default if timeout)
+                        async with session_factory() as bg_session:
+                            assignment_service = IntelligentAssignmentService(bg_session)
+                            result = await assignment_service.assign_incident_automatically(
+                                incident_id=created_incidente.id,
+                                force_ai_analysis=False  # AI already ran (or timed out)
                             )
                             
-                except Exception as e:
-                    logger.error(f"❌ Background auto-assignment failed for incident {created_incidente.id}: {str(e)}", exc_info=True)
-            
-            # Schedule the background task using asyncio.create_task
-            asyncio.create_task(auto_assign_after_ai())
-            logger.info(f"Scheduled auto-assignment task for incident {created_incidente.id}")
-            
+                            if result.success:
+                                logger.info(
+                                    f"✅ Automatic assignment successful for new incident {created_incidente.id}: "
+                                    f"workshop={result.assigned_workshop.workshop_name}, "
+                                    f"technician={result.assigned_technician.first_name} {result.assigned_technician.last_name}"
+                                )
+                            else:
+                                logger.warning(
+                                    f"⚠️ Automatic assignment failed for new incident {created_incidente.id}: "
+                                    f"{result.error_message}"
+                                )
+                                
+                    except Exception as e:
+                        logger.error(f"❌ Background auto-assignment failed for incident {created_incidente.id}: {str(e)}", exc_info=True)
+                
+                # Schedule the background task using asyncio.create_task
+                asyncio.create_task(auto_assign_after_ai())
+                logger.info(f"Scheduled auto-assignment task for incident {created_incidente.id}")
+                
+            else:
+                logger.info(
+                    f"Manual mode incident {created_incidente.id} — AI analysis scheduled but auto-assignment skipped"
+                )
+                
         except Exception as exc:
             logger.warning(
                 "Failed to schedule incident AI processing and auto-assignment",

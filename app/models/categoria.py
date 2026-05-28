@@ -14,7 +14,9 @@ class Categoria(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     nombre: Mapped[str] = mapped_column(String(100), nullable=False, unique=True, index=True)
+    descripcion: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    icon: Mapped[str | None] = mapped_column(String(50), nullable=True)
     
     # Relaciones
-    # servicios = relationship("Servicio", back_populates="categoria")
+    servicios = relationship("Servicio", back_populates="categoria")
 

@@ -179,6 +179,13 @@ class Permission(str, Enum):
     SUBSCRIPTION_REACTIVATE = "subscription:reactivate"
     SUBSCRIPTION_MANAGE = "subscription:manage"  # Admin: ver todas, suspender
 
+    # ========== MÓDULO 12: CATÁLOGO DE SERVICIOS (CU28) ==========
+    CATALOG_VIEW_OWN = "catalog:view_own"
+    CATALOG_CREATE = "catalog:create"
+    CATALOG_UPDATE = "catalog:update"
+    CATALOG_DELETE = "catalog:delete"
+    CATALOG_TOGGLE = "catalog:toggle"
+
 
 # Mapeo de permisos por rol basado en casos de uso
 ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
@@ -287,6 +294,13 @@ ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
         Permission.SUBSCRIPTION_CHANGE,
         Permission.SUBSCRIPTION_CANCEL,
         Permission.SUBSCRIPTION_REACTIVATE,
+
+        # CU28: Gestionar Catalogo de Servicios
+        Permission.CATALOG_VIEW_OWN,
+        Permission.CATALOG_CREATE,
+        Permission.CATALOG_UPDATE,
+        Permission.CATALOG_DELETE,
+        Permission.CATALOG_TOGGLE,
     },
     
     # A4: Técnico de Taller (Usuario de la App Móvil)

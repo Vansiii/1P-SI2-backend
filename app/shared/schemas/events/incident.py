@@ -99,6 +99,7 @@ class IncidentAssignmentTimeoutEvent(BaseEvent):
     workshop_name: str = Field(..., description="Name of the workshop")
     timeout_minutes: int = Field(default=5, description="Timeout duration in minutes")
     timed_out_at: datetime = Field(default_factory=datetime.utcnow, description="When timed out")
+    assignment_mode: str | None = Field(default=None, description="Assignment mode: auto or manual")
 
 
 class IncidentStatusChangedEvent(BaseEvent):

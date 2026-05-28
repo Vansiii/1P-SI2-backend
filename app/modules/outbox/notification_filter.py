@@ -244,7 +244,7 @@ class NotificationFilter:
         """Determina si notificar a un taller."""
         # Para eventos finales de reasignación/sin taller, incident.workshop_id puede ser null.
         # En esos casos el OutboxProcessor ya limita candidatos a talleres involucrados.
-        if event_type not in {"incident.no_workshop_available", "incident.status_changed"}:
+        if event_type not in {"incident.no_workshop_available", "incident.status_changed", "incident.assignment_timeout"}:
             # Solo notificar si es SU incidente asignado
             if incident_participants.get("workshop_id") != user_id:
                 return False
@@ -252,6 +252,7 @@ class NotificationFilter:
         # Eventos relevantes para talleres
         workshop_events = {
             "incident.assigned",
+            "incident.assignment_timeout",
             "incident.cancelled",
             "incident.work_completed",
             "incident.technician_arrived",  # Informativo

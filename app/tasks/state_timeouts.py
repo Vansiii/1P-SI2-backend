@@ -4,25 +4,30 @@ State Machine Timeout Handlers.
 This module implements automatic timeout detection and reassignment
 for incidents based on AI-determined priority levels.
 
-TIMEOUT LOGIC - CASCADING ASSIGNMENT:
+TIMEOUT LOGIC - CASCADING ASSIGNMENT (AUTO MODE):
 - AI assigns priority (alta/media/baja) to each incident
 - Each priority has different response time:
   * ALTA: 3 minutes
   * MEDIA: 5 minutes  
   * BAJA: 10 minutes
   
-CASCADING FLOW:
-1. IA asigna a Taller A → espera X minutos (según prioridad)
-2. Si A no responde → timeout → asigna a Taller B → espera X minutos
-3. Si B no responde → timeout → asigna a Taller C → espera X minutos
-4. ... continúa con TODOS los talleres disponibles
-5. Si NINGÚN taller del total responde → 'sin_taller_disponible'
-6. Notifica a ADMINISTRADOR (solo ellos ven estos incidentes)
 
-IMPORTANTE:
-- Talleres con timeout pueden SEGUIR aceptando
-- Cualquier taller en la cadena puede aceptar (el primero gana)
-- Solo después de intentar con TODOS → sin_taller_disponible
+CASCADING FLOW (AUTO):
+1. System assigns to Workshop A → waits X minutes
+2. If A doesn't respond → timeout → assigns to Workshop B → waits X minutes
+3. ... continues through ALL available workshops
+4. If NO workshop responds → 'sin_taller_disponible'
+
+MANUAL MODE TIMEOUT (CU27):
+- Client selects workshop manually → timer starts
+- If workshop doesn't respond → timeout
+- Backend clears taller_id (incident returns to pendiente without workshop)
+- Client notified to reselect or choose another
+- NO automatic reassignment (client decides)
+
+IMPORTANT:
+- Auto and manual modes are completely separated
+- Manual timeout does NOT trigger cascading reassignment
 """
 
 from datetime import datetime, timedelta, UTC
@@ -225,18 +230,29 @@ async def check_assignment_timeouts() -> List[int]:
                         
                         logger.info(
                             f"⏰ Assignment timeout: incident {incident.id}, workshop {attempt.workshop_id}, "
-                            f"priority={priority}, timeout={timeout_minutes}min"
+                            f"priority={priority}, timeout={timeout_minutes}min, mode={incident.assignment_mode}"
                         )
                         
                         # Publish timeout event
                         timeout_event = IncidentAssignmentTimeoutEvent(
                             incident_id=incident.id,
                             workshop_id=attempt.workshop_id,
-                            workshop_name=f"Workshop {attempt.workshop_id}",  # Simplified to avoid lazy loading
-                            timeout_minutes=timeout_minutes
+                            workshop_name=f"Workshop {attempt.workshop_id}",
+                            timeout_minutes=timeout_minutes,
+                            assignment_mode=incident.assignment_mode,
                         )
                         await EventPublisher.publish(session, timeout_event)
                         
+                        # MODO MANUAL: no reasignar automáticamente, solo limpiar taller y notificar
+                        if incident.assignment_mode == 'manual':
+                            logger.info(
+                                f"📋 Manual mode timeout for incident {incident.id} — "
+                                f"clearing workshop and notifying client"
+                            )
+                            incident.taller_id = None
+                            continue
+                        
+                        # MODO AUTO: añadir a lista para reasignación automática
                         timed_out_incidents.append(incident.id)
                         
                 except Exception as e:

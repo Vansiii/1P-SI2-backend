@@ -553,26 +553,33 @@ class IntelligentAssignmentService:
         self, workshop: Workshop, incident: Incidente
     ) -> float:
         """
-        Calculate specialization score based on incident category.
-        
-        TODO: Implement workshop specializations table
-        For now, return base score with slight variation based on category
+        Calculate specialization score based on workshop's actual service catalog.
+        Uses servicios_taller to check if the workshop offers services matching
+        the incident's IA-classified category.
         """
-        # Placeholder implementation
-        category_scores = {
-            "motor": 0.9,
-            "electrico": 0.8,
-            "bateria": 0.9,
-            "llanta": 1.0,  # Most common, all workshops can handle
-            "choque_leve": 0.7,
-            "combustible": 0.8,
-            "perdida_llaves": 0.6,
-            "llave_atrapada": 0.6,
-            "otros": 0.5,
-            "incierto": 0.5
-        }
-        
-        return category_scores.get(incident.categoria_ia or "otros", 0.5)
+        if not incident.categoria_ia:
+            return 0.5
+
+        from ...models.servicio_taller import ServicioTaller
+        from ...models.servicio import Servicio
+        from ...models.categoria import Categoria
+
+        result = await self.session.execute(
+            select(func.count(ServicioTaller.id))
+            .join(Servicio, ServicioTaller.servicio_id == Servicio.id)
+            .join(Categoria, Servicio.categoria_id == Categoria.id)
+            .where(
+                ServicioTaller.taller_id == workshop.id,
+                ServicioTaller.is_active == True,
+                ServicioTaller.deleted_at == None,
+                Categoria.nombre.ilike(f"%{incident.categoria_ia}%"),
+            )
+        )
+        matching_services = result.scalar_one()
+
+        if matching_services > 0:
+            return min(1.0, 0.7 + (matching_services * 0.1))
+        return 0.3
 
     def _should_use_ai_analysis(
         self,
