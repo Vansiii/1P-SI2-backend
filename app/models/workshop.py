@@ -44,6 +44,7 @@ class Workshop(User):
     tenant = relationship("Tenant", foreign_keys=[tenant_id], uselist=False, viewonly=True)
     technicians = relationship("Technician", back_populates="workshop", foreign_keys="[Technician.workshop_id]")
     incidentes = relationship("Incidente", back_populates="workshop")
+    catalogo = relationship("ServicioTaller", back_populates="taller")
     
     # Financial relationships (Module 6)
     transactions = relationship("Transaction", back_populates="workshop")

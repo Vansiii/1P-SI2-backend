@@ -30,6 +30,7 @@ class IncidenteCreateRequest(BaseModel):
     longitude: float = Field(..., ge=-180, le=180, description="Longitud de la ubicación")
     direccion_referencia: Optional[str] = Field(None, max_length=255, description="Dirección de referencia")
     descripcion: str = Field(..., min_length=10, max_length=2000, description="Descripción del problema")
+    assignment_mode: str = Field(default="auto", description="Modo de asignación: auto o manual")
     
     # Evidencias (URLs de archivos ya subidos)
     imagenes: List[str] = Field(default_factory=list, description="URLs de imágenes ya subidas")
@@ -125,6 +126,7 @@ class IncidenteResponse(BaseModel):
     longitude: float
     direccion_referencia: Optional[str]
     descripcion: str
+    assignment_mode: str
     categoria_ia: Optional[str]
     prioridad_ia: Optional[str]
     resumen_ia: Optional[str]

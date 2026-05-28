@@ -88,6 +88,11 @@ class Incidente(Base):
         String(50), nullable=False, default="pendiente", index=True
     )  # pendiente, asignado, en_proceso, resuelto, cancelado
     
+    # Modo de asignación (CU27)
+    assignment_mode: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="auto", index=True
+    )  # auto, manual
+    
     # Timestamps de tracking
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
     updated_at: Mapped[datetime] = mapped_column(

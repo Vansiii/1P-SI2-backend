@@ -15,9 +15,10 @@ class Servicio(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True)
     nombre: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    descripcion: Mapped[str | None] = mapped_column(String(500), nullable=True)
     categoria_id: Mapped[int] = mapped_column(ForeignKey("categorias.id"), nullable=False, index=True)
     
     # Relaciones
-    # categoria = relationship("Categoria", back_populates="servicios")
-    # talleres = relationship("ServicioTaller", back_populates="servicio")
+    categoria = relationship("Categoria", back_populates="servicios")
+    talleres = relationship("ServicioTaller", back_populates="servicio")
 
