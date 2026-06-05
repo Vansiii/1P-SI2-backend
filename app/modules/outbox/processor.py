@@ -364,6 +364,16 @@ class OutboxProcessor:
             workshop_id = event_data.get("workshop_id")
             if workshop_id:
                 candidate_recipients.add(workshop_id)
+
+        # For incident.reassigned, notify both previous and new workshop explicitly.
+        if event_type == "incident.reassigned":
+            previous_workshop_id = event_data.get("previous_workshop_id")
+            new_workshop_id = event_data.get("new_workshop_id")
+            if previous_workshop_id:
+                candidate_recipients.add(previous_workshop_id)
+            if new_workshop_id:
+                candidate_recipients.add(new_workshop_id)
+                incident_participants["workshop_id"] = new_workshop_id
         
         # For incident.assignment_timeout, add workshops that had attempts
         if event_type == "incident.assignment_timeout" and incident_id:
@@ -420,6 +430,7 @@ class OutboxProcessor:
         # include admins as recipients (WebSocket-only by NotificationFilter).
         admin_incident_events = {
             "incident.assigned",
+            "incident.reassigned",
             "incident.assignment_accepted",
             "incident.assignment_rejected",
             "incident.status_changed",
@@ -558,7 +569,12 @@ class OutboxProcessor:
         event_data["event_id"] = str(outbox_event.event_id)
         event_data["event_type"] = outbox_event.event_type
 
-        strategy = self.strategy_factory.get_strategy(outbox_event.event_type)
+        user_type_result = await session.execute(
+            select(User.user_type).where(User.id == user_id).limit(1)
+        )
+        user_type = user_type_result.scalar_one_or_none() or "unknown"
+
+        strategy = self.strategy_factory.get_strategy(outbox_event.event_type, user_type)
         
         logger.debug(
             f"Using {strategy.__class__.__name__} for event {outbox_event.event_type} "

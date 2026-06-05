@@ -20,10 +20,13 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional
 from enum import Enum
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...core.websocket import ConnectionManager
 from ...core.logging import get_logger
+from ...models.user import User
+from .notification_filter import NotificationFilter, DeliveryMode
 
 logger = get_logger(__name__)
 
@@ -201,7 +204,32 @@ class NotificationFormatter:
     }
     
     @staticmethod
-    def get_title(event_type: str) -> str:
+    def get_title(
+        event_type: str,
+        recipient_type: str = "unknown",
+        event_data: Optional[dict] = None,
+    ) -> str:
+        if event_type == "incident.assigned":
+            if recipient_type == "workshop":
+                return "Nueva solicitud"
+            if recipient_type == "admin":
+                return "Incidente asignado"
+
+        if event_type == "incident.reassigned":
+            if recipient_type == "workshop":
+                return "Solicitud reasignada"
+            if recipient_type == "admin":
+                return "Incidente reasignado"
+
+        if event_type == "incident.assignment_timeout":
+            if recipient_type == "workshop":
+                return "Solicitud vencida"
+            if recipient_type == "admin":
+                return "Tiempo de asignación agotado"
+
+        if event_type == "incident.assignment_rejected" and recipient_type in {"workshop", "admin"}:
+            return "Solicitud rechazada"
+
         return NotificationFormatter.TITLE_MAP.get(event_type, NotificationFormatter._fallback_title(event_type))
     
     @staticmethod
@@ -213,9 +241,68 @@ class NotificationFormatter:
         return "MecanicoYa"
     
     @staticmethod
-    def get_body(event_data: dict) -> str:
+    def get_body(event_data: dict, recipient_type: str = "unknown") -> str:
         event_type = event_data.get("event_type", "")
         incident_id = event_data.get("incident_id", "")
+        assignment_mode = event_data.get("assignment_mode")
+        workshop_name = event_data.get("workshop_name") or event_data.get("new_workshop_name")
+        technician_name = event_data.get("technician_name")
+
+        if event_type == "incident.assignment_rejected" and assignment_mode == "manual":
+            if recipient_type == "admin":
+                return (
+                    f"El taller rechazó la solicitud #{incident_id}. "
+                    "El cliente puede elegir otro taller."
+                )
+            if recipient_type == "workshop":
+                return f"Rechazaste la solicitud #{incident_id}."
+            return (
+                f"El taller rechazó tu solicitud #{incident_id}. "
+                "Puedes elegir otro taller."
+            )
+
+        if event_type == "incident.assignment_timeout" and assignment_mode == "manual":
+            if recipient_type == "admin":
+                return (
+                    f"El taller no respondió la solicitud #{incident_id}. "
+                    "El cliente puede elegir otro taller."
+                )
+            if recipient_type == "workshop":
+                return f"La solicitud #{incident_id} venció por falta de respuesta."
+            return (
+                f"El taller no respondió a tu solicitud #{incident_id}. "
+                "Puedes elegir otro taller."
+            )
+
+        if event_type == "incident.assigned":
+            if recipient_type == "workshop":
+                return f"Recibiste la solicitud #{incident_id}."
+            if recipient_type == "admin":
+                return (
+                    f"La solicitud #{incident_id} fue asignada a {workshop_name}."
+                    if workshop_name
+                    else f"La solicitud #{incident_id} fue asignada a un taller."
+                )
+
+        if event_type == "incident.assignment_accepted":
+            if recipient_type == "workshop":
+                return (
+                    f"Aceptaste la solicitud #{incident_id} con {technician_name}."
+                    if technician_name
+                    else f"Aceptaste la solicitud #{incident_id}."
+                )
+            if recipient_type == "admin":
+                return f"El taller aceptó la solicitud #{incident_id}."
+
+        if event_type == "incident.reassigned":
+            if recipient_type == "workshop":
+                return f"La solicitud #{incident_id} fue reasignada."
+            if recipient_type == "admin":
+                return (
+                    f"La solicitud #{incident_id} fue reasignada a {workshop_name}."
+                    if workshop_name
+                    else f"La solicitud #{incident_id} fue reasignada."
+                )
         
         body_templates = {
             "incident.created": f"Tu solicitud #{incident_id} esta siendo procesada",
@@ -348,6 +435,7 @@ class StrategyConfig:
         "incident.no_workshop_available",
         "incident.assignment_timeout",
         "incident.cancelled",
+        "chat.message_sent",
     }
     
     # Event type prefixes
@@ -523,10 +611,26 @@ class PushNotificationStrategy(DeliveryStrategy):
             
             # Extract event type
             event_type = event_data.get("event_type", "")
-            
+
+            user_result = await session.execute(
+                select(User.user_type).where(User.id == user_id).limit(1)
+            )
+            recipient_type = (user_result.scalar_one_or_none() or "unknown").strip().lower()
+
+            if event_type == "chat.message_sent":
+                incident_id = event_data.get("incident_id")
+                if incident_id and not event_data.get("click_action"):
+                    if recipient_type == "workshop":
+                        event_data["click_action"] = f"/workshop/incidents/{incident_id}"
+                    elif recipient_type == "admin":
+                        event_data["click_action"] = f"/admin/incident/{incident_id}"
+                    else:
+                        event_data["click_action"] = f"/incidents/{incident_id}"
+                event_data.setdefault("type", "chat_message")
+
             # Format notification
-            title = self.formatter.get_title(event_type)
-            body = self.formatter.get_body(event_data)
+            title = self.formatter.get_title(event_type, recipient_type, event_data)
+            body = self.formatter.get_body(event_data, recipient_type)
             
             # Create notification data
             notification_data = PushNotificationData(
@@ -708,7 +812,7 @@ class DeliveryStrategyFactory:
         self._push_strategy = PushNotificationStrategy()
         self._hybrid_strategy = HybridDeliveryStrategy(ws_manager)
     
-    def get_strategy(self, event_type: str) -> DeliveryStrategy:
+    def get_strategy(self, event_type: str, user_type: str = "unknown") -> DeliveryStrategy:
         """
         Get appropriate delivery strategy for event type.
         
@@ -718,6 +822,15 @@ class DeliveryStrategyFactory:
         Returns:
             DeliveryStrategy instance
         """
+        delivery_mode = NotificationFilter.get_delivery_mode(event_type, user_type)
+
+        if delivery_mode == DeliveryMode.WEBSOCKET_ONLY:
+            return self._websocket_strategy
+        if delivery_mode == DeliveryMode.PUSH_ONLY:
+            return self._push_strategy
+        if delivery_mode == DeliveryMode.SILENT:
+            return self._websocket_strategy
+
         strategy_type = StrategyConfig.get_strategy_type(event_type)
         
         if strategy_type == StrategyType.WEBSOCKET:

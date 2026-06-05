@@ -290,6 +290,25 @@ class PushNotificationService:
             logger.error(f"Error getting user tokens: {str(e)}")
             return []
 
+    async def get_user_token_records(self, user_id: int) -> List[PushToken]:
+        """
+        Get all active FCM token records for a user.
+
+        Returns active rows so delivery can be customized per platform and
+        duplicate web/browser notifications can be avoided.
+        """
+        try:
+            records = await self.session.scalars(
+                select(PushToken).where(
+                    PushToken.user_id == user_id,
+                    PushToken.is_active == True
+                )
+            )
+            return list(records)
+        except Exception as e:
+            logger.error(f"Error getting user token records: {str(e)}")
+            return []
+
     async def send_to_user(
         self,
         user_id: int,
@@ -312,15 +331,14 @@ class PushNotificationService:
             return False
 
         try:
-            # Get user's FCM tokens
-            tokens = await self.get_user_tokens(user_id)
-            
-            if not tokens:
+            token_records = await self.get_user_token_records(user_id)
+
+            if not token_records:
                 logger.info(f"No FCM tokens found for user {user_id}")
                 return False
 
             # Send notification
-            success = await self._send_to_tokens(tokens, notification_data)
+            success = await self._send_to_token_records(token_records, notification_data)
 
             # Save to database if requested
             if save_to_db and success:
@@ -358,10 +376,34 @@ class PushNotificationService:
         
         return results
 
+    async def _send_to_token_records(
+        self,
+        token_records: List[PushToken],
+        notification_data: PushNotificationData
+    ) -> bool:
+        if not token_records:
+            return False
+
+        grouped_tokens: dict[str, list[str]] = {}
+        for record in token_records:
+            grouped_tokens.setdefault(record.platform, []).append(record.token)
+
+        at_least_one_success = False
+        for platform, platform_tokens in grouped_tokens.items():
+            platform_success = await self._send_to_tokens(
+                platform_tokens,
+                notification_data,
+                platform=platform,
+            )
+            at_least_one_success = at_least_one_success or platform_success
+
+        return at_least_one_success
+
     async def _send_to_tokens(
         self,
         tokens: List[str],
-        notification_data: PushNotificationData
+        notification_data: PushNotificationData,
+        platform: Optional[str] = None,
     ) -> bool:
         """
         Send notification to specific FCM tokens.
@@ -392,48 +434,57 @@ class PushNotificationService:
                 or f"{notification_data.title}:{notification_data.body}"
             )
 
-            # Create FCM message
-            message = messaging.MulticastMessage(
-                notification=messaging.Notification(
-                    title=notification_data.title,
-                    body=notification_data.body,
-                    image=notification_data.image_url
-                ),
-                data=str_data,
-                android=messaging.AndroidConfig(
-                    notification=messaging.AndroidNotification(
-                        sound=notification_data.sound,
-                        click_action=notification_data.click_action
-                    )
-                ),
-                apns=messaging.APNSConfig(
-                    payload=messaging.APNSPayload(
-                        aps=messaging.Aps(
-                            sound=notification_data.sound,
-                            badge=notification_data.badge
+            common_kwargs = {
+                "data": str_data,
+                "tokens": unique_tokens,
+            }
+
+            if platform == "web":
+                message = messaging.MulticastMessage(
+                    webpush=messaging.WebpushConfig(
+                        notification=messaging.WebpushNotification(
+                            title=notification_data.title,
+                            body=notification_data.body,
+                            icon='/assets/icons/icon-192x192.png',
+                            badge='/assets/icons/icon-72x72.png',
+                            require_interaction=True,
+                            tag=event_tag,
                         )
-                    )
-                ),
-                webpush=messaging.WebpushConfig(
-                    notification=messaging.WebpushNotification(
+                    ),
+                    **common_kwargs,
+                )
+            else:
+                message = messaging.MulticastMessage(
+                    notification=messaging.Notification(
                         title=notification_data.title,
                         body=notification_data.body,
-                        icon='/assets/icons/icon-192x192.png',
-                        badge='/assets/icons/icon-72x72.png',
-                        require_interaction=True,
-                        tag=event_tag,
-                    )
-                    # Note: fcm_options.link removed - not needed for web push
-                    # Web apps should handle navigation via service worker using notification.data
-                ),
-                tokens=unique_tokens
-            )
+                        image=notification_data.image_url
+                    ),
+                    android=messaging.AndroidConfig(
+                        notification=messaging.AndroidNotification(
+                            sound=notification_data.sound,
+                            click_action=notification_data.click_action
+                        )
+                    ),
+                    apns=messaging.APNSConfig(
+                        payload=messaging.APNSPayload(
+                            aps=messaging.Aps(
+                                sound=notification_data.sound,
+                                badge=notification_data.badge
+                            )
+                        )
+                    ),
+                    **common_kwargs,
+                )
 
             # Send message
             response = messaging.send_each_for_multicast(message)
             
             # Log results
-            logger.info(f"Push notification sent: {response.success_count}/{len(unique_tokens)} successful")
+            logger.info(
+                f"Push notification sent ({platform or 'mixed'}): "
+                f"{response.success_count}/{len(unique_tokens)} successful"
+            )
             
             # Handle failed tokens
             if response.failure_count > 0:

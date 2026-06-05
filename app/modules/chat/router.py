@@ -18,8 +18,19 @@ from .schemas import (
     MarkAsReadRequest
 )
 from ...models.user import User
+from ...models.incidente import Incidente
 
 router = APIRouter(prefix="/chat", tags=["chat"])
+
+
+def _has_incident_chat_access(incident: Incidente, current_user: User) -> bool:
+    if current_user.user_type == "client":
+        return incident.client_id == current_user.id
+    if current_user.user_type == "workshop":
+        return incident.taller_id == current_user.id
+    if current_user.user_type == "technician":
+        return incident.tecnico_id == current_user.id
+    return False
 
 
 @router.post("/incidents/{incident_id}/messages", response_model=MessageResponse, status_code=status.HTTP_201_CREATED)
@@ -70,16 +81,14 @@ async def get_incident_conversation(
     current_user: User = Depends(get_current_user)
 ):
     """
-    Get or create conversation for an incident.
+    Get active conversation for an incident.
     
     This endpoint:
-    - Returns existing conversation if it exists
-    - Creates a new conversation if it doesn't exist (for accepted incidents)
+    - Returns the active conversation if it exists
     - Validates that the user has access to the incident
     
     **Permissions:** Client, assigned workshop, or assigned technician
     """
-    from ...models.incidente import Incidente
     from sqlalchemy import select
     
     chat_service = ChatService(db)
@@ -95,33 +104,19 @@ async def get_incident_conversation(
             detail=f"Incident {incident_id} not found"
         )
     
-    # Check permissions
-    has_access = False
-    if current_user.user_type == "client" and incident.client_id == current_user.id:
-        has_access = True
-    elif current_user.user_type == "workshop" and incident.taller_id == current_user.id:
-        has_access = True
-    elif current_user.user_type == "technician":
-        # Check if technician is assigned to this incident
-        from ...models.technician import Technician
-        technician = await db.scalar(
-            select(Technician).where(Technician.user_id == current_user.id)
-        )
-        if technician and incident.tecnico_id == technician.id:
-            has_access = True
-    
-    if not has_access:
+    if not _has_incident_chat_access(incident, current_user):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You don't have access to this incident's conversation"
         )
     
-    # Get or create conversation
-    conversation = await chat_service.get_or_create_conversation(
-        incident_id=incident_id,
-        client_id=incident.client_id,
-        workshop_id=incident.taller_id
-    )
+    conversation = await chat_service.get_conversation(incident_id)
+
+    if not conversation:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Conversation for incident {incident_id} not found"
+        )
 
     return conversation
 
@@ -144,6 +139,23 @@ async def get_messages(
     **Permissions:** Client or assigned technician/workshop staff
     """
     chat_service = ChatService(db)
+    from sqlalchemy import select
+
+    incident = await db.scalar(
+        select(Incidente).where(Incidente.id == incident_id)
+    )
+
+    if not incident:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Incident {incident_id} not found"
+        )
+
+    if not _has_incident_chat_access(incident, current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this incident's conversation"
+        )
 
     messages = await chat_service.get_messages(
         incident_id=incident_id,
@@ -172,6 +184,23 @@ async def mark_messages_as_read(
     **Permissions:** Client or assigned technician/workshop staff
     """
     chat_service = ChatService(db)
+    from sqlalchemy import select
+
+    incident = await db.scalar(
+        select(Incidente).where(Incidente.id == incident_id)
+    )
+
+    if not incident:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Incident {incident_id} not found"
+        )
+
+    if not _has_incident_chat_access(incident, current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this incident's conversation"
+        )
 
     try:
         marked_count = await chat_service.mark_messages_as_read(
@@ -205,6 +234,23 @@ async def get_conversation(
     **Permissions:** Client or assigned technician/workshop staff
     """
     chat_service = ChatService(db)
+    from sqlalchemy import select
+
+    incident = await db.scalar(
+        select(Incidente).where(Incidente.id == incident_id)
+    )
+
+    if not incident:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Incident {incident_id} not found"
+        )
+
+    if not _has_incident_chat_access(incident, current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this incident's conversation"
+        )
 
     conversation = await chat_service.get_conversation(incident_id)
 
@@ -256,6 +302,23 @@ async def get_unread_count(
     **Permissions:** Client or assigned technician/workshop staff
     """
     chat_service = ChatService(db)
+    from sqlalchemy import select
+
+    incident = await db.scalar(
+        select(Incidente).where(Incidente.id == incident_id)
+    )
+
+    if not incident:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Incident {incident_id} not found"
+        )
+
+    if not _has_incident_chat_access(incident, current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this incident's conversation"
+        )
 
     unread_count = await chat_service.get_unread_count(
         incident_id=incident_id,
@@ -282,6 +345,23 @@ async def get_conversation_statistics(
     **Permissions:** Client or assigned technician/workshop staff
     """
     chat_service = ChatService(db)
+    from sqlalchemy import select
+
+    incident = await db.scalar(
+        select(Incidente).where(Incidente.id == incident_id)
+    )
+
+    if not incident:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Incident {incident_id} not found"
+        )
+
+    if not _has_incident_chat_access(incident, current_user):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You don't have access to this incident's conversation"
+        )
 
     stats = await chat_service.get_conversation_statistics(incident_id)
 
@@ -342,13 +422,9 @@ async def send_typing_indicator(
     
     **Permissions:** Client or assigned technician/workshop staff
     """
-    from ...core.websocket_events import emit_to_incident_room, EventTypes
-    from datetime import datetime
-    
-    # Verify user has access to this incident
-    from ...models.incidente import Incidente
     from sqlalchemy import select
-    
+    chat_service = ChatService(db)
+
     incident = await db.scalar(
         select(Incidente).where(Incidente.id == incident_id)
     )
@@ -359,30 +435,15 @@ async def send_typing_indicator(
             detail=f"Incident {incident_id} not found"
         )
     
-    # Check permissions
-    has_access = (
-        (current_user.user_type == "client" and incident.client_id == current_user.id) or
-        (current_user.user_type == "workshop" and incident.taller_id == current_user.id) or
-        (current_user.user_type == "technician" and incident.tecnico_id == current_user.id)
-    )
-    
-    if not has_access:
+    if not _has_incident_chat_access(incident, current_user):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You don't have access to this incident's conversation"
         )
-    
-    # Emit typing event (exclude sender)
-    await emit_to_incident_room(
+
+    await chat_service.notify_user_typing(
         incident_id=incident_id,
-        event_type=EventTypes.USER_TYPING,
-        data={
-            "user_id": current_user.id,
-            "user_name": f"{current_user.first_name} {current_user.last_name}",
-            "incident_id": incident_id,
-            "timestamp": datetime.utcnow().isoformat()
-        },
-        exclude_user=current_user.id
+        user_id=current_user.id,
     )
     
     return success_response(
@@ -406,13 +467,9 @@ async def send_typing_stop_indicator(
     
     **Permissions:** Client or assigned technician/workshop staff
     """
-    from ...core.websocket_events import emit_to_incident_room, EventTypes
-    from datetime import datetime
-    
-    # Verify user has access to this incident
-    from ...models.incidente import Incidente
     from sqlalchemy import select
-    
+    chat_service = ChatService(db)
+
     incident = await db.scalar(
         select(Incidente).where(Incidente.id == incident_id)
     )
@@ -423,30 +480,15 @@ async def send_typing_stop_indicator(
             detail=f"Incident {incident_id} not found"
         )
     
-    # Check permissions
-    has_access = (
-        (current_user.user_type == "client" and incident.client_id == current_user.id) or
-        (current_user.user_type == "workshop" and incident.taller_id == current_user.id) or
-        (current_user.user_type == "technician" and incident.tecnico_id == current_user.id)
-    )
-    
-    if not has_access:
+    if not _has_incident_chat_access(incident, current_user):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You don't have access to this incident's conversation"
         )
-    
-    # Emit typing stop event (exclude sender)
-    await emit_to_incident_room(
+
+    await chat_service.notify_user_stopped_typing(
         incident_id=incident_id,
-        event_type=EventTypes.USER_STOPPED_TYPING,
-        data={
-            "user_id": current_user.id,
-            "user_name": f"{current_user.first_name} {current_user.last_name}",
-            "incident_id": incident_id,
-            "timestamp": datetime.utcnow().isoformat()
-        },
-        exclude_user=current_user.id
+        user_id=current_user.id,
     )
     
     return success_response(
@@ -506,13 +548,7 @@ async def mark_message_as_read(
             detail="Incident not found"
         )
     
-    has_access = (
-        (current_user.user_type == "client" and incident.client_id == current_user.id) or
-        (current_user.user_type == "workshop" and incident.taller_id == current_user.id) or
-        (current_user.user_type == "technician" and incident.tecnico_id == current_user.id)
-    )
-    
-    if not has_access:
+    if not _has_incident_chat_access(incident, current_user):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You don't have access to this conversation"

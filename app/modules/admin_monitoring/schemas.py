@@ -71,6 +71,8 @@ class WorkshopWithStatus(BaseModel):
     """Workshop with availability status"""
     id: int
     workshop_name: str
+    is_active: bool = True
+    is_available: bool = True
     is_verified: bool
     address: Optional[str] = None
     coverage_radius_km: float

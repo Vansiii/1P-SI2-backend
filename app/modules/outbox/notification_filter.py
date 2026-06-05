@@ -52,6 +52,7 @@ class NotificationFilter:
         "incident.work_started",
         "incident.assignment_accepted",
         "incident.assignment_rejected",
+        "incident.reassigned",
         "incident.reassignment_started",
         "tracking.started",
         "tracking.ended",
@@ -320,6 +321,13 @@ class NotificationFilter:
         """
         event_type = NotificationFilter._normalize_event_type(event_type)
         user_type = NotificationFilter._normalize_user_type(user_type)
+
+        # Los administradores monitorean en tiempo real por WebSocket.
+        # No deben recibir push operativas de incidentes para evitar ruido y
+        # mensajes con redacción destinada al cliente/taller.
+        if user_type == "admin":
+            if event_type.startswith(("incident.", "dashboard.", "audit.", "workshop.", "technician.")):
+                return DeliveryMode.WEBSOCKET_ONLY
 
         # Eventos silenciosos
         if event_type in NotificationFilter.SILENT_EVENTS:

@@ -15,6 +15,7 @@ class SendMessageRequest(BaseModel):
 class MessageResponse(BaseModel):
     """Schema for message response."""
     id: int
+    conversation_id: int
     incident_id: int
     sender_id: int
     sender_name: Optional[str] = None

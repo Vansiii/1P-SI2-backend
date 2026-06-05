@@ -40,7 +40,9 @@ class ChatService:
         self,
         incident_id: int,
         client_id: int,
-        workshop_id: Optional[int] = None
+        workshop_id: Optional[int] = None,
+        *,
+        force_new: bool = False,
     ) -> Conversation:
         """
         Get existing conversation or create new one for an incident.
@@ -53,15 +55,17 @@ class ChatService:
         Returns:
             Conversation object
         """
-        # Try to get existing conversation
-        conversation = await self.session.scalar(
-            select(Conversation).where(Conversation.incident_id == incident_id)
-        )
+        if not force_new:
+            query = select(Conversation).where(Conversation.incident_id == incident_id)
+            if workshop_id is not None:
+                query = query.where(Conversation.workshop_id == workshop_id)
+            conversation = await self.session.scalar(
+                query.order_by(Conversation.created_at.desc(), Conversation.id.desc())
+            )
 
-        if conversation:
-            return conversation
+            if conversation:
+                return conversation
 
-        # Create new conversation
         conversation = Conversation(
             incident_id=incident_id,
             client_id=client_id,
@@ -76,6 +80,35 @@ class ChatService:
 
         logger.info(f"Created conversation {conversation.id} for incident {incident_id}")
         return conversation
+
+    async def get_active_conversation(
+        self,
+        incident: Incidente,
+        *,
+        create_if_missing: bool = False,
+    ) -> Optional[Conversation]:
+        """Return the active conversation for the incident's current workshop."""
+        workshop_id = incident.taller_id
+        if not workshop_id:
+            return None
+
+        conversation = await self.session.scalar(
+            select(Conversation)
+            .where(
+                Conversation.incident_id == incident.id,
+                Conversation.workshop_id == workshop_id,
+            )
+            .order_by(Conversation.created_at.desc(), Conversation.id.desc())
+        )
+
+        if conversation or not create_if_missing:
+            return conversation
+
+        return await self.get_or_create_conversation(
+            incident_id=incident.id,
+            client_id=incident.client_id,
+            workshop_id=workshop_id,
+        )
 
     async def send_message(
         self,
@@ -134,7 +167,9 @@ class ChatService:
             )
             # For now, allow any workshop user if workshop is assigned
             # TODO: Add more granular permission check
-            is_workshop_staff = workshop_user is not None
+            is_workshop_staff = (
+                workshop_user is not None and incident.taller_id == sender_id
+            )
 
         if not (is_client or is_workshop_staff or is_technician):
             raise ValidationError(
@@ -143,11 +178,12 @@ class ChatService:
             )
 
         # Get or create conversation
-        conversation = await self.get_or_create_conversation(
-            incident_id=incident_id,
-            client_id=incident.client_id,
-            workshop_id=incident.taller_id
+        conversation = await self.get_active_conversation(
+            incident,
+            create_if_missing=True,
         )
+        if not conversation:
+            raise ValidationError("No hay una conversación activa para este incidente")
 
         # Create message
         message = Message(
@@ -182,11 +218,15 @@ class ChatService:
 
         chat_event = ChatMessageSentEvent(
             message_id=message.id,
+            conversation_id=conversation.id,
             incident_id=incident_id,
+            workshop_id=conversation.workshop_id,
             sender_id=sender_id,
             sender_name=sender_name,
             sender_role=sender_role or "system",
-            content=message_text
+            content=message_text,
+            message_type=message.message_type,
+            click_action=f"/incidents/{incident_id}/chat",
         )
         await EventPublisher.publish(self.session, chat_event)
 
@@ -211,6 +251,7 @@ class ChatService:
         # Return enriched message dict
         return {
             "id": message.id,
+            "conversation_id": conversation.id,
             "incident_id": message.incident_id,
             "sender_id": message.sender_id,
             "sender_name": sender_name,
@@ -223,6 +264,7 @@ class ChatService:
             "updated_at": message.updated_at,
         }
 
+
     async def get_messages(
         self,
         incident_id: int,
@@ -233,10 +275,23 @@ class ChatService:
         """
         Get messages for an incident, enriched with sender name and role.
         """
+        incident = await self.session.scalar(
+            select(Incidente).where(Incidente.id == incident_id)
+        )
+        if not incident:
+            raise NotFoundError(f"Incident {incident_id} not found")
+
+        conversation = await self.get_active_conversation(incident)
+        if not conversation:
+            return []
+
         query = (
             select(Message, User)
             .join(User, Message.sender_id == User.id, isouter=True)
-            .where(Message.incident_id == incident_id)
+            .where(
+                Message.incident_id == incident_id,
+                Message.created_at >= conversation.created_at,
+            )
             .order_by(Message.created_at.desc())
             .limit(limit)
             .offset(offset)
@@ -260,6 +315,7 @@ class ChatService:
 
             messages.append({
                 "id": message.id,
+                "conversation_id": conversation.id,
                 "incident_id": message.incident_id,
                 "sender_id": message.sender_id,
                 "sender_name": sender_name,
@@ -297,12 +353,17 @@ class ChatService:
         if not incident:
             raise NotFoundError(f"Incident {incident_id} not found")
 
+        conversation = await self.get_active_conversation(incident)
+        if not conversation:
+            return 0
+
         # Get unread messages before marking them as read (to publish events)
         unread_messages = await self.session.scalars(
             select(Message)
             .where(
                 and_(
                     Message.incident_id == incident_id,
+                    Message.created_at >= conversation.created_at,
                     Message.sender_id != user_id,
                     Message.is_read == False
                 )
@@ -317,6 +378,7 @@ class ChatService:
             .where(
                 and_(
                     Message.incident_id == incident_id,
+                    Message.created_at >= conversation.created_at,
                     Message.sender_id != user_id,
                     Message.is_read == False
                 )
@@ -328,10 +390,6 @@ class ChatService:
         )
 
         # Update conversation unread count
-        conversation = await self.session.scalar(
-            select(Conversation).where(Conversation.incident_id == incident_id)
-        )
-
         if conversation:
             if user_id == incident.client_id:
                 conversation.unread_count_client = 0
@@ -350,6 +408,7 @@ class ChatService:
                 try:
                     read_event = ChatMessageReadEvent(
                         message_id=message.id,
+                        conversation_id=conversation.id,
                         incident_id=incident_id,
                         sender_id=message.sender_id,
                         read_by=user_id,
@@ -377,9 +436,12 @@ class ChatService:
         Returns:
             Conversation or None if not found
         """
-        return await self.session.scalar(
-            select(Conversation).where(Conversation.incident_id == incident_id)
+        incident = await self.session.scalar(
+            select(Incidente).where(Incidente.id == incident_id)
         )
+        if not incident:
+            return None
+        return await self.get_active_conversation(incident)
 
     async def get_user_conversations(
         self,
@@ -398,21 +460,36 @@ class ChatService:
         Returns:
             List of conversations ordered by last message time
         """
+        latest_conversation_ids = (
+            select(func.max(Conversation.id).label("conversation_id"))
+            .join(Incidente, Incidente.id == Conversation.incident_id)
+        )
+
         if is_client:
-            query = (
-                select(Conversation)
-                .where(Conversation.client_id == user_id)
-                .order_by(Conversation.last_message_at.desc().nullslast())
-                .limit(limit)
+            latest_conversation_ids = latest_conversation_ids.where(
+                Conversation.client_id == user_id,
+                Conversation.workshop_id == Incidente.taller_id,
             )
         else:
-            # For workshop staff, get conversations where they are assigned
-            query = (
-                select(Conversation)
-                .where(Conversation.workshop_id == user_id)
-                .order_by(Conversation.last_message_at.desc().nullslast())
-                .limit(limit)
+            latest_conversation_ids = latest_conversation_ids.where(
+                Conversation.workshop_id == user_id,
+                Incidente.taller_id == user_id,
             )
+
+        latest_conversation_ids = latest_conversation_ids.group_by(
+            Conversation.incident_id,
+            Conversation.workshop_id,
+        ).subquery()
+
+        query = (
+            select(Conversation)
+            .join(
+                latest_conversation_ids,
+                Conversation.id == latest_conversation_ids.c.conversation_id,
+            )
+            .order_by(Conversation.last_message_at.desc().nullslast(), Conversation.id.desc())
+            .limit(limit)
+        )
 
         result = await self.session.scalars(query)
         return list(result.all())
@@ -440,9 +517,7 @@ class ChatService:
         if not incident:
             return 0
 
-        conversation = await self.session.scalar(
-            select(Conversation).where(Conversation.incident_id == incident_id)
-        )
+        conversation = await self.get_active_conversation(incident)
 
         if not conversation:
             return 0
@@ -501,9 +576,32 @@ class ChatService:
             Dictionary with conversation statistics
         """
         # Count total messages
+        incident = await self.session.scalar(
+            select(Incidente).where(Incidente.id == incident_id)
+        )
+        if not incident:
+            return {
+                "total_messages": 0,
+                "unread_messages": 0,
+                "first_message_at": None,
+                "last_message_at": None
+            }
+
+        conversation = await self.get_active_conversation(incident)
+        if not conversation:
+            return {
+                "total_messages": 0,
+                "unread_messages": 0,
+                "first_message_at": None,
+                "last_message_at": None
+            }
+
         total_messages = await self.session.scalar(
             select(func.count(Message.id))
-            .where(Message.incident_id == incident_id)
+            .where(
+                Message.incident_id == incident_id,
+                Message.created_at >= conversation.created_at,
+            )
         )
 
         # Count unread messages
@@ -512,6 +610,7 @@ class ChatService:
             .where(
                 and_(
                     Message.incident_id == incident_id,
+                    Message.created_at >= conversation.created_at,
                     Message.is_read == False
                 )
             )
@@ -520,14 +619,20 @@ class ChatService:
         # Get first and last message times
         first_message = await self.session.scalar(
             select(Message)
-            .where(Message.incident_id == incident_id)
+            .where(
+                Message.incident_id == incident_id,
+                Message.created_at >= conversation.created_at,
+            )
             .order_by(Message.created_at.asc())
             .limit(1)
         )
 
         last_message = await self.session.scalar(
             select(Message)
-            .where(Message.incident_id == incident_id)
+            .where(
+                Message.incident_id == incident_id,
+                Message.created_at >= conversation.created_at,
+            )
             .order_by(Message.created_at.desc())
             .limit(1)
         )
@@ -647,6 +752,16 @@ class ChatService:
         
         if not user:
             raise NotFoundError(f"User {user_id} not found")
+
+        incident = await self.session.scalar(
+            select(Incidente).where(Incidente.id == incident_id)
+        )
+        if not incident:
+            raise NotFoundError(f"Incident {incident_id} not found")
+
+        conversation = await self.get_active_conversation(incident)
+        if not conversation:
+            raise ValidationError("No hay una conversación activa para este incidente")
         
         user_name = f"{user.first_name} {user.last_name}" if user.first_name else user.email
         
@@ -656,6 +771,7 @@ class ChatService:
         try:
             typing_event = ChatUserTypingEvent(
                 incident_id=incident_id,
+                conversation_id=conversation.id,
                 user_id=user_id,
                 user_name=user_name
             )
@@ -699,9 +815,20 @@ class ChatService:
         # ═══════════════════════════════════════════════════════════════════════
         # ✅ PUBLICAR EVENTO DE USUARIO DEJÓ DE ESCRIBIR (EFÍMERO - NO PERSISTE EN DB)
         # ═══════════════════════════════════════════════════════════════════════
+        incident = await self.session.scalar(
+            select(Incidente).where(Incidente.id == incident_id)
+        )
+        if not incident:
+            raise NotFoundError(f"Incident {incident_id} not found")
+
+        conversation = await self.get_active_conversation(incident)
+        if not conversation:
+            raise ValidationError("No hay una conversación activa para este incidente")
+
         try:
             stopped_typing_event = ChatUserStoppedTypingEvent(
                 incident_id=incident_id,
+                conversation_id=conversation.id,
                 user_id=user_id
             )
             
@@ -767,6 +894,7 @@ class ChatService:
         try:
             file_uploaded_event = ChatFileUploadedEvent(
                 message_id=message["id"],
+                conversation_id=message["conversation_id"],
                 incident_id=incident_id,
                 file_id=file_id,
                 file_name=file_name,
@@ -826,6 +954,11 @@ class ChatService:
         if not message.is_read:
             message.is_read = True
             message.read_at = datetime.utcnow()
+
+            incident = await self.session.scalar(
+                select(Incidente).where(Incidente.id == message.incident_id)
+            )
+            conversation = await self.get_active_conversation(incident) if incident else None
             
             await self.session.commit()
             await self.session.refresh(message)
@@ -836,6 +969,7 @@ class ChatService:
             try:
                 message_read_event = ChatMessageReadEvent(
                     message_id=message_id,
+                    conversation_id=conversation.id if conversation else None,
                     incident_id=message.incident_id,
                     sender_id=message.sender_id,
                     read_by=user_id,

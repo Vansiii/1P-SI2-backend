@@ -17,7 +17,7 @@ class Conversation(Base):
     __tablename__ = "conversations"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    incident_id: Mapped[int] = mapped_column(ForeignKey("incidentes.id"), nullable=False, unique=True, index=True)
+    incident_id: Mapped[int] = mapped_column(ForeignKey("incidentes.id"), nullable=False, index=True)
     client_id: Mapped[int] = mapped_column(ForeignKey("clients.id"), nullable=False, index=True)
     workshop_id: Mapped[int | None] = mapped_column(ForeignKey("workshops.id"), nullable=True, index=True)
     tenant_id: Mapped[int | None] = mapped_column(ForeignKey("tenants.id"), nullable=True, index=True)

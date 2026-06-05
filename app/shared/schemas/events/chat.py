@@ -15,11 +15,19 @@ class ChatMessageSentEvent(BaseEvent):
     priority: EventPriority = Field(default=EventPriority.HIGH)
     
     message_id: int = Field(..., description="ID of the message")
+    conversation_id: int = Field(..., description="ID of the conversation")
     incident_id: int = Field(..., description="ID of the incident")
+    workshop_id: Optional[int] = Field(default=None, description="Assigned workshop for this conversation")
     sender_id: int = Field(..., description="ID of the sender")
     sender_name: str = Field(..., description="Name of the sender")
     sender_role: str = Field(..., description="Role of the sender")
     content: str = Field(..., description="Message content")
+    message_type: str = Field(default="text", description="Message type")
+    type: str = Field(default="chat_message", description="Notification type alias")
+    click_action: Optional[str] = Field(
+        default=None,
+        description="Client route to open when the notification is tapped",
+    )
     sent_at: datetime = Field(default_factory=datetime.utcnow)
 
 
@@ -30,6 +38,10 @@ class ChatMessageDeliveredEvent(BaseEvent):
     priority: EventPriority = Field(default=EventPriority.HIGH)
     
     message_id: int = Field(..., description="ID of the message")
+    conversation_id: Optional[int] = Field(
+        default=None,
+        description="ID of the conversation (optional for backward compatibility)"
+    )
     incident_id: Optional[int] = Field(
         default=None,
         description="ID of the incident (optional for backward compatibility)"
@@ -49,6 +61,10 @@ class ChatMessageReadEvent(BaseEvent):
     priority: EventPriority = Field(default=EventPriority.HIGH)
     
     message_id: int = Field(..., description="ID of the message")
+    conversation_id: Optional[int] = Field(
+        default=None,
+        description="ID of the conversation (optional for backward compatibility)"
+    )
     incident_id: Optional[int] = Field(
         default=None,
         description="ID of the incident (optional for backward compatibility)"
@@ -65,9 +81,10 @@ class ChatUserTypingEvent(BaseEvent):
     """Event emitted when a user starts typing."""
     
     event_type: Literal["chat.user_typing"] = "chat.user_typing"
-    priority: EventPriority = Field(default=EventPriority.LOW)
+    priority: EventPriority = Field(default=EventPriority.HIGH)
     
     incident_id: int = Field(..., description="ID of the incident")
+    conversation_id: int = Field(..., description="ID of the active conversation")
     user_id: int = Field(..., description="ID of the user typing")
     user_name: str = Field(..., description="Name of the user")
 
@@ -76,9 +93,10 @@ class ChatUserStoppedTypingEvent(BaseEvent):
     """Event emitted when a user stops typing."""
     
     event_type: Literal["chat.user_stopped_typing"] = "chat.user_stopped_typing"
-    priority: EventPriority = Field(default=EventPriority.LOW)
+    priority: EventPriority = Field(default=EventPriority.HIGH)
     
     incident_id: int = Field(..., description="ID of the incident")
+    conversation_id: int = Field(..., description="ID of the active conversation")
     user_id: int = Field(..., description="ID of the user")
 
 
@@ -89,6 +107,7 @@ class ChatFileUploadedEvent(BaseEvent):
     priority: EventPriority = Field(default=EventPriority.MEDIUM)
     
     message_id: int = Field(..., description="ID of the message")
+    conversation_id: int = Field(..., description="ID of the conversation")
     incident_id: int = Field(..., description="ID of the incident")
     file_id: int = Field(..., description="ID of the uploaded file")
     file_name: str = Field(..., description="Name of the file")

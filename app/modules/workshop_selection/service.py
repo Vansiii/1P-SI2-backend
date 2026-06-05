@@ -4,7 +4,7 @@ import unicodedata
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import select, func, and_, case
+from sqlalchemy import select, func, and_, case, update, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -22,6 +22,7 @@ from app.models.technician import Technician
 from app.models.workshop_schedule import WorkshopSchedule
 from app.models.assignment_attempt import AssignmentAttempt
 from app.models.audit_log import AuditLog
+from app.models.outbox_event import OutboxEvent
 from app.core.event_publisher import EventPublisher
 
 logger = get_logger(__name__)
@@ -47,13 +48,19 @@ class WorkshopSelectionService:
         if not incident:
             raise ValueError("Incidente no encontrado")
         if incident.client_id != client_id:
-            raise PermissionError("No eres el dueño de este incidente")
+            raise PermissionError("No eres el dueÃ±o de este incidente")
         if incident.estado_actual not in ("pendiente", "sin_taller_disponible"):
             raise ValueError(f"No se puede seleccionar taller en estado '{incident.estado_actual}'")
 
-        excluded_workshops = []
+        excluded_statuses: list[str] = []
         if incident.assignment_mode != 'manual':
-            excluded_workshops = await self._get_excluded_workshops(incident_id)
+            excluded_statuses.append("rejected")
+            excluded_statuses.append("cancelled")
+            excluded_statuses.append("timeout")
+        excluded_workshops = await self._get_excluded_workshops(
+            incident_id,
+            excluded_statuses,
+        )
 
         base_conditions = [
             Workshop.is_active == True,
@@ -73,11 +80,12 @@ class WorkshopSelectionService:
                 selectinload(Workshop.tenant).selectinload(Tenant.subscriptions).selectinload(TenantSubscription.plan),
                 selectinload(Workshop.technicians),
                 selectinload(Workshop.catalogo).selectinload(ServicioTaller.servicio).selectinload(Servicio.categoria),
+                selectinload(Workshop.schedules),
             )
         )
         workshops = list(result.scalars().all())
 
-        logger.info(f"📍 Found {len(workshops)} workshops within {max_radius} km (incident location: {incident.latitude}, {incident.longitude})")
+        logger.info(f"ðŸ“ Found {len(workshops)} workshops within {max_radius} km (incident location: {incident.latitude}, {incident.longitude})")
 
         compatible = []
         for workshop in workshops:
@@ -143,7 +151,7 @@ class WorkshopSelectionService:
         if not incident:
             raise ValueError("Incidente no encontrado")
         if incident.client_id != client_id:
-            raise PermissionError("No eres el dueño de este incidente")
+            raise PermissionError("No eres el dueÃ±o de este incidente")
         if incident.estado_actual not in ("pendiente", "sin_taller_disponible"):
             raise ValueError(f"No se puede seleccionar taller en estado '{incident.estado_actual}'")
         if incident.taller_id is not None:
@@ -187,7 +195,23 @@ class WorkshopSelectionService:
         tenant = workshop.tenant
         tenant_id = tenant.id if tenant else None
 
+        await self.session.execute(
+            update(AssignmentAttempt)
+            .where(
+                AssignmentAttempt.incident_id == incident_id,
+                AssignmentAttempt.status == "pending",
+            )
+            .values(
+                status="cancelled",
+                responded_at=datetime.now(timezone.utc),
+                response_message=(
+                    "Solicitud manual reemplazada por una nueva selecciÃ³n de taller"
+                ),
+            )
+        )
+
         incident.taller_id = workshop_id
+        incident.tecnico_id = None
 
         est_time = max((s.get("tiempo_estimado_min") or 0 for s in matching), default=None)
 
@@ -286,7 +310,7 @@ class WorkshopSelectionService:
             if st.is_active and st.deleted_at is None
         ]
 
-        days = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+        days = ["Lunes", "Martes", "MiÃ©rcoles", "Jueves", "Viernes", "SÃ¡bado", "Domingo"]
 
         return {
             "workshop_id": workshop.id,
@@ -314,15 +338,11 @@ class WorkshopSelectionService:
     async def get_assignment_history(
         self, incident_id: int, workshop_id: int, client_id: int
     ) -> list[dict]:
-        result = await self.session.execute(
-            select(AssignmentAttempt)
-            .where(
-                AssignmentAttempt.incident_id == incident_id,
-                AssignmentAttempt.workshop_id == workshop_id,
-            )
-            .order_by(AssignmentAttempt.created_at.desc())
-        )
-        attempts = result.scalars().all()
+        incident = await self.session.get(Incidente, incident_id)
+        if not incident:
+            raise ValueError("Incidente no encontrado")
+        if incident.client_id != client_id:
+            raise PermissionError("No eres el dueño de este incidente")
 
         status_labels = {
             "pending": "Pendiente",
@@ -332,9 +352,217 @@ class WorkshopSelectionService:
             "cancelled": "Cancelado",
         }
 
+        attempts_result = await self.session.execute(
+            select(AssignmentAttempt)
+            .where(
+                AssignmentAttempt.incident_id == incident_id,
+                AssignmentAttempt.workshop_id == workshop_id,
+            )
+            .order_by(AssignmentAttempt.created_at.asc())
+        )
+        attempts = attempts_result.scalars().all()
+        attempt_by_status = {attempt.status: attempt for attempt in attempts}
+        pending_attempt = next(
+            (attempt for attempt in reversed(attempts) if attempt.status == "pending"),
+            None,
+        )
+
+        event_result = await self.session.execute(
+            select(OutboxEvent)
+            .where(
+                OutboxEvent.event_type.in_(
+                    [
+                        "incident.assigned",
+                        "incident.assignment_timeout",
+                        "incident.assignment_accepted",
+                        "incident.assignment_rejected",
+                        "incident.status_changed",
+                    ]
+                ),
+                or_(
+                    OutboxEvent.payload.contains(f'"incident_id": {incident_id}'),
+                    OutboxEvent.payload.contains(f'"incident_id":{incident_id}'),
+                ),
+            )
+            .order_by(OutboxEvent.created_at.asc())
+        )
+        outbox_events = event_result.scalars().all()
+
+        history = []
+        synthetic_id = 1_000_000
+
+        for event in outbox_events:
+            try:
+                payload = json.loads(event.payload)
+            except json.JSONDecodeError:
+                continue
+
+            if payload.get("incident_id") != incident_id:
+                continue
+            if payload.get("workshop_id") != workshop_id:
+                continue
+
+            if event.event_type == "incident.assigned":
+                history.append(
+                    {
+                        "id": synthetic_id,
+                        "incident_id": incident_id,
+                        "workshop_id": workshop_id,
+                        "status": "pending",
+                        "status_label": status_labels["pending"],
+                        "assignment_strategy": payload.get("assignment_strategy")
+                        or (pending_attempt.assignment_strategy if pending_attempt else ""),
+                        "distance_km": float(pending_attempt.distance_km)
+                        if pending_attempt and pending_attempt.distance_km
+                        else None,
+                        "final_score": float(pending_attempt.final_score)
+                        if pending_attempt and pending_attempt.final_score
+                        else None,
+                        "created_at": event.created_at.isoformat() if event.created_at else None,
+                        "responded_at": None,
+                        "timeout_at": pending_attempt.timeout_at.isoformat()
+                        if pending_attempt and pending_attempt.timeout_at
+                        else None,
+                        "response_message": None,
+                    }
+                )
+                synthetic_id += 1
+            elif event.event_type == "incident.assignment_timeout":
+                timeout_attempt = attempt_by_status.get("timeout")
+                history.append(
+                    {
+                        "id": synthetic_id,
+                        "incident_id": incident_id,
+                        "workshop_id": workshop_id,
+                        "status": "timeout",
+                        "status_label": status_labels["timeout"],
+                        "assignment_strategy": timeout_attempt.assignment_strategy if timeout_attempt else "",
+                        "distance_km": float(timeout_attempt.distance_km)
+                        if timeout_attempt and timeout_attempt.distance_km
+                        else None,
+                        "final_score": float(timeout_attempt.final_score)
+                        if timeout_attempt and timeout_attempt.final_score
+                        else None,
+                        "created_at": event.created_at.isoformat() if event.created_at else None,
+                        "responded_at": None,
+                        "timeout_at": payload.get("timed_out_at")
+                        or (
+                            timeout_attempt.timeout_at.isoformat()
+                            if timeout_attempt and timeout_attempt.timeout_at
+                            else None
+                        ),
+                        "response_message": "El taller no respondió dentro del tiempo límite",
+                    }
+                )
+                synthetic_id += 1
+            elif event.event_type == "incident.assignment_accepted":
+                accepted_attempt = attempt_by_status.get("accepted")
+                history.append(
+                    {
+                        "id": synthetic_id,
+                        "incident_id": incident_id,
+                        "workshop_id": workshop_id,
+                        "status": "accepted",
+                        "status_label": status_labels["accepted"],
+                        "assignment_strategy": accepted_attempt.assignment_strategy if accepted_attempt else "",
+                        "distance_km": float(accepted_attempt.distance_km)
+                        if accepted_attempt and accepted_attempt.distance_km
+                        else None,
+                        "final_score": float(accepted_attempt.final_score)
+                        if accepted_attempt and accepted_attempt.final_score
+                        else None,
+                        "created_at": event.created_at.isoformat() if event.created_at else None,
+                        "responded_at": payload.get("accepted_at")
+                        or (
+                            accepted_attempt.responded_at.isoformat()
+                            if accepted_attempt and accepted_attempt.responded_at
+                            else None
+                        ),
+                        "timeout_at": None,
+                        "response_message": "El taller aceptó la solicitud",
+                    }
+                )
+                synthetic_id += 1
+            elif event.event_type == "incident.assignment_rejected":
+                rejected_attempt = attempt_by_status.get("rejected")
+                history.append(
+                    {
+                        "id": synthetic_id,
+                        "incident_id": incident_id,
+                        "workshop_id": workshop_id,
+                        "status": "rejected",
+                        "status_label": status_labels["rejected"],
+                        "assignment_strategy": rejected_attempt.assignment_strategy if rejected_attempt else "",
+                        "distance_km": float(rejected_attempt.distance_km)
+                        if rejected_attempt and rejected_attempt.distance_km
+                        else None,
+                        "final_score": float(rejected_attempt.final_score)
+                        if rejected_attempt and rejected_attempt.final_score
+                        else None,
+                        "created_at": event.created_at.isoformat() if event.created_at else None,
+                        "responded_at": payload.get("rejected_at")
+                        or (
+                            rejected_attempt.responded_at.isoformat()
+                            if rejected_attempt and rejected_attempt.responded_at
+                            else None
+                        ),
+                        "timeout_at": None,
+                        "response_message": payload.get("reason")
+                        or (rejected_attempt.response_message if rejected_attempt else None),
+                    }
+                )
+                synthetic_id += 1
+            elif event.event_type == "incident.status_changed":
+                reason = (payload.get("reason") or "").lower()
+                if reason not in {
+                    "mutual_cancellation",
+                    "ambiguous_case_cancelled",
+                    "ambiguous_case_cancelled_manual",
+                }:
+                    continue
+
+                cancelled_attempt = attempt_by_status.get("cancelled") or attempt_by_status.get("accepted")
+                history.append(
+                    {
+                        "id": synthetic_id,
+                        "incident_id": incident_id,
+                        "workshop_id": workshop_id,
+                        "status": "cancelled",
+                        "status_label": status_labels["cancelled"],
+                        "assignment_strategy": cancelled_attempt.assignment_strategy if cancelled_attempt else "",
+                        "distance_km": float(cancelled_attempt.distance_km)
+                        if cancelled_attempt and cancelled_attempt.distance_km
+                        else None,
+                        "final_score": float(cancelled_attempt.final_score)
+                        if cancelled_attempt and cancelled_attempt.final_score
+                        else None,
+                        "created_at": event.created_at.isoformat() if event.created_at else None,
+                        "responded_at": event.created_at.isoformat() if event.created_at else None,
+                        "timeout_at": None,
+                        "response_message": (
+                            "Cancelación mutua aceptada. El cliente debe seleccionar otro taller."
+                            if reason == "mutual_cancellation"
+                            else "Caso ambiguo anulado por el taller."
+                        ),
+                    }
+                )
+                synthetic_id += 1
+
+        if history:
+            history.sort(
+                key=lambda item: item.get("responded_at")
+                or item.get("timeout_at")
+                or item.get("created_at")
+                or "",
+                reverse=True,
+            )
+            return history
+
         return [
             {
                 "id": a.id,
+                "incident_id": a.incident_id,
+                "workshop_id": a.workshop_id,
                 "status": a.status,
                 "status_label": status_labels.get(a.status, a.status),
                 "assignment_strategy": a.assignment_strategy,
@@ -345,7 +573,7 @@ class WorkshopSelectionService:
                 "timeout_at": a.timeout_at.isoformat() if a.timeout_at else None,
                 "response_message": a.response_message,
             }
-            for a in attempts
+            for a in reversed(attempts)
         ]
 
     async def _get_matching_services(
@@ -429,12 +657,16 @@ class WorkshopSelectionService:
         ]
         return min(1.0, len(available) / 3.0)
 
-    async def _get_excluded_workshops(self, incident_id: int) -> list[int]:
+    async def _get_excluded_workshops(
+        self,
+        incident_id: int,
+        statuses: list[str],
+    ) -> list[int]:
         result = await self.session.execute(
             select(AssignmentAttempt.workshop_id)
             .where(
                 AssignmentAttempt.incident_id == incident_id,
-                AssignmentAttempt.status.in_(["rejected", "timeout", "cancelled"]),
+                AssignmentAttempt.status.in_(statuses),
             )
         )
         return list(set(row[0] for row in result.all()))
@@ -462,16 +694,39 @@ class WorkshopSelectionService:
 
     @staticmethod
     def _is_open_now(workshop: Workshop) -> bool:
-        from datetime import datetime, timezone
         now = datetime.now(timezone.utc)
-        day = now.weekday()
-        day_name = now.strftime("%A")
-        for schedule in workshop.schedules if hasattr(workshop, 'schedules') else []:
-            if schedule.day_of_week == day:
-                if not schedule.is_open:
-                    return False
+        schedules = list(getattr(workshop, "schedules", []) or [])
+        if not schedules:
+            return bool(workshop.is_available)
+
+        current_day = now.weekday()
+        current_time = now.time().replace(tzinfo=None)
+        previous_day = (current_day - 1) % 7
+
+        for schedule in schedules:
+            if schedule.day_of_week not in (current_day, previous_day):
+                continue
+            if not schedule.is_open:
+                continue
+
+            open_time = schedule.open_time
+            close_time = schedule.close_time
+            if open_time is None or close_time is None:
+                if schedule.day_of_week == current_day:
+                    return True
+                continue
+
+            if open_time <= close_time:
+                if schedule.day_of_week == current_day and open_time <= current_time <= close_time:
+                    return True
+                continue
+
+            if schedule.day_of_week == current_day and current_time >= open_time:
                 return True
-        return True
+            if schedule.day_of_week == previous_day and current_time <= close_time:
+                return True
+
+        return False
 
     @staticmethod
     def _calc_specialization_score(matching: list[dict]) -> float:

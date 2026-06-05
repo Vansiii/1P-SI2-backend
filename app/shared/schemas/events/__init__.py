@@ -25,6 +25,7 @@ from .incident import (
     IncidentAnalysisFailedEvent,
     IncidentAnalysisSlowEvent,
     IncidentAnalysisTimeoutEvent,
+    IncidentReassignedEvent,
 )
 from .chat import (
     ChatMessageSentEvent,
@@ -91,6 +92,7 @@ __all__ = [
     "IncidentAnalysisFailedEvent",
     "IncidentAnalysisSlowEvent",
     "IncidentAnalysisTimeoutEvent",
+    "IncidentReassignedEvent",
     # Chat events
     "ChatMessageSentEvent",
     "ChatMessageDeliveredEvent",

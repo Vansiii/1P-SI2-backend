@@ -3,7 +3,7 @@ Repository para gestión de incidentes.
 """
 from typing import List, Optional
 
-from sqlalchemy import select
+from sqlalchemy import select, func, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -326,21 +326,34 @@ class IncidenteRepository(BaseRepository[Incidente]):
             # Para talleres: mostrar incidentes con intentos pendientes O timeout
             # Esto permite que el taller vea las solicitudes que no respondió a tiempo
             from ...models.assignment_attempt import AssignmentAttempt
-            from sqlalchemy import and_, or_
+
+            latest_attempt_subquery = (
+                select(func.max(AssignmentAttempt.id).label("latest_attempt_id"))
+                .where(AssignmentAttempt.workshop_id == taller_id)
+                .group_by(AssignmentAttempt.incident_id, AssignmentAttempt.workshop_id)
+                .subquery()
+            )
             
             query = (
                 select(Incidente)
                 .join(
                     AssignmentAttempt,
-                    and_(
-                        AssignmentAttempt.incident_id == Incidente.id,
-                        AssignmentAttempt.workshop_id == taller_id,
-                        AssignmentAttempt.status.in_(['pending', 'timeout'])
-                    )
+                    AssignmentAttempt.incident_id == Incidente.id,
+                )
+                .join(
+                    latest_attempt_subquery,
+                    AssignmentAttempt.id == latest_attempt_subquery.c.latest_attempt_id,
                 )
                 .where(
                     and_(
                         Incidente.estado_actual == "pendiente",
+                        or_(
+                            AssignmentAttempt.status == 'pending',
+                            and_(
+                                AssignmentAttempt.status == 'timeout',
+                                Incidente.assignment_mode != 'manual',
+                            ),
+                        ),
                         # ✅ CRÍTICO: Excluir incidentes ya asignados a OTRO taller
                         or_(
                             Incidente.taller_id.is_(None),  # No asignado a nadie
@@ -360,7 +373,7 @@ class IncidenteRepository(BaseRepository[Incidente]):
             )
             
             result = await self.session.execute(query)
-            return list(result.scalars().all())
+            return list(result.scalars().unique().all())
         else:
             # Para admin: mostrar todos los pendientes
             return await self.find_by_estado("pendiente", skip, limit)

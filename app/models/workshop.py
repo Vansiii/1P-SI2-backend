@@ -45,6 +45,7 @@ class Workshop(User):
     technicians = relationship("Technician", back_populates="workshop", foreign_keys="[Technician.workshop_id]")
     incidentes = relationship("Incidente", back_populates="workshop")
     catalogo = relationship("ServicioTaller", back_populates="taller")
+    schedules = relationship("WorkshopSchedule", foreign_keys="[WorkshopSchedule.workshop_id]")
     
     # Financial relationships (Module 6)
     transactions = relationship("Transaction", back_populates="workshop")
@@ -54,4 +55,3 @@ class Workshop(User):
     __mapper_args__ = {
         "polymorphic_identity": "workshop",
     }
-
