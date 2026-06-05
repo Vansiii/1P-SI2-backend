@@ -1,11 +1,12 @@
 """
 Service para gestión de incidentes.
 """
-from datetime import datetime, UTC
+from datetime import datetime, UTC, timedelta
 from typing import List, Optional, Tuple
 
-from sqlalchemy import update, select, func
+from sqlalchemy import update, select, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from ...core import get_logger, NotFoundException, ForbiddenException
 from ...core.event_publisher import EventPublisher
@@ -27,6 +28,7 @@ from ...shared.schemas.events.dashboard import (
     DashboardActiveTechniciansChangedEvent
 )
 from ...models.incidente import Incidente
+from ...models.message import Message
 from ...models.evidencia import Evidencia
 from ...models.evidencia_imagen import EvidenciaImagen
 from ...models.evidencia_audio import EvidenciaAudio
@@ -44,6 +46,45 @@ class IncidenteService:
     def __init__(self, session: AsyncSession):
         self.session = session
         self.repository = IncidenteRepository(session)
+
+    async def _load_incident_with_relations(self, incidente_id: int) -> Incidente:
+        result = await self.session.execute(
+            select(Incidente)
+            .options(
+                selectinload(Incidente.workshop),
+                selectinload(Incidente.technician)
+            )
+            .where(Incidente.id == incidente_id)
+        )
+        incidente = result.scalar_one_or_none()
+        if not incidente:
+            raise NotFoundException(f"Incidente con ID {incidente_id} no encontrado")
+        return incidente
+
+    async def _has_recent_system_message(
+        self,
+        incidente_id: int,
+        sender_id: int,
+        message_text: str,
+        *,
+        window_seconds: int = 120,
+        not_before: datetime | None = None,
+    ) -> bool:
+        cutoff = datetime.now(UTC) - timedelta(seconds=window_seconds)
+        result = await self.session.execute(
+            select(Message.id)
+            .where(
+                Message.incident_id == incidente_id,
+                Message.sender_id == sender_id,
+                Message.message_type == "system",
+                Message.message == message_text,
+                Message.created_at >= cutoff,
+                *( [Message.created_at >= not_before] if not_before is not None else [] ),
+            )
+            .order_by(Message.created_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none() is not None
     
     async def _publish_incident_count_changed(
         self,
@@ -138,7 +179,6 @@ class IncidenteService:
     ) -> Incidente:
         """Crear un nuevo incidente/emergencia vehicular."""
         # Verificar que el vehículo existe y pertenece al cliente
-        from sqlalchemy import select
         result = await self.session.execute(
             select(Vehiculo).where(
                 Vehiculo.id == request.vehiculo_id,
@@ -326,7 +366,6 @@ class IncidenteService:
                             # Check if AI analysis is complete
                             async with session_factory() as check_session:
                                 from ...models.incidente import Incidente
-                                from sqlalchemy import select
                                 
                                 result = await check_session.execute(
                                     select(Incidente).where(Incidente.id == created_incidente.id)
@@ -460,6 +499,7 @@ class IncidenteService:
         
         if not incidente:
             raise NotFoundException(f"Incidente con ID {incidente_id} no encontrado")
+        assignment_mode = incidente.assignment_mode
         
         # Verificar permisos según tipo de usuario
         if user_type == "client" and incidente.client_id != user_id:
@@ -472,7 +512,6 @@ class IncidenteService:
                 raise ForbiddenException("No tienes permiso para ver este incidente")
         elif user_type == "technician":
             # Verificar que el técnico pertenece al taller asignado
-            from sqlalchemy import select
             from ...models.technician import Technician
             result = await self.session.execute(
                 select(Technician).where(Technician.id == user_id)
@@ -528,7 +567,6 @@ class IncidenteService:
         """
         from ...models.assignment_attempt import AssignmentAttempt
         from ...models.technician import Technician
-        from sqlalchemy import select, and_
         
         # Buscar el assignment_attempt pendiente o con timeout para este taller
         result = await self.session.execute(
@@ -583,11 +621,28 @@ class IncidenteService:
         Returns:
             Incidente actualizado
         """
-        # Obtener el incidente
-        incidente = await self.repository.find_by_id(incidente_id)
+        # Obtener el incidente con lock para evitar dobles aceptaciones concurrentes
+        result = await self.session.execute(
+            select(Incidente)
+            .where(Incidente.id == incidente_id)
+            .with_for_update()
+        )
+        incidente = result.scalar_one_or_none()
         
         if not incidente:
             raise NotFoundException(f"Incidente con ID {incidente_id} no encontrado")
+
+        if (
+            incidente.taller_id == taller_id
+            and incidente.estado_actual in {"asignado", "en_proceso"}
+        ):
+            logger.info(
+                "Solicitud ya aceptada previamente; se ignora reintento",
+                incidente_id=incidente_id,
+                taller_id=taller_id,
+                estado_actual=incidente.estado_actual
+            )
+            return await self._load_incident_with_relations(incidente_id)
         
         # ✅ VALIDAR TRANSICIÓN DE ESTADO CON STATE MACHINE
         from ...core import IncidentStateMachine, ValidationException
@@ -613,7 +668,6 @@ class IncidenteService:
         suggested_technician_id = None
         if accept_suggested_technician:
             from ...models.assignment_attempt import AssignmentAttempt
-            from sqlalchemy import select, and_
             
             result = await self.session.execute(
                 select(AssignmentAttempt)
@@ -643,7 +697,6 @@ class IncidenteService:
         
         # Marcar el assignment_attempt como aceptado
         from ...models.assignment_attempt import AssignmentAttempt
-        from sqlalchemy import select, and_
         
         result = await self.session.execute(
             select(AssignmentAttempt)
@@ -728,21 +781,45 @@ class IncidenteService:
         # Crear conversación de chat automáticamente al aceptar el incidente
         from ...modules.chat.services import ChatService
         chat_service = ChatService(self.session)
+        conversation = None
         
         try:
             conversation = await chat_service.get_or_create_conversation(
                 incident_id=incidente_id,
                 client_id=incidente.client_id,
-                workshop_id=taller_id
+                workshop_id=taller_id,
+                force_new=True,
             )
-            
-            # Enviar mensaje del sistema informando que el taller aceptó
-            await chat_service.send_message(
-                incident_id=incidente_id,
-                sender_id=taller_id,  # El taller es el remitente
-                message_text=f"✅ El taller ha aceptado tu solicitud. {'Un técnico ha sido asignado y está en camino.' if suggested_technician_id else 'Pronto asignaremos un técnico.'}",
-                message_type="system"
+
+            acceptance_message = (
+                "✅ El taller ha aceptado tu solicitud. "
+                + (
+                    "Un técnico ha sido asignado y está en camino."
+                    if suggested_technician_id
+                    else "Pronto asignaremos un técnico."
+                )
             )
+
+            already_sent = await self._has_recent_system_message(
+                incidente_id=incidente_id,
+                sender_id=taller_id,
+                message_text=acceptance_message,
+                not_before=conversation.created_at,
+            )
+
+            if already_sent:
+                logger.info(
+                    "Mensaje de aceptación ya existe; se omite duplicado",
+                    incidente_id=incidente_id,
+                    taller_id=taller_id
+                )
+            else:
+                await chat_service.send_message(
+                    incident_id=incidente_id,
+                    sender_id=taller_id,
+                    message_text=acceptance_message,
+                    message_type="system"
+                )
             
             logger.info(
                 f"Conversación de chat creada para incidente {incidente_id}",
@@ -756,18 +833,7 @@ class IncidenteService:
             # No fallar la aceptación si falla la creación del chat
         
         # Recargar el incidente con las relaciones necesarias para serialización
-        from sqlalchemy import select
-        from sqlalchemy.orm import selectinload
-        
-        result = await self.session.execute(
-            select(Incidente)
-            .options(
-                selectinload(Incidente.workshop),
-                selectinload(Incidente.technician)
-            )
-            .where(Incidente.id == incidente_id)
-        )
-        incidente = result.scalar_one()
+        incidente = await self._load_incident_with_relations(incidente_id)
         
         # ═══════════════════════════════════════════════════════════════════════
         # ✅ PUBLICAR EVENTO DE ASIGNACIÓN ACEPTADA AL OUTBOX
@@ -792,8 +858,10 @@ class IncidenteService:
                 incident_id=incidente_id,
                 workshop_id=taller_id,
                 workshop_name=incidente.workshop.workshop_name if incidente.workshop else "Unknown",
-                technician_id=suggested_technician_id if suggested_technician_id else 0,
-                technician_name=technician_name,
+                conversation_id=conversation.id if conversation else None,
+                technician_id=suggested_technician_id,
+                technician_name=technician_name if suggested_technician_id else None,
+                new_status=nuevo_estado,
                 eta=None  # Could be calculated based on distance
             )
             
@@ -880,7 +948,6 @@ class IncidenteService:
         
         # Mark the assignment_attempt as rejected
         from ...models.assignment_attempt import AssignmentAttempt
-        from sqlalchemy import select, and_
         
         result = await self.session.execute(
             select(AssignmentAttempt)
@@ -892,14 +959,21 @@ class IncidenteService:
                 )
             )
             .order_by(AssignmentAttempt.created_at.desc())
-            .limit(1)
         )
-        assignment_attempt = result.scalar_one_or_none()
+        assignment_attempts = result.scalars().all()
         
-        if assignment_attempt:
-            assignment_attempt.status = 'rejected'
-            assignment_attempt.responded_at = datetime.now(UTC)
-            assignment_attempt.response_message = motivo
+        if assignment_attempts:
+            rejected_at = datetime.now(UTC)
+            assignment_attempts[0].status = 'rejected'
+            assignment_attempts[0].responded_at = rejected_at
+            assignment_attempts[0].response_message = motivo
+
+            for stale_attempt in assignment_attempts[1:]:
+                stale_attempt.status = 'cancelled'
+                stale_attempt.responded_at = rejected_at
+                stale_attempt.response_message = (
+                    'Intento cerrado porque el taller rechazó una solicitud más reciente'
+                )
         
         await self.session.commit()
         
@@ -926,7 +1000,8 @@ class IncidenteService:
                 incident_id=incidente_id,
                 workshop_id=taller_id,
                 workshop_name=workshop_name,
-                reason=motivo
+                reason=motivo,
+                assignment_mode=incidente.assignment_mode,
             )
             
             # Publicar al outbox (se entregará de forma confiable)
@@ -1017,16 +1092,16 @@ class IncidenteService:
                     f"No puedes anular este incidente. Está asignado a otro taller."
                 )
         
-        # Validación 3: Verificar que el incidente esté en estado asignado o en_proceso
-        if incidente.estado_actual not in ["asignado", "en_proceso"]:
+        # Validación 3: Verificar que el incidente esté en una etapa activa donde
+        # la anulación ambigua aún puede devolverlo a pendiente.
+        if incidente.estado_actual not in ["asignado", "aceptado", "en_camino", "en_proceso"]:
             from ...core import ValidationException
             raise ValidationException(
                 f"No se puede anular un incidente en estado '{incidente.estado_actual}'. "
-                f"Solo se pueden anular incidentes asignados o en proceso."
+                f"Solo se pueden anular incidentes asignados, aceptados, en camino o en proceso."
             )
         
         # Validación 4: Verificar que haya al menos un mensaje de chat
-        from sqlalchemy import select, func
         from ...models.message import Message
         
         message_count = await self.session.scalar(
@@ -1104,6 +1179,9 @@ class IncidenteService:
                     f"Técnico {incidente.tecnico_id} liberado por anulación de caso ambiguo"
                 )
         
+        assignment_mode = incidente.assignment_mode or "automatic"
+        previous_workshop_id = incidente.taller_id
+
         # Limpiar asignación y volver a pendiente
         incidente.taller_id = None
         incidente.tecnico_id = None
@@ -1111,9 +1189,8 @@ class IncidenteService:
         incidente.assigned_at = None
         incidente.updated_at = datetime.now(UTC)
         
-        # Marcar assignment_attempt como rejected
+        # Registrar la anulación en el historial de intentos
         from ...models.assignment_attempt import AssignmentAttempt
-        from sqlalchemy import and_
         
         await self.session.execute(
             update(AssignmentAttempt)
@@ -1121,11 +1198,11 @@ class IncidenteService:
                 and_(
                     AssignmentAttempt.incident_id == incidente_id,
                     AssignmentAttempt.workshop_id == taller_id,
-                    AssignmentAttempt.status == 'accepted'
+                    AssignmentAttempt.status.in_(['accepted', 'pending'])
                 )
             )
             .values(
-                status='rejected',
+                status='cancelled',
                 response_message=f'Caso ambiguo anulado: {motivo}',
                 responded_at=datetime.now(UTC)
             )
@@ -1142,21 +1219,37 @@ class IncidenteService:
             message_count=message_count
         )
         
-        # ✅ Publicar evento de reasignación iniciada
         try:
-            from ...shared.schemas.events.incident import IncidentReassignmentStartedEvent
-            
-            reassignment_event = IncidentReassignmentStartedEvent(
+            status_event = IncidentStatusChangedEvent(
                 incident_id=incidente_id,
-                previous_workshop_id=incidente.taller_id,
-                reason="Caso ambiguo - Requiere revisión adicional",
-                message="Buscando un nuevo taller disponible"
+                old_status=estado_anterior,
+                new_status="pendiente",
+                workshop_id=previous_workshop_id,
+                changed_by=taller_id,
+                changed_by_role="workshop",
+                reason=(
+                    "ambiguous_case_cancelled_manual"
+                    if assignment_mode == "manual"
+                    else "ambiguous_case_cancelled"
+                ),
             )
-            
-            await EventPublisher.publish(self.session, reassignment_event)
-            logger.info(f"✅ Published reassignment_started event for incident {incidente_id}")
+            await EventPublisher.publish(self.session, status_event)
+
+            if assignment_mode != "manual":
+                from ...shared.schemas.events.incident import IncidentReassignmentStartedEvent
+
+                reassignment_event = IncidentReassignmentStartedEvent(
+                    incident_id=incidente_id,
+                    previous_workshop_id=previous_workshop_id,
+                    reason="Caso ambiguo - Requiere revisión adicional",
+                    message="Buscando un nuevo taller disponible"
+                )
+                await EventPublisher.publish(self.session, reassignment_event)
+
+            await self.session.commit()
+            logger.info(f"✅ Eventos de anulación publicados para incidente {incidente_id}")
         except Exception as e:
-            logger.error(f"Failed to publish reassignment event: {str(e)}")
+            logger.error(f"Failed to publish ambiguous cancellation events: {str(e)}")
         
         # ═══════════════════════════════════════════════════════════════════════
         # ✅ PUBLICAR EVENTOS DE DASHBOARD
@@ -1438,7 +1531,6 @@ class IncidenteService:
         
         # Marcar intentos de asignación como cancelados
         from ...models.assignment_attempt import AssignmentAttempt
-        from sqlalchemy import and_
         
         await self.session.execute(
             update(AssignmentAttempt)
@@ -1619,7 +1711,6 @@ class IncidenteService:
         """
         try:
             from ...models.assignment_attempt import AssignmentAttempt
-            from sqlalchemy import and_
             
             # Marcar todos los intentos pendientes como cancelados
             result = await self.session.execute(
@@ -1894,7 +1985,7 @@ class IncidenteService:
         Marcar que el técnico ha completado el trabajo en el incidente.
         
         Este método:
-        1. Valida la transición de estado (EN_PROCESO → COMPLETADO)
+        1. Valida la transición de estado (EN_PROCESO → RESUELTO)
         2. Actualiza el estado del incidente
         3. Libera al técnico (marca como disponible)
         4. Finaliza la sesión de tracking
@@ -1927,7 +2018,7 @@ class IncidenteService:
         # ✅ VALIDAR TRANSICIÓN DE ESTADO CON STATE MACHINE
         from ...core import IncidentStateMachine, ValidationException
         
-        target_state = "completado"
+        target_state = "resuelto"
         
         is_valid, error_message = IncidentStateMachine.can_transition(
             from_state=incidente.estado_actual,
@@ -1953,7 +2044,7 @@ class IncidenteService:
         estado_anterior = incidente.estado_actual
         
         # Actualizar estado del incidente
-        incidente.estado_actual = "completado"
+        incidente.estado_actual = "resuelto"
         incidente.updated_at = datetime.now(UTC)
         
         # Liberar al técnico
@@ -1994,7 +2085,7 @@ class IncidenteService:
         await self._emit_status_change_event(
             incident_id=incidente_id,
             old_status=estado_anterior,
-            new_status="completado",
+            new_status="resuelto",
             changed_by=technician_id,
             changed_by_role="technician"
         )
@@ -2038,8 +2129,8 @@ class IncidenteService:
         # ═══════════════════════════════════════════════════════════════════════
         # Decrementar contador del estado anterior
         await self._publish_incident_count_changed(status=estado_anterior, delta=-1)
-        # Incrementar contador de "completado"
-        await self._publish_incident_count_changed(status="completado", delta=+1)
+        # Incrementar contador de "resuelto"
+        await self._publish_incident_count_changed(status="resuelto", delta=+1)
         
         # Publicar cambio en técnicos activos (técnico liberado)
         await self._publish_active_technicians_changed()

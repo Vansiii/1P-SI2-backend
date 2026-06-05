@@ -200,6 +200,7 @@ async def check_assignment_timeouts() -> List[int]:
                     and_(
                         AssignmentAttempt.status == 'pending',
                         AssignmentAttempt.attempted_at.isnot(None),
+                        AssignmentAttempt.workshop_id == Incidente.taller_id,
                         Incidente.estado_actual != 'sin_taller_disponible'  # ✅ NO procesar si ya está sin taller
                     )
                 )
@@ -371,7 +372,7 @@ async def _mark_incident_no_workshop_available(session: AsyncSession, incident_i
             .where(
                 and_(
                     AssignmentAttempt.incident_id == incident_id,
-                    AssignmentAttempt.status.in_(['pending', 'timeout'])
+                    AssignmentAttempt.status == 'pending'
                 )
             )
             .values(

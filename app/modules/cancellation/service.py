@@ -1,11 +1,10 @@
 """
 Service para gestión de cancelaciones mutuas de incidentes.
 """
-import asyncio
 from datetime import datetime, timedelta, UTC
 from typing import Optional
 
-from sqlalchemy import select, and_, desc, func
+from sqlalchemy import select, and_, desc, func, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,6 +21,7 @@ from ...shared.schemas.events.dashboard import (
     DashboardIncidentCountChangedEvent,
     DashboardActiveTechniciansChangedEvent,
 )
+from ...models.assignment_attempt import AssignmentAttempt
 from ...models.cancellation_request import CancellationRequest
 from ...models.incidente import Incidente
 
@@ -399,7 +399,7 @@ class CancellationService:
         changed_by_role: str,
     ) -> None:
         """
-        Anular incidente y buscar nuevo taller.
+        Anular incidente y decidir el siguiente paso según el modo de asignación.
         
         Args:
             incident: Incidente a anular
@@ -409,17 +409,17 @@ class CancellationService:
         from ...models.tracking_session import TrackingSession
         from ...models.technician import Technician
         from ...models.estados_servicio import EstadosServicio
-        from sqlalchemy import update
         
         # Validate state transition using State Machine
         state_machine = IncidentStateMachine()
         current_state = IncidentState(incident.estado_actual)
-        target_state = IncidentState.PENDIENTE  # Returning to pending for reassignment
+        target_state = IncidentState.PENDIENTE
+        assignment_mode = incident.assignment_mode or "automatic"
         
         can_transition, error_message = state_machine.can_transition(
             from_state=current_state,
             to_state=target_state,
-            user_role=UserRole.ADMIN,  # System acts as admin for cancellation and reassignment
+            user_role=UserRole.ADMIN,
             incident=incident
         )
         
@@ -447,11 +447,19 @@ class CancellationService:
             logger.error("Estado 'pendiente' no encontrado en estados_servicio")
             # Fallback: no registrar en historial si no existe el estado
         else:
+            next_action = (
+                "El cliente debe seleccionar un nuevo taller."
+                if assignment_mode == "manual"
+                else "Buscando nuevo taller."
+            )
             # Registrar en historial
             historial = HistorialServicio(
                 incidente_id=incident.id,
                 estado_id=estado_pendiente.id,
-                comentario=f"Cancelación mutua acordada. Estado anterior: {incident.estado_actual}. Buscando nuevo taller.",
+                comentario=(
+                    f"Cancelación mutua acordada. Estado anterior: {incident.estado_actual}. "
+                    f"{next_action}"
+                ),
                 changed_by_user_id=incident.taller_id
             )
             self.session.add(historial)
@@ -482,7 +490,6 @@ class CancellationService:
                 )
                 
                 # Notificar cambio de disponibilidad via EventPublisher
-                from ...core.event_publisher import EventPublisher
                 from ...shared.schemas.events.incident import IncidentTechnicianArrivedEvent
                 
                 technician_event_data = {
@@ -495,6 +502,24 @@ class CancellationService:
                     "workshop_id": technician.workshop_id,
                 }
         
+        await self.session.execute(
+            update(AssignmentAttempt)
+            .where(
+                AssignmentAttempt.incident_id == incident.id,
+                AssignmentAttempt.workshop_id == old_workshop_id,
+                AssignmentAttempt.status.in_(["pending", "accepted"])
+            )
+            .values(
+                status="cancelled",
+                responded_at=datetime.now(UTC),
+                response_message=(
+                    "Cancelación mutua aceptada. El cliente debe seleccionar otro taller."
+                    if assignment_mode == "manual"
+                    else "Cancelación mutua aceptada. Se buscará otro taller."
+                ),
+            )
+        )
+
         # Limpiar asignación y volver a pendiente
         incident.taller_id = None
         incident.tecnico_id = None
@@ -536,52 +561,25 @@ class CancellationService:
         
         logger.info(
             f"Incidente {incident.id} anulado por cancelación mutua. "
-            f"Volviendo a estado pendiente para nueva asignación."
+            f"Volviendo a estado pendiente para "
+            f"{'selección manual' if assignment_mode == 'manual' else 'reasignación automática'}."
         )
-        
-        # Trigger automatic reassignment asynchronously with a delay
-        # to let the admin dashboard and clients see the "pendiente" state change
-        # before the incident is re-assigned.
-        asyncio.create_task(self._delayed_reassignment(incident_id=incident.id))
-    async def _delayed_reassignment(self, incident_id: int) -> None:
-        """
-        Execute reassignment after a short delay so that admin dashboard
-        and clients can observe the 'pendiente' state transition before
-        the incident is re-assigned.
-        """
-        try:
-            await asyncio.sleep(3)  # Let real-time events propagate first
 
-            from ...core.database import get_session_factory
-            session_factory = get_session_factory()
-            async with session_factory() as session:
-                from ...modules.assignment.services import IntelligentAssignmentService
+        if assignment_mode != "manual":
+            from ...modules.assignment.reassignment_service import ReassignmentService
 
+            reassignment_service = ReassignmentService(self.session)
+            result = await reassignment_service.reassign_to_next_candidate(incident.id)
+
+            if result.success:
                 logger.info(
-                    f"🔄 Iniciando reasignación diferida para incidente {incident_id}"
+                    f"✅ Reasignación automática tras cancelación mutua para incidente {incident.id}"
                 )
-                assignment_service = IntelligentAssignmentService(session)
-                result = await assignment_service.assign_incident_automatically(
-                    incident_id=incident_id,
-                    force_ai_analysis=False,
+            else:
+                logger.warning(
+                    f"⚠️ No se pudo reasignar automáticamente el incidente {incident.id}: "
+                    f"{result.error_message}"
                 )
-
-                if result.success:
-                    await session.commit()
-                    logger.info(
-                        f"✅ Reasignación diferida exitosa para incidente {incident_id}: "
-                        f"workshop={result.assigned_workshop.workshop_name if result.assigned_workshop else 'N/A'}"
-                    )
-                else:
-                    logger.warning(
-                        f"⚠️ Reasignación diferida falló para incidente {incident_id}: "
-                        f"{result.error_message}"
-                    )
-        except Exception as e:
-            logger.error(
-                f"❌ Error en reasignación diferida para incidente {incident_id}: {str(e)}",
-                exc_info=True,
-            )
 
     async def get_pending_cancellation(
         self,

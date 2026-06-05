@@ -69,8 +69,10 @@ class IncidentAssignmentAcceptedEvent(BaseEvent):
     incident_id: int = Field(..., description="ID of the incident")
     workshop_id: int = Field(..., description="ID of the workshop")
     workshop_name: str = Field(..., description="Name of the workshop")
-    technician_id: int = Field(..., description="ID of the assigned technician")
-    technician_name: str = Field(..., description="Name of the technician")
+    conversation_id: Optional[int] = Field(None, description="Active chat conversation ID")
+    technician_id: Optional[int] = Field(None, description="ID of the assigned technician")
+    technician_name: Optional[str] = Field(None, description="Name of the technician")
+    new_status: Optional[str] = Field(None, description="Canonical incident status after acceptance")
     eta: Optional[int] = Field(None, description="Estimated time of arrival in minutes")
     accepted_at: datetime = Field(default_factory=datetime.utcnow, description="When accepted")
 
@@ -85,6 +87,10 @@ class IncidentAssignmentRejectedEvent(BaseEvent):
     workshop_id: int = Field(..., description="ID of the workshop")
     workshop_name: str = Field(..., description="Name of the workshop")
     reason: Optional[str] = Field(None, description="Reason for rejection")
+    assignment_mode: Optional[str] = Field(
+        None,
+        description="Assignment mode: auto or manual",
+    )
     rejected_at: datetime = Field(default_factory=datetime.utcnow, description="When rejected")
 
 
@@ -280,6 +286,22 @@ class IncidentNoWorkshopAvailableEvent(BaseEvent):
     reason: str = Field(..., description="Reason why no workshop is available")
     workshops_contacted: int = Field(default=0, description="Number of workshops contacted")
     message: str = Field(default="No hay talleres disponibles en este momento", description="User-facing message")
+
+
+class IncidentReassignedEvent(BaseEvent):
+    """Event emitted when an incident is automatically reassigned to another workshop."""
+
+    event_type: Literal["incident.reassigned"] = "incident.reassigned"
+    priority: EventPriority = Field(default=EventPriority.HIGH)
+
+    incident_id: int = Field(..., description="ID of the incident")
+    previous_workshop_id: Optional[int] = Field(None, description="ID of the workshop that lost the assignment")
+    new_workshop_id: int = Field(..., description="ID of the newly assigned workshop")
+    new_workshop_name: Optional[str] = Field(None, description="Name of the new workshop")
+    new_technician_id: Optional[int] = Field(None, description="Suggested technician for the new workshop")
+    reason: Optional[str] = Field(None, description="Reason for reassignment")
+    new_status: str = Field(default="pendiente", description="Canonical status after reassignment")
+    reassigned_at: datetime = Field(default_factory=datetime.utcnow, description="When reassignment happened")
 
 
 class IncidentReassignmentStartedEvent(BaseEvent):

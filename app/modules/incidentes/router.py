@@ -363,8 +363,14 @@ async def reject_incidente(
         rejection_reason=request.motivo
     )
     
+    updated_incidente = await service.repository.find_by_id(incidente_id)
+
     # 3. Preparar respuesta según resultado
-    if result.success:
+    if updated_incidente and updated_incidente.assignment_mode == "manual":
+        message = (
+            "Solicitud rechazada. El incidente vuelve al cliente para que seleccione otro taller."
+        )
+    elif result.success:
         message = (
             f"Solicitud rechazada y reasignada automáticamente a "
             f"{result.assigned_workshop.workshop_name if result.assigned_workshop else 'otro taller'}."
@@ -379,7 +385,7 @@ async def reject_incidente(
             message = f"Solicitud rechazada. Error en reasignación: {result.error_message}"
     
     return create_success_response(
-        data=IncidenteResponse.model_validate(incidente).model_dump(mode='json'),
+        data=IncidenteResponse.model_validate(updated_incidente).model_dump(mode='json'),
         message=message,
     )
 
@@ -480,7 +486,12 @@ async def notify_assignment_timeout(
     )
     
     # 6. Preparar respuesta según resultado
-    if result.success:
+    if incidente.assignment_mode == "manual":
+        message = (
+            "Timeout procesado. El incidente vuelve al cliente para que seleccione o reenvíe a otro taller."
+        )
+        logger.info(f"✅ {message}")
+    elif result.success:
         message = (
             f"Timeout procesado. Incidente reasignado automáticamente a "
             f"{result.assigned_workshop.workshop_name if result.assigned_workshop else 'otro taller'}."
@@ -549,33 +560,37 @@ async def anular_asignacion_ambigua(
         motivo=request.motivo
     )
     
-    # 2. Activar reasignación automática
-    from ..assignment.reassignment_service import ReassignmentService
-    
-    reassignment_service = ReassignmentService(session)
-    result = await reassignment_service.handle_rejection(
-        incident_id=incidente_id,
-        workshop_id=current_user.id,
-        rejection_reason=f"Caso ambiguo anulado: {request.motivo}"
-    )
-    
+    updated_incidente = await service.repository.find_by_id(incidente_id)
+    result = None
+
+    if updated_incidente and updated_incidente.assignment_mode != "manual":
+        from ..assignment.reassignment_service import ReassignmentService
+
+        reassignment_service = ReassignmentService(session)
+        result = await reassignment_service.reassign_to_next_candidate(incidente_id)
+
     # 3. Preparar respuesta según resultado
-    if result.success:
+    if updated_incidente and updated_incidente.assignment_mode == "manual":
+        message = (
+            "Asignación anulada. El incidente vuelve al cliente para que seleccione otro taller."
+        )
+    elif result and result.success:
         message = (
             f"Asignación anulada. El incidente ha sido reasignado automáticamente a "
             f"{result.assigned_workshop.workshop_name if result.assigned_workshop else 'otro taller'}."
         )
     else:
-        if "Max attempts" in result.error_message or "No workshops available" in result.error_message:
+        error_message = result.error_message if result else "Reasignación no disponible"
+        if "Max attempts" in error_message or "No workshops available" in error_message:
             message = (
                 "Asignación anulada. No hay más talleres disponibles. "
                 "Se ha notificado al administrador para intervención manual."
             )
         else:
-            message = f"Asignación anulada. Error en reasignación: {result.error_message}"
+            message = f"Asignación anulada. Error en reasignación: {error_message}"
     
     return create_success_response(
-        data=IncidenteResponse.model_validate(incidente).model_dump(mode='json'),
+        data=IncidenteResponse.model_validate(updated_incidente).model_dump(mode='json'),
         message=message,
     )
 

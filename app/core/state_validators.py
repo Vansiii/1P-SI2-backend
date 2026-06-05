@@ -188,10 +188,10 @@ class StateValidators:
                 return False, "Cannot resolve incident without assigned technician"
             return True, ""
         
-        # If client is confirming resolution from COMPLETADO
+        # If client is confirming resolution from a completion-capable state
         if user_role == UserRole.CLIENTE:
-            if incident.estado_actual != "completado":
-                return False, "Client can only confirm resolution after technician completes work"
+            if incident.estado_actual not in {"completado", "en_proceso", "en_sitio"}:
+                return False, "Client can only confirm resolution after the service has progressed sufficiently"
             return True, ""
         
         # Admin can always resolve

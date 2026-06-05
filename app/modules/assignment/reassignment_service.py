@@ -79,8 +79,15 @@ class ReassignmentService:
                 response_message=rejection_reason
             )
             
-            # 2. Notify client about rejection and reassignment
             incident = await self._load_incident(incident_id)
+            if incident and incident.assignment_mode == "manual":
+                return await self._return_manual_selection_to_client(
+                    incident=incident,
+                    previous_workshop_id=workshop_id,
+                    reason=f"Rechazo del taller: {rejection_reason}"
+                )
+
+            # 2. Notify client about rejection and reassignment
             if incident:
                 try:
                     from ...shared.schemas.events.incident import IncidentReassignmentStartedEvent
@@ -103,7 +110,10 @@ class ReassignmentService:
             # For now, we proceed immediately
             
             # 4. Reassign with recalculation
-            result = await self.reassign_to_next_candidate(incident_id)
+            result = await self.reassign_to_next_candidate(
+                incident_id,
+                previous_workshop_id=workshop_id,
+            )
             
             if result.success:
                 logger.info(
@@ -149,6 +159,7 @@ class ReassignmentService:
                         AssignmentAttempt.status == 'pending',
                         AssignmentAttempt.timeout_at.isnot(None),
                         AssignmentAttempt.timeout_at <= now,
+                        AssignmentAttempt.workshop_id == Incidente.taller_id,
                         # 🔥 CLAVE: Solo procesar incidentes que AÚN están pendientes
                         Incidente.estado_actual == 'pendiente'
                     )
@@ -200,7 +211,8 @@ class ReassignmentService:
 
     async def reassign_to_next_candidate(
         self,
-        incident_id: int
+        incident_id: int,
+        previous_workshop_id: Optional[int] = None,
     ) -> AssignmentResult:
         """
         Reassign incident by RECALCULATING candidates in real-time.
@@ -257,6 +269,12 @@ class ReassignmentService:
                 f"Excluded workshops: {len(excluded_workshops)} "
                 f"(attempt {attempt_count + 1}/{max_attempts})"
             )
+
+            prior_workshop_id = (
+                previous_workshop_id
+                if previous_workshop_id is not None
+                else await self._resolve_previous_workshop_id(incident_id)
+            )
             
             if attempt_count >= max_attempts:
                 logger.warning(
@@ -298,7 +316,10 @@ class ReassignmentService:
                 )
                 # Remove this candidate and try again
                 excluded_workshops.append(best_candidate.workshop.id)
-                return await self.reassign_to_next_candidate(incident_id)
+                return await self.reassign_to_next_candidate(
+                    incident_id,
+                    previous_workshop_id=prior_workshop_id,
+                )
             
             # Validate technicians are still available
             if not best_candidate.available_technicians:
@@ -307,7 +328,10 @@ class ReassignmentService:
                     f"has no available technicians. Trying next candidate..."
                 )
                 excluded_workshops.append(best_candidate.workshop.id)
-                return await self.reassign_to_next_candidate(incident_id)
+                return await self.reassign_to_next_candidate(
+                    incident_id,
+                    previous_workshop_id=prior_workshop_id,
+                )
             
             logger.info(
                 f"✅ New candidate found: {best_candidate.workshop.workshop_name} "
@@ -328,35 +352,27 @@ class ReassignmentService:
                     timeout_minutes=timeout_minutes
                 )
                 
-                # Emit WebSocket event for incident reassignment
-                from ...core.websocket_events import emit_to_incident_room, EventTypes
-                
-                old_workshop_id = incident.taller_id
-                new_workshop_id = best_candidate.workshop.id
-                
-                reassignment_data = {
-                    "incident_id": incident_id,
-                    "old_workshop_id": old_workshop_id,
-                    "new_workshop_id": new_workshop_id,
-                    "new_workshop_name": best_candidate.workshop.workshop_name,
-                    "reason": "automatic_reassignment",
-                    "timestamp": datetime.utcnow().isoformat()
-                }
-                
-                # Emit to incident room (all participants: client, prev workshop, new workshop)
-                await emit_to_incident_room(
+                from ...core.event_publisher import EventPublisher
+                from ...shared.schemas.events.incident import IncidentReassignedEvent
+
+                reassignment_event = IncidentReassignedEvent(
                     incident_id=incident_id,
-                    event_type=EventTypes.INCIDENT_REASSIGNED,
-                    data=reassignment_data
+                    previous_workshop_id=prior_workshop_id,
+                    new_workshop_id=best_candidate.workshop.id,
+                    new_workshop_name=best_candidate.workshop.workshop_name,
+                    new_technician_id=best_candidate.available_technicians[0].id
+                    if best_candidate.available_technicians else None,
+                    reason="automatic_reassignment",
+                    new_status="pendiente",
+                    reassigned_at=datetime.utcnow(),
                 )
-                
+                await EventPublisher.publish(self.session, reassignment_event)
+                await self.session.commit()
+
                 logger.info(
-                    f"WebSocket event 'incident_reassigned' emitted to incident room {incident_id} "
-                    f"(old_workshop: {old_workshop_id}, new_workshop: {new_workshop_id})"
+                    f"✅ Reassignment event published for incident {incident_id} "
+                    f"(old_workshop: {prior_workshop_id}, new_workshop: {best_candidate.workshop.id})"
                 )
-                
-                # Notification is handled by OutboxProcessor via incident_reassigned event
-                logger.info(f"✅ Reassignment event will be processed by OutboxProcessor for client {incident.client_id}")
                 
                 logger.info(
                     f"✅ Successfully reassigned incident {incident_id} to "
@@ -385,6 +401,31 @@ class ReassignmentService:
                 success=False,
                 error_message=f"Reassignment error: {str(e)}"
             )
+
+    async def _resolve_previous_workshop_id(self, incident_id: int) -> Optional[int]:
+        """Resolve the workshop that most recently handled the incident before reassignment."""
+        try:
+            result = await self.session.execute(
+                select(AssignmentAttempt.workshop_id)
+                .where(
+                    and_(
+                        AssignmentAttempt.incident_id == incident_id,
+                        AssignmentAttempt.status.in_(["rejected", "timeout", "accepted", "pending"])
+                    )
+                )
+                .order_by(
+                    AssignmentAttempt.responded_at.desc(),
+                    AssignmentAttempt.attempted_at.desc(),
+                    AssignmentAttempt.created_at.desc(),
+                )
+                .limit(1)
+            )
+            return result.scalar_one_or_none()
+        except Exception as error:
+            logger.warning(
+                f"Could not resolve previous workshop for incident {incident_id}: {error}"
+            )
+            return None
 
     async def notify_admin_no_workshops(self, incident_id: int) -> bool:
         """
@@ -575,8 +616,15 @@ class ReassignmentService:
                 response_message="Timeout: No response within time limit"
             )
             
-            # 2. Notify client about timeout and reassignment
             incident = await self._load_incident(incident_id)
+            if incident and incident.assignment_mode == "manual":
+                return await self._return_manual_selection_to_client(
+                    incident=incident,
+                    previous_workshop_id=workshop_id,
+                    reason="Timeout: El taller no respondió a tiempo"
+                )
+
+            # 2. Notify client about timeout and reassignment
             if incident:
                 try:
                     from ...shared.schemas.events.incident import IncidentReassignmentStartedEvent
@@ -619,6 +667,70 @@ class ReassignmentService:
                 success=False,
                 error_message=f"Timeout handling error: {str(e)}"
             )
+
+    async def _return_manual_selection_to_client(
+        self,
+        incident: Incidente,
+        previous_workshop_id: int,
+        reason: str
+    ) -> AssignmentResult:
+        """Return control to the client when the incident uses manual assignment."""
+        old_status = incident.estado_actual
+        now = datetime.utcnow()
+
+        await self.session.execute(
+            update(AssignmentAttempt)
+            .where(
+                AssignmentAttempt.incident_id == incident.id,
+                AssignmentAttempt.status == "pending",
+            )
+            .values(
+                status="cancelled",
+                responded_at=now,
+                response_message=reason,
+            )
+        )
+
+        incident.taller_id = None
+        incident.tecnico_id = None
+        if incident.estado_actual != "pendiente":
+            incident.estado_actual = "pendiente"
+
+        await self.session.commit()
+
+        if old_status != incident.estado_actual:
+            try:
+                from ...shared.schemas.events.incident import IncidentStatusChangedEvent
+                from ...core.event_publisher import EventPublisher
+
+                status_event = IncidentStatusChangedEvent(
+                    incident_id=incident.id,
+                    old_status=old_status,
+                    new_status=incident.estado_actual,
+                    changed_by=0,
+                    changed_by_role="system",
+                    reason=reason
+                )
+                await EventPublisher.publish(self.session, status_event)
+                await self.session.commit()
+            except Exception as exc:
+                logger.error(
+                    "Failed to publish manual reassignment status event",
+                    incident_id=incident.id,
+                    error=str(exc)
+                )
+
+        logger.info(
+            f"📋 Manual mode incident {incident.id}: returned control to client after workshop "
+            f"{previous_workshop_id}. Reason: {reason}"
+        )
+
+        return AssignmentResult(
+            success=True,
+            strategy_used=None,
+            candidates_evaluated=0,
+            reasoning="Manual mode: el cliente debe seleccionar un nuevo taller."
+        )
 
     async def _count_assignment_attempts(self, incident_id: int) -> int:
         """Count total assignment attempts for an incident."""

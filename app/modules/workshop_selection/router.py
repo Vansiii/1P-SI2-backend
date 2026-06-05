@@ -86,8 +86,13 @@ async def get_assignment_history(
 ):
     client_id = int(user_payload["sub"])
     service = WorkshopSelectionService(session)
-    history = await service.get_assignment_history(incident_id, workshop_id, client_id)
-    return create_success_response(data=history, message=f"{len(history)} intentos de asignación")
+    try:
+        history = await service.get_assignment_history(incident_id, workshop_id, client_id)
+        return create_success_response(data=history, message=f"{len(history)} intentos de asignación")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 # === Perfil publico del taller ===

@@ -195,6 +195,12 @@ class IncidentStateMachine:
         ),
         Transition(
             from_state=IncidentState.ACEPTADO,
+            to_state=IncidentState.PENDIENTE,
+            allowed_roles=[UserRole.ADMIN],
+            description="Reasignaci?n por cancelaci?n mutua antes del desplazamiento"
+        ),
+        Transition(
+            from_state=IncidentState.ACEPTADO,
             to_state=IncidentState.CANCELADO,
             allowed_roles=[UserRole.CLIENTE, UserRole.TALLER, UserRole.ADMIN],
             description="Cancelación después de aceptación"
@@ -206,6 +212,12 @@ class IncidentStateMachine:
             to_state=IncidentState.EN_PROCESO,
             allowed_roles=[UserRole.TECNICO, UserRole.ADMIN],
             description="Técnico llega y comienza trabajo"
+        ),
+        Transition(
+            from_state=IncidentState.EN_CAMINO,
+            to_state=IncidentState.PENDIENTE,
+            allowed_roles=[UserRole.ADMIN],
+            description="Reasignaci?n por cancelaci?n mutua mientras el t?cnico va en camino"
         ),
         Transition(
             from_state=IncidentState.EN_CAMINO,

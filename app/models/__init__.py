@@ -30,6 +30,9 @@ from .subscription_invoice import SubscriptionInvoice
 from .outbox_event import OutboxEvent, EventPriority
 from .event_log import EventLog
 
+# Sync operations (Offline queue idempotency)
+from .sync_operation import SyncOperation, SyncOperationStatus
+
 # Modelos de negocio (gestión de emergencias vehiculares)
 from .cancellation_request import CancellationRequest
 from .categoria import Categoria
@@ -112,6 +115,9 @@ __all__ = [
     "OutboxEvent",
     "EventLog",
     "EventPriority",
+    # Sync operations (Offline queue idempotency)
+    "SyncOperation",
+    "SyncOperationStatus",
     # Financiero (Módulo 6: Pagos y Comisiones)
     "Transaction",
     "WorkshopBalance",

@@ -19,6 +19,41 @@ from app.models.service_rating import ServiceRating  # CU06
 
 logger = logging.getLogger(__name__)
 
+ACTIVE_INCIDENT_STATUS_ALIASES = [
+    'asignado', 'assigned',
+    'aceptado', 'accepted',
+    'en_proceso', 'in_progress', 'en proceso', 'en_progreso',
+    'en_camino', 'on_way', 'en camino',
+    'en_sitio', 'on_site', 'en sitio',
+]
+
+
+def _empty_workshop_status_counts() -> Dict[str, int]:
+    return {
+        'available': 0,
+        'busy': 0,
+        'offline': 0,
+        'out_of_service': 0,
+    }
+
+
+def _derive_workshop_availability_status(
+    workshop: Workshop,
+    total_technicians: int,
+    available_technicians: int,
+) -> str:
+    if not getattr(workshop, 'is_active', True):
+        return 'offline'
+    if getattr(workshop, 'is_available', True) is False:
+        return 'offline'
+    if getattr(workshop, 'is_verified', True) is False:
+        return 'out_of_service'
+    if total_technicians <= 0:
+        return 'offline'
+    if available_technicians > 0:
+        return 'available'
+    return 'busy'
+
 
 # ============================================================================
 # System Metrics Queries
@@ -76,43 +111,7 @@ async def get_system_metrics(db: AsyncSession) -> Dict:
         
         incident_row = incident_counts.first()
         
-        # Count workshops by availability
-        # A workshop is "available" if it has at least one available technician
-        # A workshop is "busy" if all technicians are busy
-        # A workshop is "offline" if it has no technicians or all are offline
-        
-        workshop_counts = await db.execute(
-            select(
-                func.count(Workshop.id).label('total'),
-                func.sum(case((
-                    and_(
-                        Workshop.is_active == True,
-                        Workshop.is_verified == True
-                    ), 1
-                ), else_=0)).label('available'),
-                func.sum(case((
-                    Workshop.is_active == False, 1
-                ), else_=0)).label('offline')
-            )
-        )
-        
-        workshop_row = workshop_counts.first()
-        
-        # Calculate busy workshops (workshops with all technicians busy)
-        # This requires a subquery
-        busy_workshops_query = await db.execute(
-            select(func.count()).select_from(
-                select(Workshop.id).join(
-                    Technician, Workshop.id == Technician.workshop_id
-                ).group_by(Workshop.id).having(
-                    func.count(Technician.id) > 0
-                ).having(
-                    func.sum(case((Technician.is_available == True, 1), else_=0)) == 0
-                ).subquery()
-            )
-        )
-        
-        busy_count = busy_workshops_query.scalar() or 0
+        _, _, workshop_status_counts = await get_all_workshops_with_status(db)
         
         # Rating metrics (CU06)
         rating_metrics = await db.execute(
@@ -133,9 +132,9 @@ async def get_system_metrics(db: AsyncSession) -> Dict:
             'assigned_incidents': incident_row.asignado or 0,
             'in_progress_incidents': (incident_row.en_proceso or 0) + (incident_row.en_camino or 0) + (incident_row.en_sitio or 0),
             'resolved_today': incident_row.resuelto_hoy or 0,
-            'available_workshops': (workshop_row.available or 0) - busy_count,
-            'busy_workshops': busy_count,
-            'offline_workshops': workshop_row.offline or 0,
+            'available_workshops': workshop_status_counts.get('available', 0),
+            'busy_workshops': workshop_status_counts.get('busy', 0),
+            'offline_workshops': workshop_status_counts.get('offline', 0) + workshop_status_counts.get('out_of_service', 0),
             # Rating metrics (CU06)
             'total_ratings': rating_row.total_ratings or 0,
             'average_rating': round(float(rating_row.average_rating or 0), 2),
@@ -250,37 +249,41 @@ async def get_all_workshops_with_status(db: AsyncSession) -> Tuple[List[Dict], i
     Returns (workshops_with_status, total_count, by_status_dict)
     """
     try:
-        # Get workshops with technician counts using subquery to avoid GROUP BY issues
-        from sqlalchemy import literal_column
-        
-        # First, get technician counts per workshop
         tech_counts_subq = select(
             Technician.workshop_id,
             func.count(Technician.id).label('total_technicians'),
             func.sum(case((Technician.is_available == True, 1), else_=0)).label('available_technicians'),
             func.sum(case((Technician.is_available == False, 1), else_=0)).label('busy_technicians')
         ).group_by(Technician.workshop_id).subquery()
-        
-        # Then join with workshops
+
+        normalized_incident_status = func.lower(func.trim(Incidente.estado_actual))
+        active_incidents_subq = select(
+            Incidente.taller_id.label('workshop_id'),
+            func.count(Incidente.id).label('active_incidents')
+        ).where(
+            and_(
+                Incidente.taller_id.isnot(None),
+                normalized_incident_status.in_(ACTIVE_INCIDENT_STATUS_ALIASES)
+            )
+        ).group_by(Incidente.taller_id).subquery()
+
         query = select(
             Workshop,
             func.coalesce(tech_counts_subq.c.total_technicians, 0).label('total_technicians'),
             func.coalesce(tech_counts_subq.c.available_technicians, 0).label('available_technicians'),
-            func.coalesce(tech_counts_subq.c.busy_technicians, 0).label('busy_technicians')
+            func.coalesce(tech_counts_subq.c.busy_technicians, 0).label('busy_technicians'),
+            func.coalesce(active_incidents_subq.c.active_incidents, 0).label('active_incidents')
         ).outerjoin(
             tech_counts_subq, Workshop.id == tech_counts_subq.c.workshop_id
+        ).outerjoin(
+            active_incidents_subq, Workshop.id == active_incidents_subq.c.workshop_id
         )
         
         result = await db.execute(query)
         rows = result.all()
         
         workshops_with_status = []
-        by_status = {
-            'available': 0,
-            'busy': 0,
-            'offline': 0,
-            'out_of_service': 0
-        }
+        by_status = _empty_workshop_status_counts()
         
         for row in rows:
             workshop = row.Workshop
@@ -288,39 +291,15 @@ async def get_all_workshops_with_status(db: AsyncSession) -> Tuple[List[Dict], i
             available_techs = row.available_technicians or 0
             busy_techs = row.busy_technicians or 0
             
-            # Determine availability status
-            if not workshop.is_active:
-                status = 'offline'
-                by_status['offline'] += 1
-            elif not workshop.is_verified:
-                status = 'out_of_service'
-                by_status['out_of_service'] += 1
-            elif total_techs == 0:
-                status = 'offline'
-                by_status['offline'] += 1
-            elif available_techs > 0:
-                status = 'available'
-                by_status['available'] += 1
-            else:
-                status = 'busy'
-                by_status['busy'] += 1
-            
-            # Count active incidents for this workshop
-            active_incidents_query = await db.execute(
-                select(func.count(Incidente.id)).where(
-                    and_(
-                        Incidente.taller_id == workshop.id,
-                        Incidente.estado_actual.in_([
-                            'asignado', 'en_proceso', 'en_camino', 'en_sitio'
-                        ])
-                    )
-                )
-            )
-            active_incidents = active_incidents_query.scalar() or 0
+            active_incidents = row.active_incidents or 0
+            status = _derive_workshop_availability_status(workshop, total_techs, available_techs)
+            by_status[status] += 1
             
             workshops_with_status.append({
                 'id': workshop.id,
                 'workshop_name': workshop.workshop_name,
+                'is_active': workshop.is_active,
+                'is_available': workshop.is_available,
                 'is_verified': workshop.is_verified,
                 'address': workshop.address,
                 'coverage_radius_km': workshop.coverage_radius_km,
@@ -394,20 +373,10 @@ async def get_chart_data(db: AsyncSession) -> Dict:
         ]
         
         # Workshops by status (simplified - would need more complex query for real status)
-        workshops_by_status_query = await db.execute(
-            select(
-                case(
-                    (Workshop.is_active == True, 'Disponible'),
-                    else_='Fuera de línea'
-                ).label('name'),
-                func.count(Workshop.id).label('value')
-            ).group_by(
-                Workshop.is_active
-            )
-        )
+        _, _, workshop_status_counts = await get_all_workshops_with_status(db)
         workshops_by_status = [
-            {'name': 'Disponible' if row.name else 'Fuera de línea', 'value': row.value}
-            for row in workshops_by_status_query.all()
+            {'name': status, 'value': workshop_status_counts.get(status, 0)}
+            for status in ['available', 'busy', 'offline', 'out_of_service']
         ]
         
         # Incidents timeline (last 24 hours, grouped by hour)
