@@ -1,6 +1,7 @@
 from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, Integer, Numeric, String, Text, func
+import sqlalchemy as sa
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base
@@ -23,7 +24,7 @@ class SubscriptionPlan(Base):
     enable_reports: Mapped[bool] = mapped_column(Boolean, default=False)
     enable_realtime_tracking: Mapped[bool] = mapped_column(Boolean, default=False)
     enable_quotes: Mapped[bool] = mapped_column(Boolean, default=False)
-    enable_voice_reports: Mapped[bool] = mapped_column(Boolean, default=False)
+    enable_voice_reports: Mapped[bool] = mapped_column(Boolean, default=True, server_default=sa.text('true'))
     enable_priority_support: Mapped[bool] = mapped_column(Boolean, default=False)
     enable_api_access: Mapped[bool] = mapped_column(Boolean, default=False)
     enable_white_label: Mapped[bool] = mapped_column(Boolean, default=False)

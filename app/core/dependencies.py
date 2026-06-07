@@ -365,7 +365,9 @@ def require_feature(feature_name: str):
         from app.models.subscription_plan import SubscriptionPlan
 
         result = await session.execute(
-            __import__("sqlalchemy").select(TenantSubscription).join(SubscriptionPlan).where(
+            select(TenantSubscription).join(
+                SubscriptionPlan, TenantSubscription.plan_id == SubscriptionPlan.id
+            ).where(
                 TenantSubscription.tenant_id == ctx.tenant_id,
                 TenantSubscription.status.in_(['active', 'trialing', 'past_due', 'pending_downgrade', 'pending_cancellation']),
             )

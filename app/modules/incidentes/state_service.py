@@ -168,12 +168,11 @@ class IncidentStateTransitionService:
         
         elif new_state == "en_camino":
             # Technician is on the way
-            # Tracking session should be started by tracking service
             pass
         
         elif new_state == "en_proceso":
-            # Work has started
-            pass
+            if not incident.arrived_at:
+                incident.arrived_at = datetime.now(UTC)
         
         elif new_state in ["completado", "resuelto"]:
             # Set resolution timestamp

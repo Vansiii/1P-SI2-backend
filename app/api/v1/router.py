@@ -36,6 +36,9 @@ from ...modules.technician_management.router import router as technician_managem
 from ...modules.routing.router import router as routing_router
 from ...modules.metrics.router import router as metrics_endpoints_router
 from ...modules.metrics.timeseries_router import router as metrics_timeseries_router
+from ...modules.metrics.workshop_kpi_router import router as workshop_kpi_router
+from ...modules.voice.router import router as voice_router
+from ...modules.client_reports.router import router as client_reports_router
 from ...modules.especialidades.router import router as especialidades_router
 
 # Payment module routers
@@ -267,6 +270,12 @@ api_router.include_router(
     tags=["Metrics Time Series"],
 )
 
+# Workshop KPI routes
+api_router.include_router(
+    workshop_kpi_router,
+    tags=["Workshop KPIs"],
+)
+
 # Especialidades routes
 api_router.include_router(
     especialidades_router,
@@ -365,6 +374,18 @@ api_router.include_router(
 api_router.include_router(
     plan_admin_router,
     tags=["Admin - Plans"],
+)
+
+# Voice commands routes
+api_router.include_router(
+    voice_router,
+    tags=["Voice Commands"],
+)
+
+# Client reports routes
+api_router.include_router(
+    client_reports_router,
+    tags=["Client Reports"],
 )
 
 __all__ = ["api_router"]
