@@ -4,6 +4,7 @@ Tracking endpoints for managing technician location tracking.
 from typing import List, Optional
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, status, Query
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...core.database import get_db
@@ -289,9 +290,60 @@ async def get_session_history(
     Returns all location points recorded during the session,
     ordered by time (most recent first).
     
-    **Permissions:** Technician can view their own sessions, admins can view all
+    **Permissions:** Technician can view their own sessions, clients can view
+    sessions for their incidents, admins can view all
     """
+    from ...models.tracking_session import TrackingSession
+    from ...models.incidente import Incidente
+    
     tracking_service = TrackingService(db)
+    
+    # Verify ownership
+    is_admin = current_user.user_type == "admin"
+    if not is_admin:
+        tracking_session = await db.scalar(
+            select(TrackingSession).where(TrackingSession.id == session_id)
+        )
+        if not tracking_session:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Tracking session {session_id} not found"
+            )
+        
+        if current_user.user_type == "technician":
+            if tracking_session.technician_id != current_user.id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You can only view your own tracking sessions"
+                )
+        elif current_user.user_type == "client":
+            if not tracking_session.incidente_id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You can only view sessions related to your incidents"
+                )
+            incident = await db.scalar(
+                select(Incidente).where(Incidente.id == tracking_session.incidente_id)
+            )
+            if not incident or incident.client_id != current_user.id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You can only view sessions related to your incidents"
+                )
+        elif current_user.user_type == "workshop":
+            if not tracking_session.incidente_id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You can only view sessions for incidents assigned to your workshop"
+                )
+            incident = await db.scalar(
+                select(Incidente).where(Incidente.id == tracking_session.incidente_id)
+            )
+            if not incident or incident.taller_id != current_user.id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You can only view sessions for incidents assigned to your workshop"
+                )
 
     try:
         history = await tracking_service.get_session_history(
@@ -319,14 +371,32 @@ async def get_technician_history(
     """
     Get location history for a technician within a time range.
     
-    **Permissions:** Technician can view their own history, admins can view all
+    **Permissions:** Technician can view their own history, clients can view
+    history of technicians assigned to their incidents, admins can view all
     """
     # Verify permissions
-    if current_user.user_type != "admin" and current_user.id != technician_id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You can only view your own location history"
-        )
+    is_admin = current_user.user_type == "admin"
+    if not is_admin and current_user.id != technician_id:
+        # Allow clients to view history of technicians assigned to their incidents
+        if current_user.user_type == "client":
+            from ...models.incidente import Incidente
+            result = await db.execute(
+                select(Incidente.id).where(
+                    Incidente.client_id == current_user.id,
+                    Incidente.tecnico_id == technician_id
+                ).limit(1)
+            )
+            has_access = result.scalar_one_or_none()
+            if not has_access:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You can only view location history for technicians assigned to your incidents"
+                )
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only view your own location history"
+            )
 
     tracking_service = TrackingService(db)
     
@@ -352,8 +422,42 @@ async def get_incident_sessions(
     Returns all tracking sessions associated with the incident,
     including active and completed sessions.
     
-    **Permissions:** Client can view their incident sessions, technicians and admins can view all
+    **Permissions:** Client can view their incident sessions, technicians assigned
+    to the incident can view, workshop assigned to the incident can view, admins can view all
     """
+    from ...models.incidente import Incidente
+    
+    # Verify ownership
+    is_admin = current_user.user_type == "admin"
+    if not is_admin:
+        incident = await db.scalar(
+            select(Incidente).where(Incidente.id == incident_id)
+        )
+        if not incident:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Incident {incident_id} not found"
+            )
+        
+        if current_user.user_type == "client":
+            if incident.client_id != current_user.id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You can only view sessions for your own incidents"
+                )
+        elif current_user.user_type == "technician":
+            if incident.tecnico_id != current_user.id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You can only view sessions for incidents assigned to you"
+                )
+        elif current_user.user_type == "workshop":
+            if incident.taller_id != current_user.id:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="You can only view sessions for incidents assigned to your workshop"
+                )
+    
     tracking_service = TrackingService(db)
     
     sessions = await tracking_service.get_incident_tracking_sessions(incident_id)

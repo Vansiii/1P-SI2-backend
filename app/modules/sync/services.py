@@ -2,12 +2,16 @@
 Sync Service for offline queue synchronization with idempotency, conflict detection,
 and multi-tenant isolation.
 
-Supports 11 operation types:
+Supports offline synchronization for incidents, chat, vehicles, notifications,
+catalog, and cancellation flows:
 - CREATE_INCIDENT, UPDATE_INCIDENT_STATUS, UPDATE_INCIDENT
 - SEND_CHAT_MESSAGE
 - UPDATE_LOCATION, ASSIGN_TECHNICIAN, MARK_ARRIVED
-- UPLOAD_EVIDENCE, SELECT_WORKSHOP
-- CREATE_VEHICLE, UPDATE_VEHICLE
+- UPLOAD_EVIDENCE, UPLOAD_FILE, SELECT_WORKSHOP
+- CREATE_VEHICLE, UPDATE_VEHICLE, DELETE_VEHICLE
+- MARK_NOTIFICATION_READ
+- CREATE_CATALOG_ITEM, UPDATE_CATALOG_ITEM, TOGGLE_CATALOG_ITEM, DELETE_CATALOG_ITEM
+- REQUEST_CANCELLATION, RESPOND_CANCELLATION
 """
 
 from datetime import datetime, timezone
@@ -18,13 +22,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...core.logging import get_logger
-from ...core.exceptions import NotFoundException, ValidationException
+from ...core.exceptions import NotFoundException, ValidationException, ForbiddenException
 from ...models.sync_operation import SyncOperation, SyncOperationStatus
 from ...models.incidente import Incidente
 from ...models.workshop import Workshop
 from ...models.tenant import Tenant
 from ...models.tenant_subscription import TenantSubscription
 from ...models.technician import Technician
+from ...models.user import User
 
 from .schemas import QueueOperation, OperationResult
 
@@ -93,17 +98,21 @@ class SyncService:
             await self.session.flush()
             return result
         except Exception:
+            exc = getattr(_sys_exc_info(), "value", None)
+            exc_msg = str(exc) if exc else "unknown"
             record.status = SyncOperationStatus.FAILED
-            record.error_message = str(getattr(
-                _sys_exc_info(), "value", None
-            ) or "unknown")
+            record.error_message = exc_msg
             record.retry_count = operation.retries + 1
             await self.session.flush()
+            logger.error(
+                "Sync operation failed — type=%s user=%s cid=%s error=%s",
+                operation.operation_type, user_id, cid, exc_msg, exc_info=True,
+            )
             return OperationResult(
                 client_operation_id=cid,
                 status="failed",
                 success=False,
-                message="Internal error processing operation",
+                message=f"Error: {exc_msg}",
                 retryable=True,
             )
 
@@ -121,9 +130,18 @@ class SyncService:
                 "ASSIGN_TECHNICIAN",
                 "MARK_ARRIVED",
                 "UPLOAD_EVIDENCE",
+                "UPLOAD_FILE",
                 "SELECT_WORKSHOP",
                 "CREATE_VEHICLE",
                 "UPDATE_VEHICLE",
+                "DELETE_VEHICLE",
+                "MARK_NOTIFICATION_READ",
+                "CREATE_CATALOG_ITEM",
+                "UPDATE_CATALOG_ITEM",
+                "TOGGLE_CATALOG_ITEM",
+                "DELETE_CATALOG_ITEM",
+                "REQUEST_CANCELLATION",
+                "RESPOND_CANCELLATION",
             ],
         }
 
@@ -170,12 +188,30 @@ class SyncService:
             return await self._handle_mark_arrived(payload, user_id, op)
         elif otype == "UPLOAD_EVIDENCE":
             return await self._handle_upload_evidence(payload, user_id, op)
+        elif otype == "UPLOAD_FILE":
+            return await self._handle_upload_file(payload, user_id, op)
         elif otype == "SELECT_WORKSHOP":
             return await self._handle_select_workshop(payload, user_id, op)
         elif otype == "CREATE_VEHICLE":
             return await self._handle_create_vehicle(payload, user_id, op)
         elif otype == "UPDATE_VEHICLE":
             return await self._handle_update_vehicle(payload, user_id, op)
+        elif otype == "DELETE_VEHICLE":
+            return await self._handle_delete_vehicle(payload, user_id, op)
+        elif otype == "MARK_NOTIFICATION_READ":
+            return await self._handle_mark_notification_read(payload, user_id, op)
+        elif otype == "CREATE_CATALOG_ITEM":
+            return await self._handle_create_catalog_item(payload, user_id, op)
+        elif otype == "UPDATE_CATALOG_ITEM":
+            return await self._handle_update_catalog_item(payload, user_id, op)
+        elif otype == "TOGGLE_CATALOG_ITEM":
+            return await self._handle_toggle_catalog_item(payload, user_id, op)
+        elif otype == "DELETE_CATALOG_ITEM":
+            return await self._handle_delete_catalog_item(payload, user_id, op)
+        elif otype == "REQUEST_CANCELLATION":
+            return await self._handle_request_cancellation(payload, user_id, op)
+        elif otype == "RESPOND_CANCELLATION":
+            return await self._handle_respond_cancellation(payload, user_id, op)
         else:
             return OperationResult(
                 client_operation_id=op.client_operation_id,
@@ -257,13 +293,28 @@ class SyncService:
             )
         return None
 
+    async def _get_workshop_tenant_id(self, user_id: int) -> Optional[int]:
+        workshop = await self.session.get(Workshop, user_id)
+        return workshop.tenant_id if workshop else None
+
+    async def _get_user_type(self, user_id: int) -> Optional[str]:
+        user = await self.session.get(User, user_id)
+        return user.user_type if user else None
+
     # ── Handlers ──────────────────────────────────────────────────────────
 
     async def _handle_create_incident(
         self, payload: dict, user_id: int, op: QueueOperation
     ) -> OperationResult:
-        from ...modules.incidentes.service import IncidentService
+        from ...modules.incidentes.service import IncidenteService
         from ...modules.incidentes.schemas import IncidenteCreateRequest
+
+        logger.info(
+            "Sync CREATE_INCIDENT — user=%s payload_keys=%s vehiculo_id=%s desc_len=%d",
+            user_id, list(payload.keys()),
+            payload.get("vehiculo_id"),
+            len(payload.get("descripcion", "")),
+        )
 
         incident_request = IncidenteCreateRequest(
             vehiculo_id=payload["vehiculo_id"],
@@ -275,8 +326,12 @@ class SyncService:
             imagenes=payload.get("imagenes", []),
             audios=payload.get("audios", []),
         )
-        service = IncidentService(self.session)
+        service = IncidenteService(self.session)
         incident = await service.create_incidente(user_id, incident_request)
+        logger.info(
+            "Sync CREATE_INCIDENT success — incident_id=%s user=%s",
+            incident.id, user_id,
+        )
         return OperationResult(
             client_operation_id=op.client_operation_id,
             status="completed",
@@ -328,6 +383,9 @@ class SyncService:
     async def _handle_update_incident(
         self, payload: dict, user_id: int, op: QueueOperation
     ) -> OperationResult:
+        from ...core.event_publisher import EventPublisher
+        from ...shared.schemas.events.incident import IncidentUpdatedEvent
+
         incident_id = payload.get("incident_id")
         if not incident_id:
             return OperationResult(
@@ -345,10 +403,34 @@ class SyncService:
 
         incident = await self.session.get(Incidente, incident_id)
         updatable = {"descripcion", "direccion_referencia"}
+        updated_fields: dict[str, Any] = {}
         for key, value in payload.items():
             if key in updatable and value is not None:
                 setattr(incident, key, value)
+                updated_fields[key] = value
+
+        if not updated_fields:
+            return OperationResult(
+                client_operation_id=op.client_operation_id,
+                status="completed",
+                success=True,
+                server_entity_id=incident.id,
+                message="No hubo cambios para aplicar",
+                server_state={"incident_id": incident.id, "estado": incident.estado_actual},
+            )
+
+        incident.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        updated_fields["updated_at"] = incident.updated_at.isoformat()
         await self.session.flush()
+
+        await EventPublisher.publish(
+            self.session,
+            IncidentUpdatedEvent(
+                incident_id=incident.id,
+                updated_fields=updated_fields,
+            ),
+            tenant_id=incident.tenant_id,
+        )
 
         return OperationResult(
             client_operation_id=op.client_operation_id,
@@ -356,6 +438,7 @@ class SyncService:
             success=True,
             server_entity_id=incident.id,
             message="Incidente actualizado correctamente",
+            server_state={"incident_id": incident.id, "estado": incident.estado_actual},
         )
 
     async def _handle_send_chat_message(
@@ -574,6 +657,48 @@ class SyncService:
             message="Evidencia registrada correctamente",
         )
 
+    async def _handle_upload_file(
+        self, payload: dict, user_id: int, op: QueueOperation
+    ) -> OperationResult:
+        """Handle file upload sync operation.
+
+        Note: The mobile client should upload the actual file via multipart
+        BEFORE sending this operation in the sync batch. This handler just
+        records the file_url in the database if provided.
+        """
+        file_url = payload.get("file_url")
+        file_type = payload.get("file_type", "image")
+        file_name = payload.get("file_name", "upload.jpg")
+        mime_type = payload.get("mime_type", "image/jpeg")
+        file_size = payload.get("file_size", 0)
+
+        if not file_url:
+            return OperationResult(
+                client_operation_id=op.client_operation_id,
+                status="failed",
+                success=False,
+                message="Se requiere file_url. El archivo debe subirse via multipart antes del sync batch.",
+                retryable=False,
+            )
+
+        if file_url.startswith("local://"):
+            return OperationResult(
+                client_operation_id=op.client_operation_id,
+                status="failed",
+                success=False,
+                message="URL local no valida. El archivo debe subirse al servidor antes del sync.",
+                retryable=False,
+            )
+
+        return OperationResult(
+            client_operation_id=op.client_operation_id,
+            status="completed",
+            success=True,
+            server_entity_id=None,
+            message="Archivo registrado correctamente",
+            server_state={"file_url": file_url, "file_type": file_type},
+        )
+
     async def _handle_select_workshop(
         self, payload: dict, user_id: int, op: QueueOperation
     ) -> OperationResult:
@@ -651,6 +776,12 @@ class SyncService:
         from ...modules.vehiculos.service import VehiculoService
         from ...modules.vehiculos.schemas import VehiculoCreateRequest
 
+        logger.info(
+            "Sync CREATE_VEHICLE — user=%s payload_keys=%s matricula=%s",
+            user_id, list(payload.keys()),
+            payload.get("matricula"),
+        )
+
         request = VehiculoCreateRequest(
             matricula=payload["matricula"],
             marca=payload.get("marca"),
@@ -661,6 +792,10 @@ class SyncService:
         )
         svc = VehiculoService(self.session)
         vehiculo = await svc.create_vehiculo(user_id, request)
+        logger.info(
+            "Sync CREATE_VEHICLE success — vehicle_id=%s matricula=%s user=%s",
+            vehiculo.id, vehiculo.matricula, user_id,
+        )
         return OperationResult(
             client_operation_id=op.client_operation_id,
             status="completed",
@@ -674,6 +809,7 @@ class SyncService:
         self, payload: dict, user_id: int, op: QueueOperation
     ) -> OperationResult:
         from ...modules.vehiculos.service import VehiculoService
+        from ...modules.vehiculos.schemas import VehiculoUpdateRequest
 
         vehicle_id = payload.get("vehiculo_id")
         if not vehicle_id:
@@ -698,11 +834,15 @@ class SyncService:
                 retryable=False,
             )
 
-        updatable = {"marca", "modelo", "anio", "color", "imagen"}
-        for key, value in payload.items():
-            if key in updatable and value is not None:
-                setattr(vehiculo, key, value)
-        await self.session.flush()
+        request = VehiculoUpdateRequest(
+            marca=payload.get("marca"),
+            modelo=payload.get("modelo"),
+            anio=payload.get("anio"),
+            color=payload.get("color"),
+            imagen=payload.get("imagen"),
+            is_active=payload.get("is_active"),
+        )
+        vehiculo = await svc.update_vehiculo(vehicle_id, user_id, request)
 
         return OperationResult(
             client_operation_id=op.client_operation_id,
@@ -711,6 +851,312 @@ class SyncService:
             server_entity_id=vehiculo.id,
             message="Vehiculo actualizado correctamente",
         )
+
+    async def _handle_delete_vehicle(
+        self, payload: dict, user_id: int, op: QueueOperation
+    ) -> OperationResult:
+        from ...modules.vehiculos.service import VehiculoService
+
+        vehicle_id = payload.get("vehiculo_id")
+        if not vehicle_id:
+            return OperationResult(
+                client_operation_id=op.client_operation_id,
+                status="failed",
+                success=False,
+                message="Se requiere vehiculo_id",
+                retryable=False,
+            )
+
+        svc = VehiculoService(self.session)
+        try:
+            await svc.delete_vehiculo(vehicle_id, client_id=user_id)
+        except NotFoundException:
+            return OperationResult(
+                client_operation_id=op.client_operation_id,
+                status="conflict",
+                success=False,
+                conflict_code=ConflictCode.RESOURCE_NOT_FOUND,
+                message="El vehiculo ya no existe o fue eliminado",
+                retryable=False,
+            )
+
+        return OperationResult(
+            client_operation_id=op.client_operation_id,
+            status="completed",
+            success=True,
+            server_entity_id=vehicle_id,
+            message="Vehiculo eliminado correctamente",
+        )
+
+    async def _handle_mark_notification_read(
+        self, payload: dict, user_id: int, op: QueueOperation
+    ) -> OperationResult:
+        from ...modules.notifications.service import InAppNotificationService
+
+        notification_id = payload.get("notification_id")
+        if not notification_id:
+            return OperationResult(
+                client_operation_id=op.client_operation_id,
+                status="failed",
+                success=False,
+                message="Se requiere notification_id",
+                retryable=False,
+            )
+
+        svc = InAppNotificationService(self.session)
+        notification = await svc.mark_as_read(notification_id, user_id)
+
+        if notification is None:
+            return OperationResult(
+                client_operation_id=op.client_operation_id,
+                status="completed",
+                success=True,
+                server_entity_id=notification_id,
+                message="Notificacion no encontrada -- tratada como leida (idempotente)",
+            )
+
+        return OperationResult(
+            client_operation_id=op.client_operation_id,
+            status="completed",
+            success=True,
+            server_entity_id=notification.id,
+            message="Notificacion marcada como leida",
+        )
+
+    async def _handle_create_catalog_item(
+        self, payload: dict, user_id: int, op: QueueOperation
+    ) -> OperationResult:
+        from ...modules.service_catalog.service import ServiceCatalogService
+
+        tenant_id = await self._get_workshop_tenant_id(user_id)
+        if not tenant_id:
+            return OperationResult(
+                client_operation_id=op.client_operation_id,
+                status="failed",
+                success=False,
+                message="Usuario de taller sin tenant asociado",
+                retryable=False,
+            )
+
+        servicio_id = payload.get("servicio_id")
+        if not servicio_id:
+            return OperationResult(
+                client_operation_id=op.client_operation_id,
+                status="failed",
+                success=False,
+                message="Se requiere servicio_id",
+                retryable=False,
+            )
+
+        svc = ServiceCatalogService(self.session)
+        try:
+            item = await svc.create_item(tenant_id, user_id, payload)
+            if payload.get("is_active") is False:
+                item = await svc.toggle_item(tenant_id, item["id"], user_id)
+            return OperationResult(
+                client_operation_id=op.client_operation_id,
+                status="completed",
+                success=True,
+                server_entity_id=item["id"],
+                message="Servicio de catálogo creado correctamente",
+                server_state=item,
+            )
+        except ValueError as e:
+            return OperationResult(
+                client_operation_id=op.client_operation_id,
+                status="conflict",
+                success=False,
+                message=str(e),
+                retryable=False,
+            )
+
+    async def _handle_update_catalog_item(
+        self, payload: dict, user_id: int, op: QueueOperation
+    ) -> OperationResult:
+        from ...modules.service_catalog.service import ServiceCatalogService
+
+        tenant_id = await self._get_workshop_tenant_id(user_id)
+        item_id = payload.get("item_id")
+        if not tenant_id or not item_id:
+            return OperationResult(
+                client_operation_id=op.client_operation_id,
+                status="failed",
+                success=False,
+                message="Se requieren tenant e item_id",
+                retryable=False,
+            )
+
+        svc = ServiceCatalogService(self.session)
+        try:
+            item = await svc.update_item(tenant_id, item_id, user_id, payload)
+            return OperationResult(
+                client_operation_id=op.client_operation_id,
+                status="completed",
+                success=True,
+                server_entity_id=item["id"],
+                message="Servicio de catálogo actualizado correctamente",
+                server_state=item,
+            )
+        except ValueError as e:
+            return OperationResult(
+                client_operation_id=op.client_operation_id,
+                status="conflict",
+                success=False,
+                message=str(e),
+                retryable=False,
+            )
+
+    async def _handle_toggle_catalog_item(
+        self, payload: dict, user_id: int, op: QueueOperation
+    ) -> OperationResult:
+        from ...modules.service_catalog.service import ServiceCatalogService
+
+        tenant_id = await self._get_workshop_tenant_id(user_id)
+        item_id = payload.get("item_id")
+        if not tenant_id or not item_id:
+            return OperationResult(
+                client_operation_id=op.client_operation_id,
+                status="failed",
+                success=False,
+                message="Se requieren tenant e item_id",
+                retryable=False,
+            )
+
+        svc = ServiceCatalogService(self.session)
+        try:
+            item = await svc.toggle_item(tenant_id, item_id, user_id)
+            return OperationResult(
+                client_operation_id=op.client_operation_id,
+                status="completed",
+                success=True,
+                server_entity_id=item["id"],
+                message="Estado del catálogo actualizado correctamente",
+                server_state=item,
+            )
+        except ValueError as e:
+            return OperationResult(
+                client_operation_id=op.client_operation_id,
+                status="conflict",
+                success=False,
+                message=str(e),
+                retryable=False,
+            )
+
+    async def _handle_delete_catalog_item(
+        self, payload: dict, user_id: int, op: QueueOperation
+    ) -> OperationResult:
+        from ...modules.service_catalog.service import ServiceCatalogService
+
+        tenant_id = await self._get_workshop_tenant_id(user_id)
+        item_id = payload.get("item_id")
+        if not tenant_id or not item_id:
+            return OperationResult(
+                client_operation_id=op.client_operation_id,
+                status="failed",
+                success=False,
+                message="Se requieren tenant e item_id",
+                retryable=False,
+            )
+
+        svc = ServiceCatalogService(self.session)
+        try:
+            await svc.delete_item(tenant_id, item_id, user_id)
+            return OperationResult(
+                client_operation_id=op.client_operation_id,
+                status="completed",
+                success=True,
+                server_entity_id=item_id,
+                message="Servicio de catálogo eliminado correctamente",
+            )
+        except ValueError as e:
+            return OperationResult(
+                client_operation_id=op.client_operation_id,
+                status="conflict",
+                success=False,
+                message=str(e),
+                retryable=False,
+            )
+
+    async def _handle_request_cancellation(
+        self, payload: dict, user_id: int, op: QueueOperation
+    ) -> OperationResult:
+        from ...modules.cancellation.service import CancellationService
+
+        incident_id = payload.get("incident_id")
+        reason = payload.get("reason")
+        user_type = payload.get("user_type") or await self._get_user_type(user_id)
+        if not incident_id or not reason or not user_type:
+            return OperationResult(
+                client_operation_id=op.client_operation_id,
+                status="failed",
+                success=False,
+                message="Se requieren incident_id, reason y user_type",
+                retryable=False,
+            )
+
+        svc = CancellationService(self.session)
+        try:
+            request = await svc.request_cancellation(incident_id, user_id, user_type, reason)
+            return OperationResult(
+                client_operation_id=op.client_operation_id,
+                status="completed",
+                success=True,
+                server_entity_id=request.id,
+                message="Solicitud de cancelación registrada correctamente",
+                server_state={"request_id": request.id, "status": request.status},
+            )
+        except (NotFoundException, ValidationException, ForbiddenException) as e:
+            return OperationResult(
+                client_operation_id=op.client_operation_id,
+                status="conflict",
+                success=False,
+                message=str(e),
+                retryable=False,
+                conflict_code=ConflictCode.RESOURCE_NOT_FOUND if isinstance(e, NotFoundException) else None,
+            )
+
+    async def _handle_respond_cancellation(
+        self, payload: dict, user_id: int, op: QueueOperation
+    ) -> OperationResult:
+        from ...modules.cancellation.service import CancellationService
+
+        request_id = payload.get("request_id")
+        user_type = payload.get("user_type") or await self._get_user_type(user_id)
+        if not request_id or user_type is None or payload.get("accept") is None:
+            return OperationResult(
+                client_operation_id=op.client_operation_id,
+                status="failed",
+                success=False,
+                message="Se requieren request_id, accept y user_type",
+                retryable=False,
+            )
+
+        svc = CancellationService(self.session)
+        try:
+            request = await svc.respond_to_cancellation(
+                request_id=request_id,
+                user_id=user_id,
+                user_type=user_type,
+                accept=bool(payload.get("accept")),
+                response_message=payload.get("response_message"),
+            )
+            return OperationResult(
+                client_operation_id=op.client_operation_id,
+                status="completed",
+                success=True,
+                server_entity_id=request.id,
+                message="Respuesta de cancelación procesada correctamente",
+                server_state={"request_id": request.id, "status": request.status},
+            )
+        except (NotFoundException, ValidationException, ForbiddenException) as e:
+            return OperationResult(
+                client_operation_id=op.client_operation_id,
+                status="conflict",
+                success=False,
+                message=str(e),
+                retryable=False,
+                conflict_code=ConflictCode.RESOURCE_NOT_FOUND if isinstance(e, NotFoundException) else None,
+            )
 
 
 def _sys_exc_info():

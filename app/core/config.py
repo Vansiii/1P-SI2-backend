@@ -221,6 +221,14 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     log_format: Literal["json", "text"] = Field(default="text", alias="LOG_FORMAT")
     
+    # Routing / OSRM
+    osrm_base_url: str = Field(
+        default="http://router.project-osrm.org",
+        alias="OSRM_BASE_URL",
+        description="OSRM server URL. Use https:// for production if available. Falls back to http:// on failure."
+    )
+    osrm_timeout_seconds: float = Field(default=10.0, alias="OSRM_TIMEOUT_SECONDS")
+    
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

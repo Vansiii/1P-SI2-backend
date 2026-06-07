@@ -122,7 +122,7 @@ class ServiceCatalogService:
             tiempo_estimado_min=data.get("tiempo_estimado_min"),
             precio=data.get("precio"),
             descripcion=data.get("descripcion"),
-            is_active=True,
+            is_active=bool(data.get("is_active", True)),
         )
         self.session.add(item)
 

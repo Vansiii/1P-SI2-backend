@@ -142,10 +142,24 @@ class TrackingService:
         
         # Publish TrackingSessionStartedEvent to outbox for reliable delivery
         if incident_id:
+            # Get technician's current location for the event payload
+            latest_location = await self.session.scalar(
+                select(TechnicianLocationHistory)
+                .where(TechnicianLocationHistory.technician_id == technician_id)
+                .order_by(TechnicianLocationHistory.recorded_at.desc())
+                .limit(1)
+            )
+            
+            current_location = {
+                "latitude": float(latest_location.latitude) if latest_location else 0.0,
+                "longitude": float(latest_location.longitude) if latest_location else 0.0
+            }
+            
             tracking_event = TrackingSessionStartedEvent(
-                tracking_session_id=tracking_session.id,
+                session_id=tracking_session.id,
                 technician_id=technician_id,
-                incident_id=incident_id
+                incident_id=incident_id,
+                start_location=current_location
             )
             await EventPublisher.publish(self.session, tracking_event)
             await self.session.commit()
@@ -155,18 +169,7 @@ class TrackingService:
             # ✅ PUBLICAR EVENTO DE TÉCNICO EN CAMINO
             # ═══════════════════════════════════════════════════════════════════════
             try:
-                # Get technician's current location if available
-                latest_location = await self.session.scalar(
-                    select(TechnicianLocationHistory)
-                    .where(TechnicianLocationHistory.technician_id == technician_id)
-                    .order_by(TechnicianLocationHistory.recorded_at.desc())
-                    .limit(1)
-                )
-                
-                current_location = {
-                    "latitude": float(latest_location.latitude) if latest_location else 0.0,
-                    "longitude": float(latest_location.longitude) if latest_location else 0.0
-                }
+                # Calculate ETA and distance if we have location
                 
                 # Calculate ETA and distance if we have location
                 eta_minutes = None
@@ -261,11 +264,30 @@ class TrackingService:
         
         # Publish TrackingSessionEndedEvent to outbox for reliable delivery
         if tracking_session.incidente_id:
+            # Get last known location for the end_location payload
+            last_location = await self.session.scalar(
+                select(TechnicianLocationHistory)
+                .where(TechnicianLocationHistory.technician_id == tracking_session.technician_id)
+                .order_by(TechnicianLocationHistory.recorded_at.desc())
+                .limit(1)
+            )
+            end_location = {
+                "latitude": float(last_location.latitude) if last_location else 0.0,
+                "longitude": float(last_location.longitude) if last_location else 0.0
+            }
+            
+            start_time = tracking_session.started_at
+            end_time = tracking_session.ended_at or datetime.utcnow()
+            duration_minutes = int((end_time - start_time).total_seconds() / 60) if end_time and start_time else None
+            
             tracking_event = TrackingSessionEndedEvent(
-                tracking_session_id=tracking_session.id,
+                session_id=tracking_session.id,
                 technician_id=tracking_session.technician_id,
                 incident_id=tracking_session.incidente_id,
-                total_distance_km=float(tracking_session.total_distance_km or 0)
+                end_time=end_time,
+                end_location=end_location,
+                total_distance=float(tracking_session.total_distance_km or 0),
+                duration_minutes=duration_minutes
             )
             await EventPublisher.publish(self.session, tracking_event)
             await self.session.commit()

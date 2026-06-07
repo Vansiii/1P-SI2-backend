@@ -159,7 +159,6 @@ class ReassignmentService:
                         AssignmentAttempt.status == 'pending',
                         AssignmentAttempt.timeout_at.isnot(None),
                         AssignmentAttempt.timeout_at <= now,
-                        AssignmentAttempt.workshop_id == Incidente.taller_id,
                         # 🔥 CLAVE: Solo procesar incidentes que AÚN están pendientes
                         Incidente.estado_actual == 'pendiente'
                     )
@@ -188,6 +187,7 @@ class ReassignmentService:
                 attempt.status = 'timeout'
                 attempt.responded_at = now
                 attempt.response_message = "Timeout: No response within time limit"
+                incident.taller_id = None
                 incident_ids.append(attempt.incident_id)
                 
                 logger.warning(
@@ -460,6 +460,8 @@ class ReassignmentService:
             # Count assignment attempts
             attempt_count = await self._count_assignment_attempts(incident_id)
             
+            old_status = incident.estado_actual
+
             # Publish incident.no_workshop_available event (OutboxProcessor will handle notifications)
             try:
                 from ...shared.schemas.events.incident import IncidentNoWorkshopAvailableEvent
@@ -486,17 +488,18 @@ class ReassignmentService:
             await self.session.execute(
                 update(Incidente)
                 .where(Incidente.id == incident_id)
-                .values(estado_actual="sin_taller_disponible")
+                .values(
+                    estado_actual="sin_taller_disponible",
+                    taller_id=None,
+                    tecnico_id=None,
+                )
             )
-            
-            await self.session.commit()
-            
+
             # Publish status change event via EventPublisher (outbox + immediate WS to relevant users)
             try:
                 from ...shared.schemas.events.incident import IncidentStatusChangedEvent
                 from ...core.event_publisher import EventPublisher
                 
-                old_status = incident.estado_actual
                 status_event = IncidentStatusChangedEvent(
                     incident_id=incident_id,
                     old_status=old_status,
@@ -509,6 +512,8 @@ class ReassignmentService:
                 logger.info(f"✅ Published status_changed event for incident {incident_id} → sin_taller_disponible")
             except Exception as ws_err:
                 logger.error(f"Failed to publish status change event: {str(ws_err)}")
+
+            await self.session.commit()
             
             logger.warning(
                 f"⚠️ Administrators and client notified: incident {incident_id} has no available workshops "

@@ -126,6 +126,22 @@ class IncidentStatusChangedEvent(BaseEvent):
     reason: Optional[str] = Field(None, description="Reason for status change")
 
 
+class IncidentTechnicianAssignedEvent(BaseEvent):
+    """Event emitted when a technician is assigned to an incident."""
+
+    event_type: Literal["incident.technician_assigned"] = "incident.technician_assigned"
+    priority: EventPriority = Field(default=EventPriority.HIGH)
+
+    incident_id: int = Field(..., description="ID of the incident")
+    technician_id: int = Field(..., description="ID of the assigned technician")
+    technician_name: str = Field(..., description="Name of the assigned technician")
+    technician_phone: Optional[str] = Field(None, description="Technician contact phone")
+    workshop_id: Optional[int] = Field(None, description="ID of the workshop")
+    workshop_name: Optional[str] = Field(None, description="Name of the workshop")
+    assigned_by: Optional[int] = Field(None, description="User ID who assigned the technician")
+    assigned_at: datetime = Field(default_factory=datetime.utcnow, description="When assigned")
+
+
 class IncidentTechnicianOnWayEvent(BaseEvent):
     """Event emitted when technician starts traveling to incident location."""
     

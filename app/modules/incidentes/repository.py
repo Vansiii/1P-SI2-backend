@@ -323,8 +323,12 @@ class IncidenteRepository(BaseRepository[Incidente]):
             Lista de incidentes pendientes
         """
         if taller_id:
-            # Para talleres: mostrar incidentes con intentos pendientes O timeout
-            # Esto permite que el taller vea las solicitudes que no respondió a tiempo
+            # Para talleres:
+            # - modo manual: solo intentos pending
+            # - modo automático: los timeout siguen visibles hasta que otro
+            #   taller acepte o el incidente pase al estado final sin taller
+            #   disponible. Así el taller conserva contexto del ciclo de
+            #   reasignación automática.
             from ...models.assignment_attempt import AssignmentAttempt
 
             latest_attempt_subquery = (
@@ -351,13 +355,8 @@ class IncidenteRepository(BaseRepository[Incidente]):
                             AssignmentAttempt.status == 'pending',
                             and_(
                                 AssignmentAttempt.status == 'timeout',
-                                Incidente.assignment_mode != 'manual',
-                            ),
-                        ),
-                        # ✅ CRÍTICO: Excluir incidentes ya asignados a OTRO taller
-                        or_(
-                            Incidente.taller_id.is_(None),  # No asignado a nadie
-                            Incidente.taller_id == taller_id  # O asignado a este taller
+                                Incidente.assignment_mode == 'auto'
+                            )
                         )
                     )
                 )
