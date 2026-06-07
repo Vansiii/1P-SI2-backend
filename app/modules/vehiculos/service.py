@@ -23,6 +23,11 @@ def _vehicle_payload(vehiculo: Vehiculo) -> dict:
         "modelo": vehiculo.modelo,
         "anio": vehiculo.anio,
         "matricula": vehiculo.matricula,
+        "color": vehiculo.color,
+        "imagen": vehiculo.imagen,
+        "is_active": vehiculo.is_active,
+        "created_at": vehiculo.created_at.isoformat() if vehiculo.created_at else None,
+        "updated_at": vehiculo.updated_at.isoformat() if vehiculo.updated_at else None,
     }
 
 

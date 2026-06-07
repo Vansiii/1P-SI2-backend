@@ -32,11 +32,17 @@ class NotificationFilter:
     CRITICAL_EVENTS = {
         "incident.created",
         "incident.assigned",
+        "incident.assignment_accepted",
+        "incident.assignment_rejected",
+        "incident.technician_assigned",
+        "incident.technician_on_way",
         "incident.technician_arrived",
+        "incident.work_started",
         "incident.work_completed",
         "incident.cancelled",
         "incident.no_workshop_available",
         "incident.assignment_timeout",
+        "incident.reassigned",
         "chat.message_sent",
         "cancellation.requested",
         "cancellation.approved",
@@ -50,9 +56,6 @@ class NotificationFilter:
         "incident.searching_workshop",
         "incident.technician_on_way",
         "incident.work_started",
-        "incident.assignment_accepted",
-        "incident.assignment_rejected",
-        "incident.reassigned",
         "incident.reassignment_started",
         "tracking.started",
         "tracking.ended",
@@ -226,10 +229,24 @@ class NotificationFilter:
         
         # Eventos relevantes para clientes
         client_events = {
+            "incident.created",
+            "incident.assigned",
             "incident.analysis_completed",  # 1. Cuando se termina el análisis de la IA
             "incident.updated",             # 2. Actualizaciones relevantes del incidente
             "incident.no_workshop_available",# 3. Cuando no se pudo encontrar un taller
             "incident.technician_assigned",  # 4. Cuando el taller asigna el técnico
+            "incident.assignment_accepted",
+            "incident.assignment_rejected",
+            "incident.assignment_timeout",
+            "incident.reassigned",
+            "incident.reassignment_started",
+            "incident.searching_workshop",
+            "incident.status_changed",
+            "incident.technician_on_way",
+            "incident.technician_arrived",
+            "incident.work_started",
+            "incident.work_completed",
+            "incident.cancelled",
         }
         
         if event_type.startswith("cancellation."):
@@ -245,7 +262,12 @@ class NotificationFilter:
         """Determina si notificar a un taller."""
         # Para eventos finales de reasignación/sin taller, incident.workshop_id puede ser null.
         # En esos casos el OutboxProcessor ya limita candidatos a talleres involucrados.
-        if event_type not in {"incident.no_workshop_available", "incident.status_changed", "incident.assignment_timeout"}:
+        if event_type not in {
+            "incident.no_workshop_available",
+            "incident.status_changed",
+            "incident.assignment_timeout",
+            "incident.reassigned",
+        }:
             # Solo notificar si es SU incidente asignado
             if incident_participants.get("workshop_id") != user_id:
                 return False
@@ -253,7 +275,10 @@ class NotificationFilter:
         # Eventos relevantes para talleres
         workshop_events = {
             "incident.assigned",
+            "incident.assignment_accepted",
+            "incident.reassigned",
             "incident.assignment_timeout",
+            "incident.technician_assigned",
             "incident.cancelled",
             "incident.work_completed",
             "incident.technician_arrived",  # Informativo
@@ -280,6 +305,7 @@ class NotificationFilter:
         # Eventos relevantes para técnicos
         technician_events = {
             "incident.technician_assigned",  # Cuando se le asigna
+            "incident.assignment_accepted",
         }
         
         return event_type in technician_events
@@ -424,7 +450,10 @@ class NotificationFilter:
             return event_type in {
                 "incident.created",
                 "incident.assigned",
+                "incident.technician_assigned",
+                "incident.technician_on_way",
                 "incident.technician_arrived",
+                "incident.work_started",
                 "incident.work_completed",
                 "incident.no_workshop_available",
             }
@@ -432,6 +461,7 @@ class NotificationFilter:
             return event_type in {
                 "incident.assigned",
                 "incident.assignment_timeout",
+                "incident.technician_assigned",
                 "incident.cancelled",
             }
         elif user_type == "technician":

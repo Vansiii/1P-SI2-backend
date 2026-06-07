@@ -18,14 +18,15 @@ from .schemas import (
     ReverseGeocodeRequest,
     GeocodeRequest,
     AddressResponse,
-    NearbySearchRequest
+    NearbySearchRequest,
+    NearbySearchResponse
 )
 from ...models.user import User
 
 router = APIRouter(prefix="/routing", tags=["routing"])
 
 
-@router.post("/calculate-route", response_model=RouteResponse)
+@router.post("/calculate-route")
 async def calculate_route(
     request: RouteRequest,
     db: AsyncSession = Depends(get_db),
@@ -56,7 +57,7 @@ async def calculate_route(
         await routing_service.close()
 
 
-@router.post("/calculate-eta", response_model=ETAResponse)
+@router.post("/calculate-eta")
 async def calculate_eta(
     request: ETARequest,
     db: AsyncSession = Depends(get_db),
@@ -86,7 +87,7 @@ async def calculate_eta(
         await routing_service.close()
 
 
-@router.post("/reverse-geocode", response_model=AddressResponse)
+@router.post("/reverse-geocode")
 async def reverse_geocode(
     request: ReverseGeocodeRequest,
     db: AsyncSession = Depends(get_db),
@@ -114,7 +115,7 @@ async def reverse_geocode(
         await geocoding_service.close()
 
 
-@router.post("/geocode", status_code=status.HTTP_200_OK)
+@router.post("/geocode")
 async def geocode_address(
     request: GeocodeRequest,
     db: AsyncSession = Depends(get_db),
@@ -152,7 +153,7 @@ async def geocode_address(
         await geocoding_service.close()
 
 
-@router.post("/search-nearby", status_code=status.HTTP_200_OK)
+@router.post("/search-nearby")
 async def search_nearby_places(
     request: NearbySearchRequest,
     db: AsyncSession = Depends(get_db),

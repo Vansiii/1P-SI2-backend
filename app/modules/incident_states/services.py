@@ -197,7 +197,7 @@ class IncidentStateService:
                     # Broadcast technician status change to workshop
                     from ...core.websocket import manager
                     if technician.workshop_id:
-                        await manager.send_personal_message(technician.workshop_id, {
+                        await manager.broadcast_to_workshop(technician.workshop_id, {
                             "type": "technician_status_update",
                             "data": {
                                 "technician_id": incident.tecnico_id,
@@ -281,7 +281,7 @@ class IncidentStateService:
                     # Broadcast technician status change to workshop
                     from ...core.websocket import manager
                     if technician.workshop_id:
-                        await manager.send_personal_message(technician.workshop_id, {
+                        await manager.broadcast_to_workshop(technician.workshop_id, {
                             "type": "technician_status_update",
                             "data": {
                                 "technician_id": incident.tecnico_id,

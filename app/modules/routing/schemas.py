@@ -37,7 +37,10 @@ class ETAResponse(BaseModel):
     distance_km: float
     duration_minutes: float
     eta_text: str
-    current_speed: Optional[float]
+    current_speed: Optional[float] = None
+    traffic_factors: List[str] = []
+    is_rush_hour: bool = False
+    using_real_speed: bool = False
     source: str
 
 
@@ -73,3 +76,19 @@ class NearbySearchRequest(BaseModel):
     query: str = Field(..., min_length=2, max_length=100)
     radius_km: float = Field(5.0, ge=0.1, le=50)
     limit: int = Field(10, ge=1, le=50)
+
+
+class NearbySearchItem(BaseModel):
+    """Schema for a single nearby search result."""
+    display_name: str
+    address: Dict[str, str]
+    formatted_address: str
+    latitude: float
+    longitude: float
+    source: str
+
+
+class NearbySearchResponse(BaseModel):
+    """Schema for nearby search response."""
+    count: int
+    results: List[NearbySearchItem]

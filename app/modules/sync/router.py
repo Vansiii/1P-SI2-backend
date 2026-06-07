@@ -112,6 +112,12 @@ async def sync_batch_operations(
 
     for op in sorted_ops:
         try:
+            logger.info(
+                "Processing sync op — id=%s type=%s cid=%s body_keys=%s",
+                op.id, op.operation_type, op.client_operation_id,
+                list((op.payload or {}).keys()),
+            )
+
             cid = _resolve_client_operation_id(op)
             op.client_operation_id = cid
 

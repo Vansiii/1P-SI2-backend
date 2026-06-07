@@ -2,6 +2,7 @@
 Service for calculating routes and ETA using OSRM.
 """
 from typing import Optional, Dict, List, Tuple
+from datetime import datetime
 import httpx
 from math import radians, sin, cos, sqrt, atan2
 
@@ -16,22 +17,42 @@ class RoutingService:
     Service for route calculation and ETA estimation using OSRM.
     """
 
-    # OSRM public API endpoint
-    OSRM_BASE_URL = "http://router.project-osrm.org"
-    
-    # Average speeds by road type (km/h)
-    AVERAGE_SPEEDS = {
-        "motorway": 100,
-        "trunk": 80,
-        "primary": 60,
-        "secondary": 50,
-        "tertiary": 40,
-        "residential": 30,
-        "default": 40
-    }
+    # Traffic adjustment factors
+    TRAFFIC_BUFFER_FACTOR = 0.25       # +25% buffer urbano por defecto
+    RUSH_HOUR_FACTOR = 0.50            # +50% adicional en hora pico
+    RUSH_HOUR_MORNING = (7, 9)         # 7-9 AM
+    RUSH_HOUR_EVENING = (17, 19)       # 5-7 PM
+    MIN_REAL_SPEED_KMH = 5             # Velocidad mínima considerada real
+    MAX_REAL_SPEED_KMH = 120           # Velocidad máxima razonable
+    FALLBACK_SPEED_KMH = 40.0          # Velocidad promedio urbana para fallback
 
     def __init__(self):
-        self.client = httpx.AsyncClient(timeout=10.0)
+        self.client = httpx.AsyncClient(timeout=settings.osrm_timeout_seconds)
+
+    def _is_rush_hour(self) -> bool:
+        """Check if current time is during rush hour (local server time)."""
+        now = datetime.now()
+        hour = now.hour
+        return (self.RUSH_HOUR_MORNING[0] <= hour < self.RUSH_HOUR_MORNING[1] or
+                self.RUSH_HOUR_EVENING[0] <= hour < self.RUSH_HOUR_EVENING[1])
+
+    def _apply_traffic_adjustment(self, duration_minutes: float, using_real_speed: bool = False) -> float:
+        """
+        Apply traffic adjustment factors to ETA.
+        
+        - If using technician's real GPS speed: no adjustment (it's already real-time)
+        - If using OSRM theoretical speed: add urban buffer + rush hour factor
+        """
+        if using_real_speed:
+            return duration_minutes * 1.05  # Solo +5% margen mínimo
+        
+        adjusted = duration_minutes * (1.0 + self.TRAFFIC_BUFFER_FACTOR)
+        
+        if self._is_rush_hour():
+            adjusted *= (1.0 + self.RUSH_HOUR_FACTOR)
+            logger.info(f"Rush hour adjustment applied: {duration_minutes:.1f} → {adjusted:.1f} min")
+        
+        return adjusted
 
     async def calculate_route(
         self,
@@ -44,36 +65,55 @@ class RoutingService:
         """
         Calculate route between two points using OSRM.
         
-        Args:
-            origin_lat: Origin latitude
-            origin_lng: Origin longitude
-            dest_lat: Destination latitude
-            dest_lng: Destination longitude
-            profile: Routing profile (driving, walking, cycling)
-            
-        Returns:
-            Dictionary with route information
+        Attempts HTTPS first, then HTTP as fallback.
         """
-        try:
-            # Build OSRM request URL
-            url = f"{self.OSRM_BASE_URL}/route/v1/{profile}/{origin_lng},{origin_lat};{dest_lng},{dest_lat}"
-            params = {
-                "overview": "full",
-                "geometries": "geojson",
-                "steps": "true"
-            }
+        base_url = settings.osrm_base_url
+        url_path = f"/route/v1/{profile}/{origin_lng},{origin_lat};{dest_lng},{dest_lat}"
+        params = {
+            "overview": "full",
+            "geometries": "geojson",
+            "steps": "true"
+        }
 
+        # Intentar con la URL configurada primero
+        result = await self._try_osrm_request(base_url, url_path, params)
+        if result is not None:
+            return result
+
+        # Si la URL configurada es HTTPS y falló, intentar HTTP
+        if base_url.startswith("https://"):
+            http_url = base_url.replace("https://", "http://", 1)
+            logger.info(f"OSRM HTTPS failed, trying HTTP: {http_url}")
+            result = await self._try_osrm_request(http_url, url_path, params)
+            if result is not None:
+                return result
+
+        # Si la URL configurada es HTTP y falló, intentar HTTPS
+        if base_url.startswith("http://"):
+            https_url = base_url.replace("http://", "https://", 1)
+            logger.info(f"OSRM HTTP failed, trying HTTPS: {https_url}")
+            result = await self._try_osrm_request(https_url, url_path, params)
+            if result is not None:
+                return result
+
+        logger.warning("All OSRM attempts failed, using fallback calculation")
+        return self._fallback_calculation(origin_lat, origin_lng, dest_lat, dest_lng)
+
+    async def _try_osrm_request(
+        self, base_url: str, url_path: str, params: dict
+    ) -> Optional[Dict]:
+        """Try a single OSRM request. Returns None on failure."""
+        try:
+            url = f"{base_url}{url_path}"
             response = await self.client.get(url, params=params)
             response.raise_for_status()
-            
             data = response.json()
 
             if data.get("code") != "Ok":
-                logger.warning(f"OSRM returned non-OK code: {data.get('code')}")
-                return self._fallback_calculation(origin_lat, origin_lng, dest_lat, dest_lng)
+                logger.warning(f"OSRM returned non-OK code from {base_url}: {data.get('code')}")
+                return None
 
             route = data["routes"][0]
-            
             return {
                 "distance_km": round(route["distance"] / 1000, 2),
                 "duration_minutes": round(route["duration"] / 60, 2),
@@ -83,8 +123,8 @@ class RoutingService:
             }
 
         except Exception as e:
-            logger.error(f"Error calculating route with OSRM: {str(e)}")
-            return self._fallback_calculation(origin_lat, origin_lng, dest_lat, dest_lng)
+            logger.warning(f"OSRM request failed for {base_url}: {str(e)}")
+            return None
 
     def _extract_steps(self, steps: List[Dict]) -> List[Dict]:
         """
@@ -130,7 +170,7 @@ class RoutingService:
         distance_km = self._haversine_distance(origin_lat, origin_lng, dest_lat, dest_lng)
         
         # Estimate duration assuming average city speed (40 km/h)
-        duration_minutes = (distance_km / self.AVERAGE_SPEEDS["default"]) * 60
+        duration_minutes = (distance_km / self.FALLBACK_SPEED_KMH) * 60
         
         return {
             "distance_km": round(distance_km, 2),
@@ -183,29 +223,42 @@ class RoutingService:
         current_speed: Optional[float] = None
     ) -> Dict:
         """
-        Calculate estimated time of arrival.
+        Calculate estimated time of arrival with traffic adjustment.
         
-        Args:
-            origin_lat: Current latitude
-            origin_lng: Current longitude
-            dest_lat: Destination latitude
-            dest_lng: Destination longitude
-            current_speed: Current speed in km/h (optional)
-            
+        ETA logic (in priority order):
+        1. Technician's real GPS speed → ETA = distance / speed (+5% margin)
+        2. OSRM duration → ETA = OSRM + 25% urban buffer (+50% rush hour)
+        3. Fallback → ETA = Haversine / 40 km/h + 25% buffer
+        
         Returns:
-            Dictionary with ETA information
+            dict with distance_km, duration_minutes, eta_text, traffic_factors, source
         """
         route = await self.calculate_route(origin_lat, origin_lng, dest_lat, dest_lng)
         
         distance_km = route["distance_km"]
+        traffic_factors = []
+        using_real_speed = False
         
-        # If current speed is provided and reasonable, use it for ETA
-        if current_speed and 5 <= current_speed <= 120:
-            duration_minutes = (distance_km / current_speed) * 60
+        # Priority 1: Use technician's real GPS speed if available and reasonable
+        if current_speed and self.MIN_REAL_SPEED_KMH <= current_speed <= self.MAX_REAL_SPEED_KMH:
+            raw_minutes = (distance_km / current_speed) * 60
+            using_real_speed = True
+            traffic_factors.append(f"velocidad_real:{current_speed:.0f}km/h")
         else:
-            duration_minutes = route["duration_minutes"]
+            raw_minutes = route["duration_minutes"]
+            traffic_factors.append(f"base_osrm:{raw_minutes:.0f}min" if route["source"] == "osrm" else f"base_haversine:{raw_minutes:.0f}min")
         
-        # Format ETA
+        # Apply traffic adjustment
+        duration_minutes = self._apply_traffic_adjustment(raw_minutes, using_real_speed)
+        
+        if not using_real_speed:
+            traffic_factors.append(f"buffer_urbano:+{int(self.TRAFFIC_BUFFER_FACTOR*100)}%")
+            if self._is_rush_hour():
+                traffic_factors.append(f"hora_pico:+{int(self.RUSH_HOUR_FACTOR*100)}%")
+        
+        duration_minutes = round(duration_minutes, 1)
+        
+        # Format ETA text
         if duration_minutes < 1:
             eta_text = "Menos de 1 minuto"
         elif duration_minutes < 60:
@@ -213,13 +266,16 @@ class RoutingService:
         else:
             hours = int(duration_minutes // 60)
             minutes = int(duration_minutes % 60)
-            eta_text = f"{hours} hora{'s' if hours > 1 else ''} {minutes} minutos"
+            eta_text = f"{hours}h {minutes}min"
         
         return {
             "distance_km": distance_km,
-            "duration_minutes": round(duration_minutes, 2),
+            "duration_minutes": duration_minutes,
             "eta_text": eta_text,
             "current_speed": current_speed,
+            "traffic_factors": traffic_factors,
+            "is_rush_hour": self._is_rush_hour(),
+            "using_real_speed": using_real_speed,
             "source": route["source"]
         }
 

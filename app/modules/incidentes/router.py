@@ -436,8 +436,23 @@ async def notify_assignment_timeout(
         raise NotFoundException(f"Incidente {incidente_id} no encontrado")
     
     # 1.5. Verificar que el usuario actual pertenece al taller asignado (o es admin)
-    if current_user.user_type == "workshop" and incidente.taller_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Este incidente no esta asignado a tu taller")
+    active_attempt = None
+    if current_user.user_type == "workshop":
+        workshop_attempt = await session.execute(
+            select(AssignmentAttempt)
+            .where(
+                AssignmentAttempt.incident_id == incidente_id,
+                AssignmentAttempt.workshop_id == current_user.id,
+                AssignmentAttempt.status.in_(["pending", "timeout"])
+            )
+            .order_by(AssignmentAttempt.attempted_at.desc())
+        )
+        active_attempt = workshop_attempt.scalars().first()
+        if active_attempt is None:
+            return create_success_response(
+                data={"incident_id": incidente_id, "status": incidente.estado_actual},
+                message="No hay un intento activo de asignación para este taller",
+            )
     if current_user.user_type not in ("workshop", "admin", "administrator"):
         raise HTTPException(status_code=403, detail="No tienes permisos para esta accion")
     
@@ -460,32 +475,72 @@ async def notify_assignment_timeout(
         )
         .order_by(AssignmentAttempt.attempted_at.desc())
     )
-    pending_attempt = result.scalar_one_or_none()
-    
+    pending_attempt = result.scalars().first()
+
     if not pending_attempt:
+        timeout_attempt = None
+        if active_attempt and active_attempt.status == "timeout":
+            timeout_attempt = active_attempt
+        else:
+            timeout_result = await session.execute(
+                select(AssignmentAttempt)
+                .where(
+                    AssignmentAttempt.incident_id == incidente_id,
+                    AssignmentAttempt.status == "timeout"
+                )
+                .order_by(AssignmentAttempt.responded_at.desc(), AssignmentAttempt.attempted_at.desc())
+            )
+            timeout_attempt = timeout_result.scalars().first()
+
+        if timeout_attempt and incidente.estado_actual == "pendiente":
+            logger.warning(
+                f"🔄 Recovering timeout reassignment for incident {incidente_id} "
+                f"from workshop {timeout_attempt.workshop_id} (no pending attempt found)"
+            )
+            reassignment_service = ReassignmentService(session)
+            result = await reassignment_service.handle_timeout(
+                incident_id=incidente_id,
+                workshop_id=timeout_attempt.workshop_id
+            )
+
+            if incidente.assignment_mode == "manual":
+                message = (
+                    "Timeout recuperado. El incidente vuelve al cliente para que seleccione o reenvíe a otro taller."
+                )
+            elif result.success:
+                message = (
+                    f"Timeout recuperado. Incidente reasignado automáticamente a "
+                    f"{result.assigned_workshop.workshop_name if result.assigned_workshop else 'otro taller'}."
+                )
+            else:
+                message = f"Timeout recuperado, pero la reasignación falló: {result.error_message}"
+
+            return create_success_response(
+                data={
+                    "incident_id": incidente_id,
+                    "timeout_processed": True,
+                    "reassignment_success": result.success,
+                    "new_workshop_id": result.assigned_workshop.id if result.assigned_workshop else None,
+                    "new_workshop_name": result.assigned_workshop.workshop_name if result.assigned_workshop else None,
+                    "recovered_from_timeout_attempt": True,
+                },
+                message=message,
+            )
+
         logger.warning(f"⚠️ No pending assignment attempt found for incident {incidente_id}")
         return create_success_response(
             data={"incident_id": incidente_id},
             message="No hay intentos de asignación pendientes para este incidente",
         )
     
-    # 4. Marcar el intento como timeout
-    pending_attempt.status = "timeout"
-    pending_attempt.responded_at = None  # No hubo respuesta
-    await session.commit()
-    
-    logger.info(
-        f"✅ Assignment attempt {pending_attempt.id} marked as timeout for incident {incidente_id}"
-    )
-    
-    # 5. Disparar reasignación automática
+    # 4. Disparar reasignación automática
     reassignment_service = ReassignmentService(session)
     result = await reassignment_service.handle_timeout(
         incident_id=incidente_id,
         workshop_id=pending_attempt.workshop_id
     )
     
-    # 6. Preparar respuesta según resultado
+    # 5. Preparar respuesta según resultado
     if incidente.assignment_mode == "manual":
         message = (
             "Timeout procesado. El incidente vuelve al cliente para que seleccione o reenvíe a otro taller."

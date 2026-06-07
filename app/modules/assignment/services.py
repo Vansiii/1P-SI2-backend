@@ -845,6 +845,12 @@ Usa tu experiencia para evaluar qué taller y técnico tienen mayor probabilidad
                 logger.error("No available technician found for assignment")
                 return False
 
+            # Mantener el taller objetivo en el incidente aun cuando siga en estado
+            # "pendiente". Esto permite que timeout, rechazo, visibilidad por taller
+            # y reasignación automática compartan una sola fuente de verdad.
+            incident.taller_id = candidate.workshop.id
+            incident.tecnico_id = None
+
             # Log assignment attempt with pending status
             # This creates the record that allows the workshop to see the incident
             await self._log_assignment_attempt(

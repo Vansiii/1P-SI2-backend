@@ -2,6 +2,7 @@
 Schemas for tracking operations.
 """
 from datetime import datetime
+from math import isnan, isinf
 from typing import Optional
 from pydantic import BaseModel, Field, field_validator
 
@@ -14,6 +15,20 @@ class LocationUpdate(BaseModel):
     speed: Optional[float] = Field(None, ge=0, description="Speed in km/h")
     heading: Optional[float] = Field(None, ge=0, lt=360, description="Direction in degrees")
     recorded_at: Optional[datetime] = Field(None, description="When location was captured")
+
+    @field_validator('latitude')
+    @classmethod
+    def validate_latitude(cls, v: float) -> float:
+        if isnan(v) or isinf(v):
+            raise ValueError('Latitude cannot be NaN or Infinity')
+        return v
+
+    @field_validator('longitude')
+    @classmethod
+    def validate_longitude(cls, v: float) -> float:
+        if isnan(v) or isinf(v):
+            raise ValueError('Longitude cannot be NaN or Infinity')
+        return v
 
     @field_validator('recorded_at', mode='before')
     @classmethod

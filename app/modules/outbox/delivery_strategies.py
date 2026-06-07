@@ -127,6 +127,7 @@ class NotificationFormatter:
         "incident.assigned": "Taller asignado",
         "incident.assignment_accepted": "Solicitud aceptada",
         "incident.assignment_rejected": "Buscando alternativa",
+        "incident.technician_assigned": "Técnico asignado",
         "incident.assignment_timeout": "Reasignando servicio",
         "incident.status_changed": "Estado actualizado",
         "incident.reassigned": "Servicio reasignado",
@@ -209,6 +210,8 @@ class NotificationFormatter:
         recipient_type: str = "unknown",
         event_data: Optional[dict] = None,
     ) -> str:
+        event_type = NotificationFilter._normalize_event_type(event_type)
+
         if event_type == "incident.assigned":
             if recipient_type == "workshop":
                 return "Nueva solicitud"
@@ -230,6 +233,9 @@ class NotificationFormatter:
         if event_type == "incident.assignment_rejected" and recipient_type in {"workshop", "admin"}:
             return "Solicitud rechazada"
 
+        if event_type == "incident.assignment_accepted" and recipient_type == "technician":
+            return "Nuevo servicio confirmado"
+
         return NotificationFormatter.TITLE_MAP.get(event_type, NotificationFormatter._fallback_title(event_type))
     
     @staticmethod
@@ -242,7 +248,9 @@ class NotificationFormatter:
     
     @staticmethod
     def get_body(event_data: dict, recipient_type: str = "unknown") -> str:
-        event_type = event_data.get("event_type", "")
+        event_type = NotificationFilter._normalize_event_type(
+            event_data.get("event_type", "")
+        )
         incident_id = event_data.get("incident_id", "")
         assignment_mode = event_data.get("assignment_mode")
         workshop_name = event_data.get("workshop_name") or event_data.get("new_workshop_name")
@@ -293,6 +301,20 @@ class NotificationFormatter:
                 )
             if recipient_type == "admin":
                 return f"El taller aceptó la solicitud #{incident_id}."
+            if recipient_type == "technician":
+                return f"Tu taller confirmó tu asignación para la solicitud #{incident_id}."
+            if event_data.get("new_status") == "en_proceso":
+                assigned_technician = technician_name or "un técnico"
+                return (
+                    f"El taller aceptó tu solicitud #{incident_id} y "
+                    f"{assigned_technician} ya fue asignado."
+                )
+
+        if event_type == "incident.technician_assigned":
+            if recipient_type == "technician":
+                return "Nuevo servicio asignado"
+            if recipient_type == "workshop":
+                return "Técnico asignado"
 
         if event_type == "incident.reassigned":
             if recipient_type == "workshop":
@@ -309,6 +331,7 @@ class NotificationFormatter:
             "incident.assigned": f"Hemos asignado un taller para tu solicitud #{incident_id}",
             "incident.assignment_accepted": f"El taller ha aceptado tu solicitud #{incident_id}",
             "incident.assignment_rejected": f"Buscando alternativa para tu solicitud #{incident_id}",
+            "incident.technician_assigned": f"Asignamos un técnico a tu solicitud #{incident_id}",
             "incident.assignment_timeout": f"Reasignando tu solicitud #{incident_id}",
             "incident.status_changed": f"Tu solicitud #{incident_id} ahora esta en '{event_data.get('new_status', 'actualizado')}'",
             "incident.reassigned": f"Tu solicitud #{incident_id} ha sido reasignada",
@@ -415,11 +438,15 @@ class StrategyConfig:
         "incident.assigned",
         "incident.assignment_accepted",
         "incident.assignment_rejected",
+        "incident.technician_assigned",
+        "incident.technician_on_way",
         "incident.technician_arrived",
+        "incident.work_started",
         "incident.work_completed",
         "incident.cancelled",
         "incident.no_workshop_available",
         "incident.assignment_timeout",
+        "incident.reassigned",
         "cancellation.requested",
         "cancellation.approved",
         "cancellation.rejected",
@@ -432,8 +459,13 @@ class StrategyConfig:
         "incident.assigned",
         "incident.assignment_accepted",
         "incident.assignment_rejected",
+        "incident.technician_assigned",
+        "incident.technician_on_way",
+        "incident.technician_arrived",
+        "incident.work_started",
         "incident.no_workshop_available",
         "incident.assignment_timeout",
+        "incident.reassigned",
         "incident.cancelled",
         "chat.message_sent",
     }
@@ -610,7 +642,9 @@ class PushNotificationStrategy(DeliveryStrategy):
                 )
             
             # Extract event type
-            event_type = event_data.get("event_type", "")
+            event_type = NotificationFilter._normalize_event_type(
+                event_data.get("event_type", "")
+            )
 
             user_result = await session.execute(
                 select(User.user_type).where(User.id == user_id).limit(1)
@@ -631,12 +665,16 @@ class PushNotificationStrategy(DeliveryStrategy):
             # Format notification
             title = self.formatter.get_title(event_type, recipient_type, event_data)
             body = self.formatter.get_body(event_data, recipient_type)
+
+            event_data.setdefault("title", title)
+            event_data.setdefault("body", body)
             
             # Create notification data
             notification_data = PushNotificationData(
                 title=title,
                 body=body,
-                data=event_data
+                data=event_data,
+                click_action=event_data.get("click_action"),
             )
             
             # Send push notification
@@ -722,7 +760,9 @@ class HybridDeliveryStrategy(DeliveryStrategy):
         Returns:
             DeliveryResult with combined success status and channels
         """
-        event_type = event_data.get("event_type", "")
+        event_type = NotificationFilter._normalize_event_type(
+            event_data.get("event_type", "")
+        )
         channels = []
         
         # Determine if this event type is in the always-push category (for logging)
@@ -826,6 +866,8 @@ class DeliveryStrategyFactory:
 
         if delivery_mode == DeliveryMode.WEBSOCKET_ONLY:
             return self._websocket_strategy
+        if delivery_mode == DeliveryMode.HYBRID:
+            return self._hybrid_strategy
         if delivery_mode == DeliveryMode.PUSH_ONLY:
             return self._push_strategy
         if delivery_mode == DeliveryMode.SILENT:

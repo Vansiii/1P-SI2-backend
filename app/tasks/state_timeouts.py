@@ -199,9 +199,7 @@ async def check_assignment_timeouts() -> List[int]:
                 .where(
                     and_(
                         AssignmentAttempt.status == 'pending',
-                        AssignmentAttempt.attempted_at.isnot(None),
-                        AssignmentAttempt.workshop_id == Incidente.taller_id,
-                        Incidente.estado_actual != 'sin_taller_disponible'  # ✅ NO procesar si ya está sin taller
+                        Incidente.estado_actual == 'pendiente',
                     )
                 )
             )
@@ -219,15 +217,24 @@ async def check_assignment_timeouts() -> List[int]:
                     priority = incident.prioridad_ia or "media"  # Default to media if not set
                     timeout_minutes = TIMEOUT_BY_PRIORITY.get(priority, DEFAULT_TIMEOUT_MINUTES)
                     
-                    # Calculate timeout threshold
-                    timeout_threshold = attempt.attempted_at + timedelta(minutes=timeout_minutes)
+                    timeout_threshold = attempt.timeout_at
+                    if timeout_threshold is None and attempt.attempted_at is not None:
+                        timeout_threshold = attempt.attempted_at + timedelta(minutes=timeout_minutes)
+
+                    if timeout_threshold is None:
+                        logger.warning(
+                            f"⚠️ Skipping timeout check for attempt {attempt.id} - no timeout reference available"
+                        )
+                        continue
                     
                     # Check if timed out
                     if now >= timeout_threshold:
                         # ✅ Mark assignment attempt as 'timeout' (NOT rejected)
                         # Workshop can still accept, but we'll try another workshop too
                         attempt.status = 'timeout'
+                        attempt.responded_at = now
                         attempt.response_message = f'Timeout after {timeout_minutes} minutes (priority: {priority})'
+                        incident.taller_id = None
                         
                         logger.info(
                             f"⏰ Assignment timeout: incident {incident.id}, workshop {attempt.workshop_id}, "
@@ -301,16 +308,51 @@ async def trigger_reassignment_for_timeouts(incident_ids: List[int]) -> None:
     
     try:
         async with session_factory() as session:
-            from ..modules.assignment.services import IntelligentAssignmentService
+            from ..modules.assignment.reassignment_service import ReassignmentService
             
             for incident_id in incident_ids:
                 try:
                     logger.info(f"🔄 Attempting cascading reassignment for incident {incident_id} after timeout")
-                    
-                    assignment_service = IntelligentAssignmentService(session)
-                    result = await assignment_service.assign_incident_automatically(
+
+                    incident = await session.get(Incidente, incident_id)
+                    if not incident:
+                        logger.warning(f"⚠️ Incident {incident_id} not found during timeout reassignment")
+                        continue
+
+                    if incident.estado_actual != 'pendiente':
+                        logger.info(
+                            f"⏭️ Skipping timeout reassignment for incident {incident_id} - "
+                            f"state is '{incident.estado_actual}'"
+                        )
+                        continue
+
+                    timeout_attempt_result = await session.execute(
+                        select(AssignmentAttempt)
+                        .where(
+                            and_(
+                                AssignmentAttempt.incident_id == incident_id,
+                                AssignmentAttempt.status == 'timeout',
+                            )
+                        )
+                        .order_by(
+                            AssignmentAttempt.responded_at.desc(),
+                            AssignmentAttempt.attempted_at.desc(),
+                            AssignmentAttempt.created_at.desc(),
+                        )
+                        .limit(1)
+                    )
+                    timeout_attempt = timeout_attempt_result.scalar_one_or_none()
+                    if not timeout_attempt:
+                        logger.info(
+                            f"⏭️ Skipping timeout reassignment for incident {incident_id} - "
+                            f"no timeout attempt found"
+                        )
+                        continue
+
+                    reassignment_service = ReassignmentService(session)
+                    result = await reassignment_service.handle_timeout(
                         incident_id=incident_id,
-                        force_ai_analysis=False  # Use existing AI analysis
+                        workshop_id=timeout_attempt.workshop_id,
                     )
                     
                     if result.success:
@@ -322,9 +364,18 @@ async def trigger_reassignment_for_timeouts(incident_ids: List[int]) -> None:
                         logger.warning(
                             f"⚠️ Cascading reassignment failed for incident {incident_id}: {result.error_message}"
                         )
-                        
-                        # If no more workshops available → sin_taller_disponible + notify admin
-                        if "No available workshops" in result.error_message or "after exclusions" in result.error_message:
+
+                        refreshed_incident = await session.get(Incidente, incident_id)
+                        if refreshed_incident and refreshed_incident.estado_actual == 'sin_taller_disponible':
+                            logger.info(
+                                f"ℹ️ Incident {incident_id} already marked as sin_taller_disponible"
+                            )
+                            continue
+
+                        if result.error_message and (
+                            "No available workshops" in result.error_message
+                            or "after exclusions" in result.error_message
+                        ):
                             await _mark_incident_no_workshop_available(session, incident_id)
                             await _notify_admin_no_workshop(session, incident_id)
                         
@@ -337,6 +388,61 @@ async def trigger_reassignment_for_timeouts(incident_ids: List[int]) -> None:
                     
     except Exception as e:
         logger.error(f"❌ Error in trigger_reassignment_for_timeouts: {str(e)}", exc_info=True)
+
+
+async def find_dangling_timeout_incidents() -> List[int]:
+    """
+    Recover incidents stuck in auto mode with a timeout attempt but no new pending attempt.
+
+    This covers races where a timeout was already marked/published, but reassignment
+    did not continue afterward.
+    """
+    session_factory = get_session_factory()
+    try:
+        async with session_factory() as session:
+            timeout_result = await session.execute(
+                select(AssignmentAttempt.incident_id)
+                .join(Incidente, AssignmentAttempt.incident_id == Incidente.id)
+                .where(
+                    and_(
+                        AssignmentAttempt.status == 'timeout',
+                        Incidente.estado_actual == 'pendiente',
+                        Incidente.assignment_mode == 'auto',
+                    )
+                )
+                .distinct()
+            )
+            timeout_incident_ids = [row[0] for row in timeout_result.all()]
+            if not timeout_incident_ids:
+                return []
+
+            pending_result = await session.execute(
+                select(AssignmentAttempt.incident_id)
+                .where(
+                    and_(
+                        AssignmentAttempt.incident_id.in_(timeout_incident_ids),
+                        AssignmentAttempt.status == 'pending',
+                    )
+                )
+                .distinct()
+            )
+            pending_incident_ids = {row[0] for row in pending_result.all()}
+
+            dangling_ids = [
+                incident_id
+                for incident_id in timeout_incident_ids
+                if incident_id not in pending_incident_ids
+            ]
+
+            if dangling_ids:
+                logger.warning(
+                    f"🔄 Found {len(dangling_ids)} dangling timeout incident(s) pending reassignment: {dangling_ids}"
+                )
+
+            return dangling_ids
+    except Exception as e:
+        logger.error(f"❌ Error finding dangling timeout incidents: {str(e)}", exc_info=True)
+        return []
 
 
 async def _mark_incident_no_workshop_available(session: AsyncSession, incident_id: int) -> None:
@@ -364,6 +470,8 @@ async def _mark_incident_no_workshop_available(session: AsyncSession, incident_i
         # Change state to 'sin_taller_disponible'
         old_state = incident.estado_actual
         incident.estado_actual = "sin_taller_disponible"
+        incident.taller_id = None
+        incident.tecnico_id = None
         incident.updated_at = datetime.now(UTC)
         
         # ✅ CANCELAR todos los assignment attempts pendientes
@@ -681,18 +789,22 @@ async def check_all_timeouts():
     try:
         # Check assignment timeouts (workshop response)
         timed_out_incident_ids = await check_assignment_timeouts()
+        dangling_timeout_incident_ids = await find_dangling_timeout_incidents()
+        incident_ids_to_reassign = list(
+            dict.fromkeys(timed_out_incident_ids + dangling_timeout_incident_ids)
+        )
         
         # Trigger reassignment for timed out incidents
-        if timed_out_incident_ids:
-            await trigger_reassignment_for_timeouts(timed_out_incident_ids)
+        if incident_ids_to_reassign:
+            await trigger_reassignment_for_timeouts(incident_ids_to_reassign)
         
         # Check tracking timeouts (service duration) with auto-close
         auto_closed_incidents = await check_tracking_timeouts()
         
-        if timed_out_incident_ids or auto_closed_incidents:
+        if incident_ids_to_reassign or auto_closed_incidents:
             logger.info(
                 f"✅ Timeout check complete: "
-                f"{len(timed_out_incident_ids)} assignment timeouts (reassigned), "
+                f"{len(incident_ids_to_reassign)} assignment timeouts/recoveries (reassigned), "
                 f"{len(auto_closed_incidents)} tracking sessions auto-closed"
             )
         

@@ -364,6 +364,7 @@ class OutboxProcessor:
             workshop_id = event_data.get("workshop_id")
             if workshop_id:
                 candidate_recipients.add(workshop_id)
+                incident_participants["workshop_id"] = workshop_id
 
         # For incident.reassigned, notify both previous and new workshop explicitly.
         if event_type == "incident.reassigned":

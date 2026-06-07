@@ -9,7 +9,11 @@ from sqlalchemy import select, update
 from ...core.websocket import manager
 from ...core.websocket_events import emit_to_incident_room, EventTypes
 from ...core.event_publisher import EventPublisher
-from ...shared.schemas.events.incident import IncidentStatusChangedEvent
+from ...shared.schemas.events.incident import (
+    IncidentStatusChangedEvent,
+    IncidentTechnicianAssignedEvent,
+)
+from ...shared.schemas.events.tracking import TrackingLocationUpdatedEvent
 from ...core.logging import get_logger
 from ...models.incidente import Incidente
 from ...models.technician import Technician
@@ -88,6 +92,7 @@ class RealTimeService:
             logger.info(f"📝 Guardando en historial de ubicaciones...")
             location_history = TechnicianLocationHistory(
                 technician_id=technician_id,
+                tenant_id=technician.tenant_id,
                 latitude=latitude,
                 longitude=longitude,
                 accuracy=accuracy,
@@ -124,7 +129,7 @@ class RealTimeService:
                 for incident in active_incidents_list:
                     logger.info(f"📡 Enviando actualización a incidente {incident.id}")
                     
-                    # ✅ Solo emitir con el formato estandarizado (eliminada la doble emisión legacy)
+                    # ✅ Emisión inmediata por WebSocket (baja latencia)
                     await emit_to_incident_room(
                         incident_id=incident.id,
                         event_type=EventTypes.LOCATION_UPDATE,
@@ -139,6 +144,28 @@ class RealTimeService:
                             "timestamp": current_time.isoformat()
                         }
                     )
+                    
+                    # ✅ Publicar al outbox para entrega confiable (OutboxProcessor maneja FCM fallback)
+                    try:
+                        location_event = TrackingLocationUpdatedEvent(
+                            incident_id=incident.id,
+                            technician_id=technician_id,
+                            latitude=latitude,
+                            longitude=longitude,
+                            accuracy=accuracy,
+                            speed=speed,
+                            heading=heading
+                        )
+                        await EventPublisher.publish(
+                            self.session, location_event,
+                            send_immediate=False,
+                            tenant_id=technician.tenant_id
+                        )
+                    except Exception as e:
+                        logger.error(
+                            f"❌ Error publicando tracking.location_updated al outbox para incidente {incident.id}: {str(e)}",
+                            exc_info=True
+                        )
                 
                 # Update last emission time
                 last_location_emit[technician_id] = current_time
@@ -149,7 +176,7 @@ class RealTimeService:
             # Broadcast location update to workshop dashboard
             if technician.workshop_id:
                 logger.info(f"📡 Enviando actualización a workshop {technician.workshop_id}")
-                await manager.send_personal_message(technician.workshop_id, {
+                await manager.broadcast_to_workshop(technician.workshop_id, {
                     "type": "technician_location_update",
                     "data": {
                         "technician_id": technician_id,
@@ -323,7 +350,7 @@ class RealTimeService:
             
             # Broadcast technician status change to workshop
             if technician.workshop_id:
-                await manager.send_personal_message(technician.workshop_id, {
+                await manager.broadcast_to_workshop(technician.workshop_id, {
                     "type": "technician_status_update",
                     "data": {
                         "technician_id": technician_id,
@@ -376,6 +403,17 @@ class RealTimeService:
                 event_type=EventTypes.TECHNICIAN_ASSIGNED,
                 data=technician_assigned_data
             )
+
+            technician_assigned_event = IncidentTechnicianAssignedEvent(
+                incident_id=incident_id,
+                technician_id=technician_id,
+                technician_name=f"{technician.first_name} {technician.last_name}",
+                technician_phone=technician.phone,
+                workshop_id=technician.workshop_id,
+                workshop_name=workshop_name,
+                assigned_by=assigned_by,
+            )
+            await EventPublisher.publish(self.session, technician_assigned_event)
             
             # ✅ Publish status change event via EventPublisher (secure, scoped delivery)
             status_event = IncidentStatusChangedEvent(
@@ -652,7 +690,7 @@ class RealTimeService:
                 status_data["last_seen_at"] = last_seen_at.isoformat()
 
             # Broadcast to workshop
-            await manager.send_personal_message(technician.workshop_id, {
+            await manager.broadcast_to_workshop(technician.workshop_id, {
                 "type": "technician_status_update",
                 "data": status_data
             })

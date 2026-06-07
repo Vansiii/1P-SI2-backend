@@ -18,6 +18,7 @@ from app.modules.outbox.delivery_strategies import (
     HybridDeliveryStrategy,
     DeliveryStrategyFactory,
 )
+from app.modules.outbox.notification_filter import NotificationFilter
 
 
 # ============================================================================
@@ -474,6 +475,9 @@ def test_factory_critical_events_return_hybrid():
     critical_events = [
         "incident.created",
         "incident.assigned",
+        "incident.assignment_accepted",
+        "incident.assignment_rejected",
+        "incident.reassigned",
         "incident.technician_arrived",
         "incident.work_completed",
     ]
@@ -540,3 +544,37 @@ def test_factory_reuses_strategy_instances():
     
     # Should be the same instance (both are HYBRID)
     assert strategy1 is strategy2
+
+
+def test_notification_filter_client_receives_assignment_lifecycle_events():
+    """Client should receive push-eligible assignment lifecycle updates for own incident."""
+    incident_participants = {"client_id": 11, "workshop_id": 22, "technician_id": None}
+
+    for event_type in (
+        "incident.assigned",
+        "incident.assignment_accepted",
+        "incident.assignment_rejected",
+        "incident.assignment_timeout",
+        "incident.reassigned",
+        "incident.cancelled",
+    ):
+        assert NotificationFilter.should_notify_user(
+            event_type=event_type,
+            user_type="client",
+            user_id=11,
+            event_data={},
+            incident_participants=incident_participants,
+        )
+
+
+def test_notification_filter_reassigned_reaches_previous_workshop_candidate():
+    """Previous workshop candidate should not be filtered out for incident.reassigned."""
+    incident_participants = {"client_id": 11, "workshop_id": 22, "technician_id": None}
+
+    assert NotificationFilter.should_notify_user(
+        event_type="incident.reassigned",
+        user_type="workshop",
+        user_id=10,
+        event_data={},
+        incident_participants=incident_participants,
+    )
