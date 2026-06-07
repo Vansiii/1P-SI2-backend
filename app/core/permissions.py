@@ -186,6 +186,16 @@ class Permission(str, Enum):
     CATALOG_DELETE = "catalog:delete"
     CATALOG_TOGGLE = "catalog:toggle"
 
+    # ========== MÓDULO 13: COTIZACIONES (CU32) ==========
+    COTIZACION_CREAR = "cotizacion:create"
+    COTIZACION_VER_PROPIAS = "cotizacion:view_own"
+    COTIZACION_VER_RECIBIDAS = "cotizacion:view_incoming"
+    COTIZACION_RESPONDER = "cotizacion:responder"
+    COTIZACION_SELECCIONAR = "cotizacion:select"
+    COTIZACION_PAGAR = "cotizacion:pay"
+    COTIZACION_CANCELAR = "cotizacion:cancel"
+    COTIZACION_ADMIN_VER = "cotizacion:admin_view"
+
 
 # Mapeo de permisos por rol basado en casos de uso
 ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
@@ -236,6 +246,13 @@ ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
         Permission.PROFILE_VIEW_OWN,
         Permission.PROFILE_UPDATE_OWN,
         Permission.PROFILE_DELETE_OWN,
+
+        # CU32: Cotizaciones (Cliente)
+        Permission.COTIZACION_CREAR,
+        Permission.COTIZACION_VER_PROPIAS,
+        Permission.COTIZACION_SELECCIONAR,
+        Permission.COTIZACION_PAGAR,
+        Permission.COTIZACION_CANCELAR,
     },
     
     # A2: Taller Mecánico (Usuario de la App Web)
@@ -301,6 +318,10 @@ ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
         Permission.CATALOG_UPDATE,
         Permission.CATALOG_DELETE,
         Permission.CATALOG_TOGGLE,
+
+        # CU32: Cotizaciones (Taller)
+        Permission.COTIZACION_VER_RECIBIDAS,
+        Permission.COTIZACION_RESPONDER,
     },
     
     # A4: Técnico de Taller (Usuario de la App Móvil)
@@ -404,6 +425,9 @@ ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
         Permission.VEHICLE_VIEW_OWN,  # Ver vehículos de todos los clientes
         Permission.EMERGENCY_VIEW_OWN,  # Ver incidentes de todos los clientes
         Permission.REQUEST_VIEW_INCOMING,  # Ver solicitudes entrantes
+
+        # CU32: Cotizaciones (Admin)
+        Permission.COTIZACION_ADMIN_VER,
     },
     
     # A5: Sistema/IA (Actor interno)

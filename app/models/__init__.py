@@ -68,6 +68,10 @@ from .stripe_event_log import StripeEventLog
 # Modelos de calificación de servicios (CU06)
 from .service_rating import ServiceRating
 
+# Modelos de cotizaciones (CU32)
+from .cotizacion import Cotizacion
+from .cotizacion_respuesta import CotizacionRespuesta
+
 __all__ = [
     # Base
     "Base",
@@ -128,6 +132,9 @@ __all__ = [
     "StripeEventLog",
     # Calificación de servicios (CU06)
     "ServiceRating",
+    # Cotizaciones (CU32)
+    "Cotizacion",
+    "CotizacionRespuesta",
     # Tenant y Suscripción (CU29-CU31)
     "Tenant",
     "SubscriptionPlan",

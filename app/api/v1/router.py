@@ -41,6 +41,12 @@ from ...modules.voice.router import router as voice_router
 from ...modules.client_reports.router import router as client_reports_router
 from ...modules.especialidades.router import router as especialidades_router
 
+# Cotizaciones module (CU32)
+from ...modules.cotizaciones.router import router as cotizaciones_router
+from ...modules.cotizaciones.router import workshop_router as cotizaciones_workshop_router
+from ...modules.cotizaciones.router import admin_router as cotizaciones_admin_router
+from ...modules.cotizaciones.upload_router import router as cotizaciones_upload_router
+
 # Payment module routers
 from ...modules.payments.router import router as payments_router
 from ...modules.payments.workshop_router import router as payments_workshop_router
@@ -386,6 +392,29 @@ api_router.include_router(
 api_router.include_router(
     client_reports_router,
     tags=["Client Reports"],
+)
+
+# Cotizaciones routes (CU32)
+api_router.include_router(
+    cotizaciones_router,
+    tags=["Cotizaciones"],
+)
+
+api_router.include_router(
+    cotizaciones_upload_router,
+    prefix="/cotizaciones",
+    tags=["Cotizaciones - Upload"],
+)
+
+api_router.include_router(
+    cotizaciones_workshop_router,
+    prefix="/workshop",
+    tags=["Workshop - Cotizaciones"],
+)
+
+api_router.include_router(
+    cotizaciones_admin_router,
+    tags=["Admin - Cotizaciones"],
 )
 
 __all__ = ["api_router"]

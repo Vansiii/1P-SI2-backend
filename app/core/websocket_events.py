@@ -343,6 +343,17 @@ class EventTypes:
     SERVICE_COMPLETED = "service.completed"
     SERVICE_PAUSED = "service.paused"
     SERVICE_RESUMED = "service.resumed"
+
+    # ── Cotizacion events (CU32) ────────────────────────────────────────────
+    COTIZACION_SOLICITADA = "cotizacion.solicitada"
+    COTIZACION_IA_COMPLETADA = "cotizacion.ia_completada"
+    COTIZACION_RESPUESTA_RECIBIDA = "cotizacion.respuesta_recibida"
+    COTIZACION_TALLER_SELECCIONADO = "cotizacion.taller_seleccionado"
+    COTIZACION_TALLER_RECHAZADO = "cotizacion.taller_rechazado"
+    COTIZACION_PAGO_INICIADO = "cotizacion.pago_iniciado"
+    COTIZACION_PAGO_CONFIRMADO = "cotizacion.pago_confirmado"
+    COTIZACION_CANCELADA = "cotizacion.cancelada"
+    COTIZACION_COMPLETADA = "cotizacion.completada"
     
     # ── AI Analysis events ──────────────────────────────────────────────────
     INCIDENT_ANALYSIS_STARTED = "incident.analysis_started"

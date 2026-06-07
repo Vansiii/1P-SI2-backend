@@ -2,21 +2,20 @@
 Payment Router - Client-facing endpoints for payments.
 """
 import json
-import stripe
 
-from fastapi import APIRouter, Depends, Query, Request, HTTPException, status
+import stripe
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ...core.database import get_db_session
 from ...core.config import get_settings
-from ...core.logging import get_logger
-from ...core.responses import create_success_response
-from ...core.permissions import Permission
+from ...core.database import get_db_session
 from ...core.dependencies import require_permission
-from ...shared.dependencies.auth import get_current_user, get_current_client
-from ...models.user import User
+from ...core.logging import get_logger
+from ...core.permissions import Permission
+from ...core.responses import create_success_response
 from ...models.client import Client
 from ...models.stripe_event_log import StripeEventLog
+from ...shared.dependencies.auth import get_current_client
 from .schemas import CreatePaymentIntentRequest
 from .service import PaymentService
 
@@ -87,10 +86,10 @@ async def stripe_webhook(
     """Handle Stripe webhook events."""
     payload = await request.body()
     sig_header = request.headers.get("stripe-signature")
-    
+
     # Verify webhook signature
     webhook_secret = settings.stripe_webhook_secret
-    
+
     if webhook_secret:
         try:
             event = stripe.Webhook.construct_event(
@@ -108,10 +107,10 @@ async def stripe_webhook(
             event = json.loads(payload)
         except json.JSONDecodeError:
             raise HTTPException(status_code=400, detail="Invalid JSON payload")
-    
+
     event_id = event.get("id", "unknown")
     event_type = event.get("type", "unknown")
-    
+
     # Check for duplicate events (idempotency)
     from sqlalchemy import select
     existing = await session.scalar(
@@ -119,11 +118,11 @@ async def stripe_webhook(
             StripeEventLog.stripe_event_id == event_id
         )
     )
-    
+
     if existing and existing.status == "processed":
         logger.info(f"Duplicate Stripe event ignored: {event_id}")
         return {"status": "already_processed"}
-    
+
     # Log the event
     event_log = StripeEventLog(
         stripe_event_id=event_id,
@@ -136,37 +135,44 @@ async def stripe_webhook(
         await session.flush()
     else:
         event_log = existing
-    
+
     # Process the event
     try:
         service = PaymentService(session)
-        
+
         if event_type == "payment_intent.succeeded":
             payment_intent_id = event["data"]["object"]["id"]
-            transaction = await service.handle_payment_succeeded(payment_intent_id)
-            
-            if transaction:
-                logger.info(f"Payment succeeded: {payment_intent_id}")
-        
+            metadata = event["data"]["object"].get("metadata", {})
+
+            if metadata.get("cotizacion_id"):
+                from ..cotizaciones.service import CotizacionService
+                cotizacion_service = CotizacionService(session)
+                await cotizacion_service.procesar_pago_exitoso(payment_intent_id)
+                logger.info(f"Cotizacion payment succeeded: {payment_intent_id}")
+            else:
+                transaction = await service.handle_payment_succeeded(payment_intent_id)
+                if transaction:
+                    logger.info(f"Payment succeeded: {payment_intent_id}")
+
         elif event_type == "payment_intent.payment_failed":
             payment_intent_id = event["data"]["object"]["id"]
             failure_message = event["data"]["object"].get("last_payment_error", {}).get("message", "Unknown error")
             transaction = await service.handle_payment_failed(payment_intent_id, failure_message)
-            
+
             if transaction:
                 logger.info(f"Payment failed: {payment_intent_id}")
-        
+
         else:
             logger.info(f"Unhandled Stripe event type: {event_type}")
-        
+
         event_log.status = "processed"
         event_log.processed_at = __import__("datetime").datetime.utcnow()
-        
+
     except Exception as e:
         logger.error(f"Error processing Stripe webhook: {e}", exc_info=True)
         event_log.status = "failed"
         event_log.error_message = str(e)
-    
+
     await session.commit()
     return {"status": "ok"}
 
