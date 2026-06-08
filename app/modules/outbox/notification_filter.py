@@ -43,6 +43,7 @@ class NotificationFilter:
         "incident.no_workshop_available",
         "incident.assignment_timeout",
         "incident.reassigned",
+        "incident.status_changed",
         "chat.message_sent",
         "cancellation.requested",
         "cancellation.approved",
@@ -51,11 +52,8 @@ class NotificationFilter:
     
     # Eventos INFORMATIVOS (solo WebSocket, no push)
     INFORMATIVE_EVENTS = {
-        "incident.status_changed",
         "incident.updated",  # Actualizaciones de campos del incidente (ej: IA)
         "incident.searching_workshop",
-        "incident.technician_on_way",
-        "incident.work_started",
         "incident.reassignment_started",
         "tracking.started",
         "tracking.ended",

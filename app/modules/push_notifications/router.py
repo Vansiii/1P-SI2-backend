@@ -5,7 +5,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel, Field
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Literal
 
 from ...core.database import get_db_session
 from ...shared.dependencies.auth import get_current_user
@@ -18,7 +18,7 @@ router = APIRouter()
 class RegisterTokenRequest(BaseModel):
     """Request for registering FCM token."""
     token: str = Field(..., min_length=1, description="FCM token")
-    platform: str = Field(..., description="Platform: android, ios, web")
+    platform: Literal["android", "ios", "web"] = Field(..., description="Platform: android, ios, web")
     device_id: Optional[str] = Field(None, description="Unique device identifier")
 
 
