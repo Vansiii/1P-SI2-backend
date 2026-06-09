@@ -10,9 +10,11 @@ from app.core.dependencies import (
 from app.core.responses import create_success_response
 
 from .schemas import (
+    ContraofertaRequest,
     ResponderCotizacionRequest,
     SeleccionarTallerRequest,
     SolicitarCotizacionRequest,
+    SolicitarDesdeIncidenteRequest,
 )
 from .service import CotizacionService
 
@@ -60,6 +62,53 @@ async def listar_cotizaciones_cliente(
         message=f"{len(result)} cotizaciones encontradas",
     )
 
+
+# ---- CU32 v2: Nuevos endpoints cliente (rutas estaticas antes de parametrizadas) ----
+
+@router.get("/preview")
+async def preview_cotizacion(
+    incidente_id: int = Query(...),
+    workshop_id: int = Query(...),
+    user_payload: dict = Depends(get_current_user_payload),
+    session: AsyncSession = Depends(get_db_session),
+):
+    client_id = int(user_payload["sub"])
+    service = CotizacionService(session)
+    try:
+        result = await service.get_preview(incidente_id, workshop_id, client_id)
+        return create_success_response(data=result, message="Preview de cotizacion")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.post("/solicitar-desde-incidente")
+async def solicitar_cotizacion_desde_incidente(
+    body: SolicitarDesdeIncidenteRequest,
+    incidente_id: int = Query(..., description="ID del incidente de origen"),
+    workshop_id: int = Query(..., description="ID del taller seleccionado"),
+    user_payload: dict = Depends(get_current_user_payload),
+    session: AsyncSession = Depends(get_db_session),
+):
+    client_id = int(user_payload["sub"])
+    service = CotizacionService(session)
+    try:
+        result = await service.solicitar_desde_incidente(
+            incidente_id=incidente_id,
+            workshop_id=workshop_id,
+            client_id=client_id,
+            servicios_seleccionados=body.servicios_seleccionados,
+            descripcion_adicional=body.descripcion_adicional,
+        )
+        return create_success_response(data=result, message="Cotizacion v2 solicitada exitosamente")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+# ---- Rutas parametrizadas ----
 
 @router.get("/{cotizacion_id}")
 async def get_cotizacion_detalle(
@@ -122,6 +171,59 @@ async def cancelar_cotizacion(
     try:
         result = await service.cancelar_cotizacion(cotizacion_id, user_id, user_type)
         return create_success_response(data=result, message="Cotizacion cancelada")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/{cotizacion_id}/aceptar")
+async def aceptar_cotizacion(
+    cotizacion_id: int,
+    respuesta_id: int | None = Query(default=None),
+    user_payload: dict = Depends(get_current_user_payload),
+    session: AsyncSession = Depends(get_db_session),
+):
+    client_id = int(user_payload["sub"])
+    service = CotizacionService(session)
+    try:
+        result = await service.aceptar_cotizacion(cotizacion_id, client_id, respuesta_id)
+        return create_success_response(data=result, message="Cotizacion aceptada")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/{cotizacion_id}/iniciar-negociacion")
+async def iniciar_negociacion(
+    cotizacion_id: int,
+    user_payload: dict = Depends(get_current_user_payload),
+    session: AsyncSession = Depends(get_db_session),
+):
+    client_id = int(user_payload["sub"])
+    service = CotizacionService(session)
+    try:
+        result = await service.iniciar_negociacion(cotizacion_id, client_id)
+        return create_success_response(data=result, message="Negociacion iniciada")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/{cotizacion_id}/ruta")
+async def get_ruta_cotizacion(
+    cotizacion_id: int,
+    user_payload: dict = Depends(get_current_user_payload),
+    session: AsyncSession = Depends(get_db_session),
+):
+    user_id = int(user_payload["sub"])
+    user_type = user_payload.get("user_type", "")
+    service = CotizacionService(session)
+    try:
+        result = await service.calcular_ruta(cotizacion_id, user_id, user_type)
+        return create_success_response(data=result, message="Ruta de cotizacion")
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
     except ValueError as e:
@@ -197,6 +299,54 @@ async def responder_cotizacion(
             validez_horas=body.validez_horas,
         )
         return create_success_response(data=result, message="Cotizacion enviada exitosamente")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@workshop_router.post("/{cotizacion_id}/contraoferta")
+async def enviar_contraoferta(
+    cotizacion_id: int,
+    body: ContraofertaRequest,
+    user_payload: dict = Depends(get_current_user_payload),
+    tenant: TenantContext = Depends(require_active_tenant),
+    session: AsyncSession = Depends(get_db_session),
+):
+    workshop_id = int(user_payload["sub"])
+    tenant_id = tenant.tenant_id
+    service = CotizacionService(session)
+    try:
+        servicios_dicts = [s.model_dump() for s in body.servicios]
+        result = await service.enviar_contraoferta(
+            cotizacion_id=cotizacion_id,
+            workshop_id=workshop_id,
+            tenant_id=tenant_id,
+            servicios=servicios_dicts,
+            costo_total=body.costo_total,
+            tiempo_estimado_minutos=body.tiempo_estimado_minutos,
+            tiempo_estimado_texto=body.tiempo_estimado_texto,
+            notas=body.notas,
+        )
+        return create_success_response(data=result, message="Contraoferta enviada exitosamente")
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@workshop_router.get("/{cotizacion_id}/ruta")
+async def get_ruta_cotizacion_taller(
+    cotizacion_id: int,
+    user_payload: dict = Depends(get_current_user_payload),
+    session: AsyncSession = Depends(get_db_session),
+):
+    user_id = int(user_payload["sub"])
+    user_type = user_payload.get("user_type", "")
+    service = CotizacionService(session)
+    try:
+        result = await service.calcular_ruta(cotizacion_id, user_id, user_type)
+        return create_success_response(data=result, message="Ruta de cotizacion")
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
     except ValueError as e:

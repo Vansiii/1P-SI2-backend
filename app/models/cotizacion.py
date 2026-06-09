@@ -23,7 +23,8 @@ class Cotizacion(Base):
     __table_args__ = (
         CheckConstraint(
             "estado IN ('pendiente_cotizacion', 'cotizando', 'cotizado', 'taller_seleccionado', "
-            "'pago_pendiente', 'pagado', 'en_proceso', 'completado', 'cancelado', 'rechazado')",
+            "'pago_pendiente', 'pagado', 'en_proceso', 'completado', 'cancelado', 'rechazado', "
+            "'negociando', 'aceptado')",
             name="check_cotizacion_estado_valid"
         ),
         Index("idx_cotizaciones_client_estado", "client_id", "estado"),
@@ -37,6 +38,7 @@ class Cotizacion(Base):
     client_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
     vehiculo_id: Mapped[int] = mapped_column(ForeignKey("vehiculos.id"), nullable=False, index=True)
     workshop_id: Mapped[int | None] = mapped_column(ForeignKey("workshops.id"), nullable=True, index=True)
+    incidente_id: Mapped[int | None] = mapped_column(ForeignKey("incidentes.id"), nullable=True, index=True)
 
     latitud: Mapped[float] = mapped_column(Numeric(10, 8), nullable=False)
     longitud: Mapped[float] = mapped_column(Numeric(11, 8), nullable=False)
@@ -60,6 +62,10 @@ class Cotizacion(Base):
 
     stripe_payment_intent_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     monto_pagado: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True)
+    monto_aceptado: Mapped[float | None] = mapped_column(Numeric(12, 2), nullable=True)
+
+    version: Mapped[str] = mapped_column(String(10), nullable=False, default="v1", index=True)
+    chat_sala_id: Mapped[int | None] = mapped_column(ForeignKey("cotizacion_chat_salas.id"), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
     updated_at: Mapped[datetime] = mapped_column(
@@ -71,7 +77,9 @@ class Cotizacion(Base):
     completado_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     respuestas = relationship("CotizacionRespuesta", back_populates="cotizacion", cascade="all, delete-orphan")
+    chat_sala = relationship("CotizacionChatSala", foreign_keys=[chat_sala_id], uselist=False, viewonly=True)
 
     client = relationship("User", foreign_keys=[client_id])
     vehiculo = relationship("Vehiculo", foreign_keys=[vehiculo_id])
     workshop = relationship("Workshop", foreign_keys=[workshop_id])
+    incidente = relationship("Incidente", foreign_keys=[incidente_id])

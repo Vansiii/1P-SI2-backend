@@ -140,7 +140,7 @@ class ServiceCatalogService:
             }, default=str),
         ))
 
-        await self.session.commit()
+        await self.session.flush()
         await self.session.refresh(item)
 
         result = await self.session.execute(
@@ -187,7 +187,7 @@ class ServiceCatalogService:
                 details=json.dumps(changed, default=str),
             ))
 
-        await self.session.commit()
+        await self.session.flush()
         await self.session.refresh(item)
         return self._to_item_response(item)
 
@@ -238,7 +238,7 @@ class ServiceCatalogService:
             details=json.dumps({"is_active": new_state}),
         ))
 
-        await self.session.commit()
+        await self.session.flush()
         await self.session.refresh(item)
         return self._to_item_response(item)
 
@@ -286,7 +286,7 @@ class ServiceCatalogService:
             ip_address="system",
         ))
 
-        await self.session.commit()
+        await self.session.flush()
 
     @staticmethod
     def _to_item_response(item: ServicioTaller) -> dict:

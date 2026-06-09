@@ -38,6 +38,7 @@ async def create_catalog_item(
         item = await service.create_item(
             ctx.tenant_id, ctx.user_id, body.model_dump(exclude_none=True)
         )
+        await session.commit()
         return create_success_response(data=item, message="Servicio agregado al catalogo")
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
@@ -73,6 +74,7 @@ async def update_catalog_item(
             ctx.tenant_id, item_id, ctx.user_id,
             body.model_dump(exclude_none=True)
         )
+        await session.commit()
         return create_success_response(data=item, message="Servicio actualizado")
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -89,6 +91,7 @@ async def toggle_catalog_item(
     service = ServiceCatalogService(session)
     try:
         item = await service.toggle_item(ctx.tenant_id, item_id, ctx.user_id)
+        await session.commit()
         estado = "activado" if item["is_active"] else "desactivado"
         return create_success_response(data=item, message=f"Servicio {estado}")
     except ValueError as e:
@@ -106,6 +109,7 @@ async def delete_catalog_item(
     service = ServiceCatalogService(session)
     try:
         await service.delete_item(ctx.tenant_id, item_id, ctx.user_id)
+        await session.commit()
         return create_success_response(data=None, message="Servicio eliminado del catalogo")
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
