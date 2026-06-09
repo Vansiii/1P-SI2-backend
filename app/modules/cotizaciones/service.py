@@ -18,12 +18,14 @@ from app.core.websocket_events import EventTypes
 from app.models.assignment_attempt import AssignmentAttempt
 from app.models.audit_log import AuditLog
 from app.models.cotizacion import Cotizacion
+from app.models.cotizacion_chat_sala import CotizacionChatSala
 from app.models.cotizacion_respuesta import CotizacionRespuesta
 from app.models.incidente import Incidente
 from app.models.servicio_taller import ServicioTaller
 from app.models.tenant import Tenant
 from app.models.vehiculo import Vehiculo
 from app.models.workshop import Workshop
+from app.models.conversation import Conversation
 from app.shared.schemas.events.base import BaseEvent, EventPriority
 
 logger = get_logger(__name__)
@@ -198,7 +200,11 @@ class CotizacionService:
         result = await self.session.execute(
             select(Cotizacion)
             .where(
-                Cotizacion.estado.in_(["pendiente_cotizacion", "cotizando", "cotizado"]),
+                Cotizacion.estado.in_([
+                    "pendiente_cotizacion", "cotizando", "cotizado",
+                    "taller_seleccionado", "negociando", "aceptado",
+                    "pago_pendiente", "pagado",
+                ]),
             )
             .options(
                 selectinload(Cotizacion.respuestas).selectinload(CotizacionRespuesta.workshop),
@@ -215,13 +221,32 @@ class CotizacionService:
 
         nearby = []
         for c in cotizaciones:
-            distance = self._haversine(w_lat, w_lng, float(c.latitud), float(c.longitud))
-            if distance <= w_coverage:
-                ya_respondio = any(r.workshop_id == workshop_id for r in c.respuestas)
-                item = self._serialize_cotizacion_list_item(c)
-                item["distance_km"] = round(distance, 2)
-                item["ya_respondio"] = ya_respondio
-                nearby.append(item)
+            ya_respondio = any(r.workshop_id == workshop_id for r in c.respuestas)
+
+            if c.version == "v2":
+                if c.workshop_id != workshop_id:
+                    continue
+                distance = self._haversine(w_lat, w_lng, float(c.latitud), float(c.longitud))
+            else:
+                # v1: for estados past "cotizado", only the selected workshop sees it
+                if c.estado not in ("pendiente_cotizacion", "cotizando", "cotizado"):
+                    if c.workshop_id != workshop_id:
+                        continue
+                # v1: if another workshop responded but this one didn't, skip
+                # (prevent leaking responded cotizaciones across workshops)
+                if c.estado == "cotizado" and not ya_respondio:
+                    continue
+                distance = self._haversine(w_lat, w_lng, float(c.latitud), float(c.longitud))
+                if distance > w_coverage:
+                    continue
+                # v1: only show cotizaciones from the same tenant or tenantless
+                if c.tenant_id is not None and c.tenant_id != tenant_id:
+                    continue
+
+            item = self._serialize_cotizacion_list_item(c)
+            item["distance_km"] = round(distance, 2)
+            item["ya_respondio"] = ya_respondio
+            nearby.append(item)
 
         return nearby
 
@@ -387,32 +412,53 @@ class CotizacionService:
             if r.id != respuesta_id and r.estado == "pendiente":
                 r.estado = "rechazada"
 
-        descripcion_completa = cotizacion.descripcion_dano
-        if respuesta.servicios:
-            svc_names = [s.get("nombre", "") for s in respuesta.servicios if s.get("nombre")]
-            if svc_names:
-                descripcion_completa += f"\n\nServicios cotizados: {', '.join(svc_names)}"
-                descripcion_completa += f"\nCosto estimado: {float(respuesta.costo_total):.2f} BOB"
-                descripcion_completa += f"\nTiempo estimado: {respuesta.tiempo_estimado_texto}"
+        incidente_id = cotizacion.incidente_id
+        if cotizacion.incidente_id:
+            # v2: the incident already exists, update it instead of creating a new one
+            incidente = await self.session.get(Incidente, cotizacion.incidente_id)
+            if incidente:
+                incidente.descripcion = f"{incidente.descripcion}\n\n[Cotizacion aceptada] {float(respuesta.costo_total):.2f} BOB — {respuesta.tiempo_estimado_texto}"
+                incidente.taller_id = respuesta.workshop_id
+                incidente.estado_actual = "pendiente"
+                incidente.assignment_mode = "manual"
+                incidente_id = incidente.id
+            else:
+                incidente = None
+                incidente_id = None
+        else:
+            # v1: no incident yet, create one
+            descripcion_completa = cotizacion.descripcion_dano
+            if respuesta.servicios:
+                svc_names = [s.get("nombre", "") for s in respuesta.servicios if s.get("nombre")]
+                if svc_names:
+                    descripcion_completa += f"\n\nServicios cotizados: {', '.join(svc_names)}"
+                    descripcion_completa += f"\nCosto estimado: {float(respuesta.costo_total):.2f} BOB"
+                    descripcion_completa += f"\nTiempo estimado: {respuesta.tiempo_estimado_texto}"
 
-        incidente = Incidente(
-            tenant_id=respuesta.tenant_id,
-            client_id=cotizacion.client_id,
-            vehiculo_id=cotizacion.vehiculo_id,
-            taller_id=respuesta.workshop_id,
-            latitude=cotizacion.latitud,
-            longitude=cotizacion.longitud,
-            direccion_referencia=cotizacion.direccion_referencia,
-            descripcion=descripcion_completa,
-            categoria_ia=cotizacion.categoria_ia,
-            prioridad_ia=cotizacion.prioridad_ia,
-            resumen_ia=cotizacion.resumen_ia,
-            es_ambiguo=cotizacion.es_ambiguo,
-            estado_actual="pendiente",
-            assignment_mode="manual",
-        )
-        self.session.add(incidente)
-        await self.session.flush()
+            incidente = Incidente(
+                tenant_id=respuesta.tenant_id,
+                client_id=cotizacion.client_id,
+                vehiculo_id=cotizacion.vehiculo_id,
+                taller_id=respuesta.workshop_id,
+                latitude=cotizacion.latitud,
+                longitude=cotizacion.longitud,
+                direccion_referencia=cotizacion.direccion_referencia,
+                descripcion=descripcion_completa,
+                categoria_ia=cotizacion.categoria_ia,
+                prioridad_ia=cotizacion.prioridad_ia,
+                resumen_ia=cotizacion.resumen_ia,
+                es_ambiguo=cotizacion.es_ambiguo,
+                estado_actual="pendiente",
+                assignment_mode="manual",
+            )
+            self.session.add(incidente)
+            await self.session.flush()
+            incidente_id = incidente.id
+            cotizacion.incidente_id = incidente.id
+
+        if not incidente or not incidente_id:
+            await self.session.rollback()
+            raise ValueError("No se pudo crear o vincular el incidente")
 
         timeout_minutes = self._get_response_timeout(incidente)
         timeout_at = datetime.now(timezone.utc) + timedelta(minutes=timeout_minutes)
@@ -588,6 +634,550 @@ class CotizacionService:
         "pending_downgrade", "pending_cancellation",
     }
 
+    async def get_preview(
+        self, incidente_id: int, workshop_id: int, client_id: int
+    ) -> dict:
+        incidente = await self.session.scalar(
+            select(Incidente)
+            .where(Incidente.id == incidente_id)
+            .options(selectinload(Incidente.vehiculo))
+        )
+        if not incidente:
+            raise ValueError("Incidente no encontrado")
+        if incidente.client_id != client_id:
+            raise PermissionError("El incidente no te pertenece")
+
+        workshop = await self.session.get(Workshop, workshop_id)
+        if not workshop:
+            raise ValueError("Taller no encontrado")
+
+        w_lat = float(workshop.latitude) if workshop.latitude else 0
+        w_lng = float(workshop.longitude) if workshop.longitude else 0
+        distance = self._haversine(w_lat, w_lng, incidente.latitude, incidente.longitude)
+
+        servicios_sugeridos = await self._match_servicios_catalogo(
+            incidente.categoria_ia or "",
+            workshop_id,
+            incidente.descripcion or "",
+        )
+
+        return {
+            "incidente_id": incidente.id,
+            "incidente_descripcion": incidente.descripcion or "",
+            "incidente_ubicacion": {
+                "lat": float(incidente.latitude),
+                "lng": float(incidente.longitude),
+                "direccion": incidente.direccion_referencia or "",
+            },
+            "taller_ubicacion": {
+                "lat": w_lat,
+                "lng": w_lng,
+                "nombre": workshop.workshop_name or "Taller",
+            },
+            "vehiculo_matricula": incidente.vehiculo.matricula if incidente.vehiculo else "",
+            "vehiculo_marca": incidente.vehiculo.marca if incidente.vehiculo else "",
+            "vehiculo_modelo": incidente.vehiculo.modelo if incidente.vehiculo else "",
+            "taller_id": workshop_id,
+            "taller_nombre": workshop.workshop_name,
+            "servicios_sugeridos": servicios_sugeridos,
+            "distancia_km": round(distance, 2),
+            "duracion_minutos": round((distance / 40) * 60, 1),
+        }
+
+    async def solicitar_desde_incidente(
+        self,
+        incidente_id: int,
+        workshop_id: int,
+        client_id: int,
+        servicios_seleccionados: list[int],
+        descripcion_adicional: str | None,
+    ) -> dict:
+        incidente = await self.session.scalar(
+            select(Incidente)
+            .where(Incidente.id == incidente_id)
+            .options(selectinload(Incidente.vehiculo))
+        )
+        if not incidente:
+            raise ValueError("Incidente no encontrado")
+        if incidente.client_id != client_id:
+            raise PermissionError("El incidente no te pertenece")
+
+        workshop = await self.session.get(Workshop, workshop_id)
+        if not workshop:
+            raise ValueError("Taller no encontrado")
+        if not await self._is_tenant_valid(workshop):
+            raise PermissionError("El taller no esta disponible para recibir cotizaciones")
+
+        descripcion = incidente.descripcion or ""
+        if descripcion_adicional:
+            descripcion += f"\n\n[Adicional]: {descripcion_adicional}"
+
+        vehiculo = incidente.vehiculo
+        if not vehiculo:
+            raise ValueError("El incidente no tiene vehiculo asociado")
+
+        cotizacion = Cotizacion(
+            client_id=client_id,
+            vehiculo_id=vehiculo.id,
+            incidente_id=incidente_id,
+            workshop_id=workshop_id,
+            latitud=incidente.latitude,
+            longitud=incidente.longitude,
+            direccion_referencia=incidente.direccion_referencia,
+            descripcion_dano=descripcion,
+            categoria_ia=incidente.categoria_ia,
+            prioridad_ia=incidente.prioridad_ia,
+            resumen_ia=incidente.resumen_ia,
+            es_ambiguo=incidente.es_ambiguo if incidente.es_ambiguo is not None else False,
+            estado="cotizando",
+            version="v2",
+            tenant_id=workshop.tenant_id,
+        )
+        self.session.add(cotizacion)
+
+        if servicios_seleccionados:
+            servicios_validados = []
+            total = Decimal("0")
+            tiempo_total = 0
+            for st_id in servicios_seleccionados:
+                st_result = await self.session.execute(
+                    select(ServicioTaller)
+                    .where(ServicioTaller.id == st_id)
+                    .options(selectinload(ServicioTaller.servicio))
+                )
+                st = st_result.scalar_one_or_none()
+                if not st or st.taller_id != workshop_id or not st.is_active:
+                    continue
+                precio = st.precio if st.precio else Decimal("0")
+                tiempo = st.tiempo_estimado_min if st.tiempo_estimado_min else 0
+                servicios_validados.append({
+                    "servicio_id": st.id,
+                    "nombre": st.servicio.nombre if st.servicio else "",
+                    "precio": float(precio),
+                    "tiempo_minutos": tiempo,
+                })
+                total += precio
+                tiempo_total += tiempo
+            if servicios_validados:
+                cotizacion.servicios_cotizados = servicios_validados
+                cotizacion.costo_total_estimado = total
+                cotizacion.tiempo_total_estimado_minutos = tiempo_total
+
+        self.session.add(AuditLog(
+            user_id=client_id,
+            tenant_id=workshop.tenant_id,
+            action="cotizacion_v2_solicitada",
+            resource_type="cotizacion",
+            resource_id=cotizacion.id,
+            ip_address="system",
+            details=json.dumps({
+                "incidente_id": incidente_id,
+                "workshop_id": workshop_id,
+                "version": "v2",
+            }, default=str),
+        ))
+
+        await self.session.flush()
+
+        await self._run_ai_analysis(cotizacion)
+
+        await self._emitir_evento(
+            EventTypes.COTIZACION_SOLICITADA,
+            {
+                "cotizacion_id": cotizacion.id,
+                "client_id": client_id,
+                "workshop_id": workshop_id,
+                "incidente_id": incidente_id,
+                "version": "v2",
+                "descripcion_dano": descripcion[:300],
+                "categoria_ia": cotizacion.categoria_ia,
+                "ubicacion": {"lat": float(incidente.latitude), "lng": float(incidente.longitude)},
+            },
+            EventPriority.HIGH,
+            client_id,
+        )
+
+        await self._notificar_push(
+            workshop_id,
+            "Nueva solicitud de cotizacion",
+            f"Un cliente solicito cotizacion para su {vehiculo.marca} {vehiculo.modelo}",
+            {"type": "cotizacion_v2", "cotizacion_id": cotizacion.id},
+        )
+
+        await self.session.commit()
+
+        return {
+            "id": cotizacion.id,
+            "incidente_id": incidente_id,
+            "workshop_id": workshop_id,
+            "workshop_name": workshop.workshop_name,
+            "version": "v2",
+            "estado": cotizacion.estado,
+            "costo_total_estimado": float(cotizacion.costo_total_estimado) if cotizacion.costo_total_estimado else None,
+            "created_at": cotizacion.created_at.isoformat() if cotizacion.created_at else None,
+        }
+
+    async def aceptar_cotizacion(self, cotizacion_id: int, client_id: int, respuesta_id: int | None = None) -> dict:
+        cotizacion = await self.session.scalar(
+            select(Cotizacion)
+            .where(Cotizacion.id == cotizacion_id)
+            .options(selectinload(Cotizacion.respuestas), selectinload(Cotizacion.workshop))
+        )
+        if not cotizacion:
+            raise ValueError("Cotizacion no encontrada")
+        if cotizacion.client_id != client_id:
+            raise PermissionError("No tienes permiso para esta cotizacion")
+        if cotizacion.estado not in ("cotizado", "cotizando", "negociando", "pendiente_cotizacion"):
+            raise ValueError(f"No se puede aceptar una cotizacion en estado '{cotizacion.estado}'")
+
+        if respuesta_id:
+            respuesta = next((r for r in cotizacion.respuestas if r.id == respuesta_id), None)
+            if not respuesta:
+                raise ValueError("Respuesta no encontrada")
+            if respuesta.estado != "pendiente":
+                raise ValueError("La respuesta seleccionada ya no esta disponible")
+            if respuesta.valida_hasta and respuesta.valida_hasta < datetime.now(timezone.utc):
+                raise ValueError("La respuesta seleccionada ha expirado")
+            cotizacion.monto_aceptado = respuesta.costo_total
+            # Mark selected as accepted, reject others
+            respuesta.estado = "aceptada"
+            for r in cotizacion.respuestas:
+                if r.id != respuesta_id and r.estado == "pendiente":
+                    r.estado = "rechazada"
+        elif cotizacion.costo_total_estimado:
+            cotizacion.monto_aceptado = cotizacion.costo_total_estimado
+        cotizacion.estado = "aceptado"
+
+        if cotizacion.chat_sala_id:
+            sala = await self.session.get(CotizacionChatSala, cotizacion.chat_sala_id)
+            if sala:
+                sala.estado = "cerrada_aceptada"
+                sala.cerrada_at = datetime.now(timezone.utc)
+
+        self.session.add(AuditLog(
+            user_id=client_id,
+            tenant_id=cotizacion.tenant_id,
+            action="cotizacion_aceptada",
+            resource_type="cotizacion",
+            resource_id=cotizacion_id,
+            ip_address="system",
+            details=json.dumps({"monto_aceptado": str(cotizacion.monto_aceptado)} if cotizacion.monto_aceptado else {}, default=str),
+        ))
+
+        await self.session.flush()
+
+        await self._emitir_evento(
+            EventTypes.COTIZACION_TALLER_SELECCIONADO,
+            {
+                "cotizacion_id": cotizacion_id,
+                "workshop_id": cotizacion.workshop_id,
+                "monto_aceptado": str(cotizacion.monto_aceptado) if cotizacion.monto_aceptado else None,
+                "estado": "aceptado",
+            },
+            EventPriority.HIGH,
+            client_id,
+        )
+
+        if cotizacion.workshop_id:
+            await self._notificar_push(
+                cotizacion.workshop_id,
+                "Cotizacion aceptada",
+                f"El cliente acepto tu cotizacion por ${float(cotizacion.monto_aceptado):.2f}" if cotizacion.monto_aceptado else "El cliente acepto tu cotizacion",
+                {"type": "cotizacion_aceptada", "cotizacion_id": cotizacion_id},
+            )
+
+        await self.session.commit()
+
+        return {
+            "cotizacion_id": cotizacion_id,
+            "estado": "aceptado",
+            "monto_aceptado": float(cotizacion.monto_aceptado) if cotizacion.monto_aceptado else None,
+        }
+
+    async def iniciar_negociacion(self, cotizacion_id: int, client_id: int) -> dict:
+        cotizacion = await self.session.scalar(
+            select(Cotizacion)
+            .where(Cotizacion.id == cotizacion_id)
+            .options(selectinload(Cotizacion.workshop))
+        )
+        if not cotizacion:
+            raise ValueError("Cotizacion no encontrada")
+        if cotizacion.client_id != client_id:
+            raise PermissionError("No tienes permiso para esta cotizacion")
+        if cotizacion.estado not in ("cotizado", "cotizando"):
+            raise ValueError(f"No se puede negociar una cotizacion en estado '{cotizacion.estado}'")
+        if not cotizacion.workshop_id:
+            raise ValueError("La cotizacion no tiene taller asignado para negociar")
+        if cotizacion.chat_sala_id:
+            raise ValueError("Ya se inicio una negociacion para esta cotizacion. Espera la contraoferta del taller.")
+
+        cotizacion.estado = "negociando"
+
+        incident_id = cotizacion.incidente_id or 0
+        conversation = Conversation(
+            incident_id=incident_id,
+            client_id=client_id,
+            workshop_id=cotizacion.workshop_id,
+            tenant_id=cotizacion.tenant_id,
+        )
+        self.session.add(conversation)
+        await self.session.flush()
+
+        sala = CotizacionChatSala(
+            cotizacion_id=cotizacion_id,
+            conversation_id=conversation.id,
+            client_id=client_id,
+            workshop_id=cotizacion.workshop_id,
+            tenant_id=cotizacion.tenant_id,
+            estado="activa",
+        )
+        self.session.add(sala)
+        await self.session.flush()
+
+        cotizacion.chat_sala_id = sala.id
+
+        self.session.add(AuditLog(
+            user_id=client_id,
+            tenant_id=cotizacion.tenant_id,
+            action="cotizacion_negociacion_iniciada",
+            resource_type="cotizacion",
+            resource_id=cotizacion_id,
+            ip_address="system",
+            details=json.dumps({
+                "chat_sala_id": sala.id,
+                "conversation_id": conversation.id,
+            }, default=str),
+        ))
+
+        await self.session.flush()
+
+        await self._emitir_evento(
+            EventTypes.COTIZACION_RESPUESTA_RECIBIDA,
+            {
+                "cotizacion_id": cotizacion_id,
+                "chat_sala_id": sala.id,
+                "conversation_id": conversation.id,
+                "estado": "negociando",
+            },
+            EventPriority.HIGH,
+            client_id,
+        )
+
+        await self.session.commit()
+
+        return {
+            "cotizacion_id": cotizacion_id,
+            "chat_sala_id": sala.id,
+            "conversation_id": conversation.id,
+            "estado": "negociando",
+        }
+
+    async def enviar_contraoferta(
+        self,
+        cotizacion_id: int,
+        workshop_id: int,
+        tenant_id: int,
+        servicios: list[dict],
+        costo_total: Decimal,
+        tiempo_estimado_minutos: int,
+        tiempo_estimado_texto: str,
+        notas: str | None,
+    ) -> dict:
+        cotizacion = await self.session.scalar(
+            select(Cotizacion)
+            .where(Cotizacion.id == cotizacion_id)
+            .options(selectinload(Cotizacion.chat_sala))
+        )
+        if not cotizacion:
+            raise ValueError("Cotizacion no encontrada")
+        if cotizacion.workshop_id != workshop_id:
+            raise PermissionError("Esta cotizacion no esta dirigida a tu taller")
+        if cotizacion.estado != "negociando":
+            raise ValueError(f"No se puede enviar contraoferta en estado '{cotizacion.estado}'")
+
+        workshop = await self.session.get(Workshop, workshop_id)
+        if not workshop:
+            raise ValueError("Taller no encontrado")
+
+        servicios_jsonb = _serialize_servicios_to_jsonb(servicios)
+
+        respuesta = CotizacionRespuesta(
+            cotizacion_id=cotizacion_id,
+            workshop_id=workshop_id,
+            tenant_id=tenant_id,
+            servicios=servicios_jsonb,
+            costo_total=costo_total,
+            tiempo_estimado_minutos=tiempo_estimado_minutos,
+            tiempo_estimado_texto=tiempo_estimado_texto,
+            notas=notas,
+            valida_hasta=datetime.now(timezone.utc) + timedelta(hours=24),
+            estado="pendiente",
+        )
+        self.session.add(respuesta)
+
+        cotizacion.costo_total_estimado = costo_total
+        cotizacion.servicios_cotizados = servicios_jsonb
+        cotizacion.tiempo_total_estimado_minutos = tiempo_estimado_minutos
+        cotizacion.updated_at = datetime.now(timezone.utc)
+
+        if cotizacion.chat_sala and cotizacion.chat_sala_id:
+            cotizacion.chat_sala.ultima_oferta_monto = costo_total
+            cotizacion.chat_sala.ultima_oferta_at = datetime.now(timezone.utc)
+
+        # Only allow one contraoferta — return to cotizado after sending
+        cotizacion.estado = "cotizado"
+
+        self.session.add(AuditLog(
+            user_id=workshop_id,
+            tenant_id=tenant_id,
+            action="cotizacion_contraoferta_enviada",
+            resource_type="cotizacion",
+            resource_id=cotizacion_id,
+            ip_address="system",
+            details=json.dumps({
+                "costo_total": str(costo_total),
+                "tiempo_estimado_minutos": tiempo_estimado_minutos,
+                "respuesta_id": respuesta.id,
+            }, default=str),
+        ))
+
+        await self.session.flush()
+
+        await self._emitir_evento(
+            EventTypes.COTIZACION_RESPUESTA_RECIBIDA,
+            {
+                "cotizacion_id": cotizacion_id,
+                "respuesta_id": respuesta.id,
+                "workshop_id": workshop_id,
+                "workshop_name": workshop.workshop_name,
+                "costo_total": str(costo_total),
+                "tiempo_estimado_texto": tiempo_estimado_texto,
+                "es_contraoferta": True,
+            },
+            EventPriority.HIGH,
+            cotizacion.client_id,
+        )
+
+        await self._notificar_push(
+            cotizacion.client_id,
+            "Taller envio contraoferta",
+            f"{workshop.workshop_name} ofrecio ${float(costo_total):.2f} — {tiempo_estimado_texto}",
+            {"type": "contraoferta", "cotizacion_id": cotizacion_id, "respuesta_id": respuesta.id},
+        )
+
+        await self.session.commit()
+
+        return {
+            "respuesta_id": respuesta.id,
+            "cotizacion_id": cotizacion_id,
+            "workshop_id": workshop_id,
+            "costo_total": float(costo_total),
+            "tiempo_estimado_texto": tiempo_estimado_texto,
+            "valida_hasta": respuesta.valida_hasta.isoformat() if respuesta.valida_hasta else None,
+        }
+
+    async def calcular_ruta(self, cotizacion_id: int, user_id: int, user_type: str) -> dict:
+        cotizacion = await self.session.scalar(
+            select(Cotizacion)
+            .where(Cotizacion.id == cotizacion_id)
+            .options(selectinload(Cotizacion.workshop), selectinload(Cotizacion.incidente))
+        )
+        if not cotizacion:
+            raise ValueError("Cotizacion no encontrada")
+
+        if user_type not in ("admin", "administrator"):
+            if user_type == "client" and cotizacion.client_id != user_id:
+                raise PermissionError("No tienes permiso para ver esta ruta")
+            if user_type == "workshop" and cotizacion.workshop_id != user_id:
+                raise PermissionError("No tienes permiso para ver esta ruta")
+
+        workshop = cotizacion.workshop
+        if not workshop:
+            raise ValueError("La cotizacion no tiene taller asociado")
+
+        w_lat = float(workshop.latitude) if workshop.latitude else 0
+        w_lng = float(workshop.longitude) if workshop.longitude else 0
+        if not w_lat or not w_lng:
+            raise ValueError("El taller no tiene ubicacion registrada")
+
+        from app.modules.routing.services import RoutingService
+        routing = RoutingService()
+        try:
+            route = await routing.calculate_route(
+                w_lat, w_lng,
+                float(cotizacion.latitud),
+                float(cotizacion.longitud),
+            )
+        finally:
+            await routing.close()
+
+        distancia = route.get("distance_km", 0)
+        duracion = route.get("duration_minutes", 0)
+        geometry = route.get("geometry")
+
+        polyline = None
+        if geometry and geometry.get("coordinates"):
+            coords = geometry["coordinates"]
+            polyline_data = []
+            for c in coords:
+                polyline_data.append({"lat": c[1], "lng": c[0]})
+            polyline = polyline_data
+        elif geometry and isinstance(geometry, dict) and "points" in geometry:
+            polyline = geometry["points"]
+
+        incidente_nombre = f"Incidente #{cotizacion.incidente_id}" if cotizacion.incidente_id else f"Cotizacion #{cotizacion_id}"
+        taller_nombre = workshop.workshop_name or "Taller"
+
+        return {
+            "origen": {
+                "lat": float(cotizacion.latitud),
+                "lng": float(cotizacion.longitud),
+                "nombre": incidente_nombre,
+            },
+            "destino": {
+                "lat": w_lat,
+                "lng": w_lng,
+                "nombre": taller_nombre,
+            },
+            "ruta": {
+                "polyline": polyline,
+                "distancia_km": distancia,
+                "duracion_minutos": duracion,
+            },
+            "fuente": route.get("source", "haversine"),
+        }
+
+    async def _match_servicios_catalogo(
+        self, categoria_ia: str, workshop_id: int, descripcion: str
+    ) -> list[dict]:
+        from sqlalchemy.orm import selectinload
+        result = await self.session.execute(
+            select(ServicioTaller)
+            .where(ServicioTaller.taller_id == workshop_id, ServicioTaller.is_active)
+            .options(selectinload(ServicioTaller.servicio))
+        )
+        servicios = result.scalars().all()
+
+        matched = []
+        keywords = (categoria_ia + " " + descripcion).lower()
+        for sv in servicios:
+            motivo = ""
+            sv_nombre = (sv.servicio.nombre or "").lower() if sv.servicio else ""
+            sv_desc = (sv.descripcion or "").lower()
+            if any(kw in sv_nombre or kw in sv_desc for kw in keywords.split() if len(kw) > 2):
+                motivo = "Coincide con diagnostico IA"
+            else:
+                continue
+            matched.append({
+                "servicio_id": sv.id,
+                "nombre": sv.servicio.nombre if sv.servicio else "",
+                "precio": float(sv.precio) if sv.precio else 0,
+                "tiempo_minutos": sv.tiempo_estimado_min or 0,
+                "motivo": motivo,
+            })
+
+        return matched[:10]
+
     async def _is_tenant_valid(self, workshop: Workshop) -> bool:
         result = await self.session.execute(
             select(Tenant)
@@ -637,6 +1227,21 @@ class CotizacionService:
             await self.session.flush()
         except Exception:
             logger.exception(f"Failed to publish event {event_type}")
+
+    async def _notificar_push(
+        self, user_id: int, titulo: str, cuerpo: str, data: dict | None = None
+    ) -> None:
+        try:
+            from app.modules.push_notifications.services import PushNotificationService, PushNotificationData
+            push = PushNotificationService(self.session)
+            notif = PushNotificationData(
+                title=titulo,
+                body=cuerpo,
+                data=data or {},
+            )
+            await push.send_to_user(user_id, notif)
+        except Exception:
+            logger.exception(f"Failed to send push notification to user {user_id}")
 
     @staticmethod
     def _get_response_timeout(incidente: Incidente) -> int:
@@ -733,6 +1338,10 @@ class CotizacionService:
             "estado": c.estado,
             "stripe_payment_intent_id": c.stripe_payment_intent_id,
             "monto_pagado": float(c.monto_pagado) if c.monto_pagado else None,
+            "monto_aceptado": float(c.monto_aceptado) if c.monto_aceptado else None,
+            "version": c.version,
+            "incidente_id": c.incidente_id,
+            "chat_sala_id": c.chat_sala_id,
             "respuestas": [
                 {
                     "id": r.id,
@@ -777,5 +1386,8 @@ class CotizacionService:
             "costo_total_estimado": float(c.costo_total_estimado) if c.costo_total_estimado else None,
             "taller_nombre": workshop.workshop_name if workshop else None,
             "respuestas_count": len(CotizacionService._safe_get_relationship(c, "respuestas")),
+            "incidente_id": c.incidente_id,
+            "workshop_id": c.workshop_id,
+            "version": c.version,
             "created_at": c.created_at.isoformat() if c.created_at else None,
         }

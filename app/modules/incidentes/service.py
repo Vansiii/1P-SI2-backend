@@ -223,80 +223,82 @@ class IncidenteService:
         
         # Crear evidencias de imágenes
         if request.imagenes:
-            evidencia_imagenes = Evidencia(
-                incidente_id=created_incidente.id,
-                uploaded_by_user_id=client_id,
-                tipo="IMAGE",
-                descripcion="Imágenes del incidente",
-            )
-            evidencia_img_created = await self.repository.create_evidencia(evidencia_imagenes)
-            
-            for imagen_url in request.imagenes:
-                evidencia_imagen = EvidenciaImagen(
-                    evidencia_id=evidencia_img_created.id,
-                    file_url=imagen_url,
-                    file_name="incident_image.jpg",  # Nombre genérico por ahora
-                    file_type="image",
-                    mime_type="image/jpeg",
-                    size=0,  # Se actualizará si se tiene la info
-                    uploaded_by=client_id,
+            imagenes_validas = [u for u in request.imagenes if u and u.startswith(("http://", "https://"))]
+            if imagenes_validas:
+                evidencia_imagenes = Evidencia(
+                    incidente_id=created_incidente.id,
+                    uploaded_by_user_id=client_id,
+                    tipo="IMAGE",
+                    descripcion="Imágenes del incidente",
                 )
-                evidencia_imagen_created = await self.repository.create_evidencia_imagen(evidencia_imagen)
-                
-                # Publicar evento de imagen subida
-                try:
-                    image_event = EvidenceImageUploadedEvent(
-                        evidence_id=evidencia_img_created.id,
-                        evidence_image_id=evidencia_imagen_created.id,
-                        incident_id=created_incidente.id,
+                evidencia_img_created = await self.repository.create_evidencia(evidencia_imagenes)
+
+                for imagen_url in imagenes_validas:
+                    evidencia_imagen = EvidenciaImagen(
+                        evidencia_id=evidencia_img_created.id,
                         file_url=imagen_url,
                         file_name="incident_image.jpg",
+                        file_type="image",
                         mime_type="image/jpeg",
-                        file_size=0,
-                        uploaded_by=client_id
+                        size=0,
+                        uploaded_by=client_id,
                     )
-                    await EventPublisher.publish(self.session, image_event)
-                except Exception as e:
-                    logger.error(f"Error publicando evento de imagen: {str(e)}", exc_info=True)
+                    evidencia_imagen_created = await self.repository.create_evidencia_imagen(evidencia_imagen)
+
+                    try:
+                        image_event = EvidenceImageUploadedEvent(
+                            evidence_id=evidencia_img_created.id,
+                            evidence_image_id=evidencia_imagen_created.id,
+                            incident_id=created_incidente.id,
+                            file_url=imagen_url,
+                            file_name="incident_image.jpg",
+                            mime_type="image/jpeg",
+                            file_size=0,
+                            uploaded_by=client_id
+                        )
+                        await EventPublisher.publish(self.session, image_event)
+                    except Exception as e:
+                        logger.error(f"Error publicando evento de imagen: {str(e)}", exc_info=True)
         
         # Crear evidencias de audios
         if request.audios:
-            evidencia_audios = Evidencia(
-                incidente_id=created_incidente.id,
-                uploaded_by_user_id=client_id,
-                tipo="AUDIO",
-                descripcion="Audios del incidente",
-            )
-            evidencia_audio_created = await self.repository.create_evidencia(evidencia_audios)
-            
-            for audio_url in request.audios:
-                evidencia_audio = EvidenciaAudio(
-                    evidencia_id=evidencia_audio_created.id,
-                    file_url=audio_url,
-                    file_name="incident_audio.mp3",  # Nombre genérico por ahora
-                    file_type="audio",
-                    mime_type="audio/mpeg",
-                    size=0,  # Se actualizará si se tiene la info
-                    uploaded_by=client_id,
+            audios_validos = [a for a in request.audios if a and a.startswith(("http://", "https://"))]
+            if audios_validos:
+                evidencia_audios = Evidencia(
+                    incidente_id=created_incidente.id,
+                    uploaded_by_user_id=client_id,
+                    tipo="AUDIO",
+                    descripcion="Audios del incidente",
                 )
-                evidencia_audio_item_created = await self.repository.create_evidencia_audio(evidencia_audio)
-                
-                # Publicar evento de audio subido
-                try:
-                    audio_event = EvidenceAudioUploadedEvent(
-                        evidence_id=evidencia_audio_created.id,
-                        evidence_audio_id=evidencia_audio_item_created.id,
-                        incident_id=created_incidente.id,
+                evidencia_audio_created = await self.repository.create_evidencia(evidencia_audios)
+
+                for audio_url in audios_validos:
+                    evidencia_audio = EvidenciaAudio(
+                        evidencia_id=evidencia_audio_created.id,
                         file_url=audio_url,
                         file_name="incident_audio.mp3",
+                        file_type="audio",
                         mime_type="audio/mpeg",
-                        file_size=0,
-                        duration_seconds=None,
-                        uploaded_by=client_id
+                        size=0,
+                        uploaded_by=client_id,
                     )
-                    await EventPublisher.publish(self.session, audio_event)
-                except Exception as e:
-                    logger.error(f"Error publicando evento de audio: {str(e)}", exc_info=True)
+                    evidencia_audio_item_created = await self.repository.create_evidencia_audio(evidencia_audio)
+
+                    try:
+                        audio_event = EvidenceAudioUploadedEvent(
+                            evidence_id=evidencia_audio_created.id,
+                            evidence_audio_id=evidencia_audio_item_created.id,
+                            incident_id=created_incidente.id,
+                            file_url=audio_url,
+                            file_name="incident_audio.mp3",
+                            mime_type="audio/mpeg",
+                            file_size=0,
+                            duration_seconds=None,
+                            uploaded_by=client_id
+                        )
+                        await EventPublisher.publish(self.session, audio_event)
+                    except Exception as e:
+                        logger.error(f"Error publicando evento de audio: {str(e)}", exc_info=True)
         
         # Publicar evento genérico de evidencia de texto
         try:

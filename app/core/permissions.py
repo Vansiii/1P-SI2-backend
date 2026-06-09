@@ -195,6 +195,8 @@ class Permission(str, Enum):
     COTIZACION_PAGAR = "cotizacion:pay"
     COTIZACION_CANCELAR = "cotizacion:cancel"
     COTIZACION_ADMIN_VER = "cotizacion:admin_view"
+    COTIZACION_ACEPTAR = "cotizacion:accept"
+    COTIZACION_NEGOCIAR = "cotizacion:negotiate"
 
 
 # Mapeo de permisos por rol basado en casos de uso
@@ -253,6 +255,8 @@ ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
         Permission.COTIZACION_SELECCIONAR,
         Permission.COTIZACION_PAGAR,
         Permission.COTIZACION_CANCELAR,
+        Permission.COTIZACION_ACEPTAR,
+        Permission.COTIZACION_NEGOCIAR,
     },
     
     # A2: Taller Mecánico (Usuario de la App Web)

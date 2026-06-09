@@ -71,6 +71,7 @@ from .service_rating import ServiceRating
 # Modelos de cotizaciones (CU32)
 from .cotizacion import Cotizacion
 from .cotizacion_respuesta import CotizacionRespuesta
+from .cotizacion_chat_sala import CotizacionChatSala
 
 __all__ = [
     # Base
@@ -135,6 +136,7 @@ __all__ = [
     # Cotizaciones (CU32)
     "Cotizacion",
     "CotizacionRespuesta",
+    "CotizacionChatSala",
     # Tenant y Suscripción (CU29-CU31)
     "Tenant",
     "SubscriptionPlan",

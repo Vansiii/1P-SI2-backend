@@ -15,6 +15,7 @@ from ...models.transaction import Transaction
 from ...models.incidente import Incidente
 from ...models.client import Client
 from ...models.workshop import Workshop
+from ...models.cotizacion import Cotizacion
 from ...models.stripe_event_log import StripeEventLog
 
 logger = get_logger(__name__)
@@ -108,8 +109,8 @@ class PaymentService:
                 # If we can't reuse, create a new one
 
         # 3. Calculate amounts
-        # For now, use a fixed amount. In production, this would come from service pricing.
-        amount = Decimal("150.00")  # TODO: Get from incident/service pricing
+        # Priority: linked cotizacion v2 (accepted) → fixed amount
+        amount = await self._get_incident_amount(incident_id)
         commission_rate = Decimal(str(settings.platform_commission_rate))
         commission = (amount * commission_rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         workshop_amount = amount - commission
@@ -370,3 +371,18 @@ class PaymentService:
             "paid_at": transaction.completed_at,
             "description": transaction.description,
         }
+
+    async def _get_incident_amount(self, incident_id: int) -> Decimal:
+        cotizacion = await self.session.scalar(
+            select(Cotizacion).where(
+                Cotizacion.incidente_id == incident_id,
+                Cotizacion.version == "v2",
+                Cotizacion.estado == "aceptado",
+            )
+        )
+        if cotizacion and cotizacion.monto_aceptado:
+            monto = Decimal(str(cotizacion.monto_aceptado))
+            if monto > 0:
+                logger.info(f"Using cotizacion v2 accepted amount: {monto}")
+                return monto
+        return Decimal("150.00")

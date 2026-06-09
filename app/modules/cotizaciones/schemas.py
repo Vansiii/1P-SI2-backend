@@ -103,3 +103,40 @@ class PagoCotizacionResponse(BaseModel):
     stripe_payment_intent_id: str
     amount: float
     publishable_key: str
+
+
+# === CU32 v2: Nuevos schemas ===
+
+class PreviewCotizacionResponse(BaseModel):
+    incidente_id: int
+    incidente_descripcion: str
+    incidente_ubicacion: dict  # {lat, lng, direccion}
+    vehiculo_matricula: str
+    vehiculo_marca: str
+    vehiculo_modelo: str
+    taller_id: int
+    taller_nombre: str
+    servicios_sugeridos: list[dict] = Field(default_factory=list)  # [{servicio_id, nombre, precio, motivo}]
+    distancia_km: float | None = None
+    duracion_minutos: float | None = None
+
+
+class SolicitarDesdeIncidenteRequest(BaseModel):
+    servicios_seleccionados: list[int] = Field(default_factory=list)  # servicio_taller IDs
+    descripcion_adicional: str | None = Field(default=None, max_length=500)
+
+
+class ContraofertaRequest(BaseModel):
+    servicios: list[ServicioCotizadoItem] = Field(min_length=1)
+    costo_total: Decimal = Field(gt=0)
+    tiempo_estimado_minutos: int = Field(gt=0)
+    tiempo_estimado_texto: str = Field(min_length=1, max_length=200)
+    notas: str | None = Field(default=None, max_length=1000)
+    mensaje_chat: str | None = Field(default=None, max_length=500)  # opcional, se envia al chat
+
+
+class RutaCotizacionResponse(BaseModel):
+    origen: dict  # {lat, lng, nombre}
+    destino: dict  # {lat, lng, nombre}
+    ruta: dict  # {polyline, distancia_km, duracion_minutos}
+    fuente: str = "osrm"

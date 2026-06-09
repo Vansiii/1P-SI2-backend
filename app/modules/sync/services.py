@@ -98,7 +98,7 @@ class SyncService:
             await self.session.flush()
             return result
         except Exception:
-            exc = getattr(_sys_exc_info(), "value", None)
+            exc = _sys_exc_info()
             exc_msg = str(exc) if exc else "unknown"
             record.status = SyncOperationStatus.FAILED
             record.error_message = exc_msg
@@ -294,12 +294,16 @@ class SyncService:
         return None
 
     async def _get_workshop_tenant_id(self, user_id: int) -> Optional[int]:
-        workshop = await self.session.get(Workshop, user_id)
-        return workshop.tenant_id if workshop else None
+        result = await self.session.execute(
+            select(Workshop.tenant_id).where(Workshop.id == user_id)
+        )
+        return result.scalar_one_or_none()
 
     async def _get_user_type(self, user_id: int) -> Optional[str]:
-        user = await self.session.get(User, user_id)
-        return user.user_type if user else None
+        result = await self.session.execute(
+            select(User.user_type).where(User.id == user_id)
+        )
+        return result.scalar_one_or_none()
 
     # ── Handlers ──────────────────────────────────────────────────────────
 
@@ -604,6 +608,15 @@ class SyncService:
                 status="failed",
                 success=False,
                 message="Se requiere incident_id y file_url",
+                retryable=False,
+            )
+
+        if file_url.startswith("local://"):
+            return OperationResult(
+                client_operation_id=op.client_operation_id,
+                status="failed",
+                success=False,
+                message="URL local no valida. El archivo debe subirse al servidor antes del sync.",
                 retryable=False,
             )
 

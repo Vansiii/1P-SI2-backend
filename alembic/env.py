@@ -44,6 +44,10 @@ from app.models.login_attempt import LoginAttempt
 from app.models.audit_log import AuditLog
 from app.models.two_factor_auth import TwoFactorAuth
 
+# Modelos de cotizaciones (CU32)
+from app.models.cotizacion import Cotizacion
+from app.models.cotizacion_respuesta import CotizacionRespuesta
+
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
 config = context.config
