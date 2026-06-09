@@ -4,10 +4,10 @@ Admin Monitoring Queries
 Optimized SQL queries for admin monitoring endpoints.
 """
 
-from sqlalchemy import select, func, and_, or_, case, cast, Integer
+from sqlalchemy import select, func, and_, or_, case, cast, Integer, extract
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Tuple
 import logging
 
@@ -104,7 +104,7 @@ async def get_system_metrics(db: AsyncSession) -> Dict:
                 ), else_=0)).label('total'),
                 func.sum(case((and_(
                     normalized_status.in_(resolved_aliases),
-                    Incidente.updated_at >= datetime.utcnow().date()
+                    Incidente.updated_at >= datetime.now(timezone.utc).date()
                 ), 1), else_=0)).label('resuelto_hoy')
             )
         )
@@ -119,7 +119,7 @@ async def get_system_metrics(db: AsyncSession) -> Dict:
                 func.count(ServiceRating.id).label('total_ratings'),
                 func.avg(ServiceRating.rating).label('average_rating'),
                 func.sum(case((
-                    ServiceRating.created_at >= datetime.utcnow().date(), 1
+                    ServiceRating.created_at >= datetime.now(timezone.utc).date(), 1
                 ), else_=0)).label('ratings_today')
             )
         )
@@ -139,7 +139,7 @@ async def get_system_metrics(db: AsyncSession) -> Dict:
             'total_ratings': rating_row.total_ratings or 0,
             'average_rating': round(float(rating_row.average_rating or 0), 2),
             'ratings_today': rating_row.ratings_today or 0,
-            'updated_at': datetime.utcnow()
+            'updated_at': datetime.now(timezone.utc)
         }
     
     except Exception as e:
@@ -308,7 +308,7 @@ async def get_all_workshops_with_status(db: AsyncSession) -> Tuple[List[Dict], i
                 'busy_technicians': busy_techs,
                 'active_incidents': active_incidents,
                 'availability_status': status,
-                'updated_at': datetime.utcnow()
+                'updated_at': datetime.now(timezone.utc)
             })
         
         return workshops_with_status, len(workshops_with_status), by_status
@@ -379,47 +379,53 @@ async def get_chart_data(db: AsyncSession) -> Dict:
             for status in ['available', 'busy', 'offline', 'out_of_service']
         ]
         
-        # Incidents timeline (last 24 hours, grouped by hour)
-        now = datetime.utcnow()
+        # Incidents timeline (last 24 hours, grouped by hour) — single batched query
+        now = datetime.now(timezone.utc)
         start_time = now - timedelta(hours=24)
         
-        # This is a simplified version - would need more complex query for real timeline
+        timeline_active_result = await db.execute(
+            select(
+                extract('hour', Incidente.created_at).label('hour'),
+                func.count(Incidente.id).label('count'),
+            )
+            .where(
+                and_(
+                    Incidente.created_at >= start_time,
+                    Incidente.estado_actual.in_([
+                        'pendiente', 'asignado', 'en_proceso', 'en_camino', 'en_sitio'
+                    ])
+                )
+            )
+            .group_by(extract('hour', Incidente.created_at))
+        )
+        active_by_hour = {int(row.hour): row.count for row in timeline_active_result.all()}
+        
+        timeline_resolved_result = await db.execute(
+            select(
+                extract('hour', Incidente.updated_at).label('hour'),
+                func.count(Incidente.id).label('count'),
+            )
+            .where(
+                and_(
+                    Incidente.updated_at >= start_time,
+                    Incidente.estado_actual == 'resuelto'
+                )
+            )
+            .group_by(extract('hour', Incidente.updated_at))
+        )
+        resolved_by_hour = {int(row.hour): row.count for row in timeline_resolved_result.all()}
+        
         incidents_timeline = []
         for i in range(24):
-            hour_start = start_time + timedelta(hours=i)
-            hour_end = hour_start + timedelta(hours=1)
-            hour_label = hour_start.strftime('%H:00')
-            
-            # Count active and resolved incidents in this hour
-            active_count_query = await db.execute(
-                select(func.count(Incidente.id)).where(
-                    and_(
-                        Incidente.created_at >= hour_start,
-                        Incidente.created_at < hour_end,
-                        Incidente.estado_actual.in_([
-                            'pendiente', 'asignado', 'en_proceso', 'en_camino', 'en_sitio'
-                        ])
-                    )
-                )
-            )
-            active_count = active_count_query.scalar() or 0
-            
-            resolved_count_query = await db.execute(
-                select(func.count(Incidente.id)).where(
-                    and_(
-                        Incidente.updated_at >= hour_start,
-                        Incidente.updated_at < hour_end,
-                        Incidente.estado_actual == 'resuelto'
-                    )
-                )
-            )
-            resolved_count = resolved_count_query.scalar() or 0
+            hour_dt = start_time + timedelta(hours=i)
+            hour_label = hour_dt.strftime('%H:00')
+            hour_val = hour_dt.hour
             
             incidents_timeline.append({
                 'name': hour_label,
                 'series': [
-                    {'name': 'Activos', 'value': active_count},
-                    {'name': 'Resueltos', 'value': resolved_count}
+                    {'name': 'Activos', 'value': active_by_hour.get(hour_val, 0)},
+                    {'name': 'Resueltos', 'value': resolved_by_hour.get(hour_val, 0)}
                 ]
             })
         

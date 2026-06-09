@@ -338,8 +338,7 @@ class MetricsService:
         # Active workshops
         active_workshops = await self.session.scalar(
             select(func.count(Workshop.id))
-            .join(User, Workshop.id == User.id)
-            .where(User.is_active == True)
+            .where(Workshop.is_active == True)
         )
 
         # Active technicians
@@ -468,11 +467,19 @@ class MetricsService:
             Dictionary with current system metrics
         """
         now = datetime.now(timezone.utc)
-        today_start = datetime(now.year, now.month, now.day)
+        today_start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
         
         # Total incidents (all time)
         total_incidents = await self.session.scalar(
             select(func.count(Incidente.id))
+        ) or 0
+        
+        # Pending incidents (awaiting assignment)
+        pending_incidents = await self.session.scalar(
+            select(func.count(Incidente.id))
+            .where(
+                Incidente.estado_actual.in_(["pendiente"])
+            )
         ) or 0
         
         # Active incidents (not resolved or cancelled)
@@ -480,7 +487,7 @@ class MetricsService:
             select(func.count(Incidente.id))
             .where(
                 Incidente.estado_actual.in_([
-                    "pendiente", "asignado", "en_camino", "en_sitio"
+                    "pendiente", "asignado", "aceptado", "en_camino", "en_sitio", "en_proceso"
                 ])
             )
         ) or 0
@@ -523,6 +530,7 @@ class MetricsService:
         return {
             "total_incidents": total_incidents,
             "active_incidents": active_incidents,
+            "pending_incidents": pending_incidents,
             "completed_today": completed_today,
             "avg_response_time": round(avg_response_time, 2) if avg_response_time else None,
             "active_technicians": active_technicians
@@ -542,6 +550,7 @@ class MetricsService:
             event = DashboardMetricsUpdatedEvent(
                 total_incidents=metrics["total_incidents"],
                 active_incidents=metrics["active_incidents"],
+                pending_incidents=metrics["pending_incidents"],
                 completed_today=metrics["completed_today"],
                 avg_response_time=metrics["avg_response_time"],
                 active_technicians=metrics["active_technicians"]

@@ -67,12 +67,14 @@ class ReportsService:
         incidents = result.scalars().all()
         return [
             {
-                "ID": i.id,
-                "Fecha": i.created_at.strftime('%d/%m/%Y %H:%M') if i.created_at else '',
-                "Estado": i.estado_actual or '',
-                "Categoría": (i.categoria_ia or 'N/A').replace('_', ' ').title(),
-                "Dirección": i.direccion_referencia or '',
-                "Prioridad": i.prioridad_ia or 'N/A',
+                "id": i.id,
+                "client_id": i.client_id,
+                "taller_id": i.taller_id,
+                "estado_actual": i.estado_actual or '',
+                "created_at": i.created_at.isoformat() if i.created_at else '',
+                "categoria_ia": i.categoria_ia or 'N/A',
+                "direccion_referencia": i.direccion_referencia or '',
+                "prioridad_ia": i.prioridad_ia or 'N/A',
             } for i in incidents
         ]
 
@@ -169,11 +171,11 @@ class ReportsService:
         rows = result.all()
         return [
             {
-                "ID Taller": r.id,
-                "Nombre": r.workshop_name,
-                "Total Incidentes": r.total_incidents or 0,
-                "T. Respuesta (min)": round(float(r.avg_response_time or 0), 1),
-                "T. Resolución (min)": round(float(r.avg_resolution_time or 0), 1),
+                "workshop_id": r.id,
+                "name": r.workshop_name,
+                "total_incidents": r.total_incidents or 0,
+                "avg_response_min": round(float(r.avg_response_time or 0), 1),
+                "avg_resolution_min": round(float(r.avg_resolution_time or 0), 1),
             } for r in rows
         ]
 

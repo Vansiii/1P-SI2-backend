@@ -15,6 +15,7 @@ class DashboardMetricsUpdatedEvent(BaseEvent):
     
     total_incidents: int = Field(..., description="Total number of incidents")
     active_incidents: int = Field(..., description="Number of active incidents")
+    pending_incidents: int = Field(default=0, description="Number of pending incidents")
     completed_today: int = Field(..., description="Incidents completed today")
     avg_response_time: Optional[float] = Field(None, description="Average response time in minutes")
     active_technicians: Optional[int] = Field(None, description="Number of active technicians")

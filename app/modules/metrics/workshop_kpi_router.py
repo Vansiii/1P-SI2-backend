@@ -20,8 +20,10 @@ ADMIN_TYPES = ("admin", "administrator")
 def _normalize_dates(start_date: Optional[datetime], end_date: Optional[datetime]):
     if start_date and start_date.tzinfo is not None:
         start_date = start_date.astimezone(timezone.utc).replace(tzinfo=None)
-    if end_date and end_date.tzinfo is not None:
-        end_date = end_date.astimezone(timezone.utc).replace(tzinfo=None)
+    if end_date:
+        if end_date.tzinfo is not None:
+            end_date = end_date.astimezone(timezone.utc).replace(tzinfo=None)
+        end_date = end_date.replace(hour=23, minute=59, second=59, microsecond=999999)
     return start_date, end_date
 
 
@@ -148,11 +150,19 @@ async def get_workshop_dashboard(
     current_user=Depends(get_current_user),
 ):
     """Dashboard unificado con todos los KPIs del taller."""
-    wid = await _resolve_workshop_id(workshop_id, current_user)
-    start_date, end_date = _normalize_dates(start_date, end_date)
-    svc = WorkshopKPIService(db)
-    data = await svc.get_dashboard(wid, start_date, end_date)
-    return success_response(data=data, message="Dashboard de KPIs del taller")
+    import traceback
+    try:
+        wid = await _resolve_workshop_id(workshop_id, current_user)
+        start_date, end_date = _normalize_dates(start_date, end_date)
+        svc = WorkshopKPIService(db)
+        data = await svc.get_dashboard(wid, start_date, end_date)
+        return success_response(data=data, message="Dashboard de KPIs del taller")
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"ERROR en KPI dashboard: {e}")
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error interno: {str(e)}")
 
 
 # ------------------------------------------------------------------ #
