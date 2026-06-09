@@ -169,6 +169,21 @@ class IntelligentAssignmentService:
                 # ✅ Actualizar estado del incidente a "sin_taller_disponible"
                 logger.warning(f"⚠️ No candidates found for incident {incident_id}, updating state to sin_taller_disponible")
                 
+                # ✅ CANCELAR todos los assignment attempts pendientes y en timeout
+                await self.session.execute(
+                    update(AssignmentAttempt)
+                    .where(
+                        and_(
+                            AssignmentAttempt.incident_id == incident_id,
+                            AssignmentAttempt.status.in_(['pending', 'timeout'])
+                        )
+                    )
+                    .values(
+                        status='cancelled',
+                        response_message='No workshops available - incident marked as sin_taller_disponible'
+                    )
+                )
+
                 await self.session.execute(
                     update(Incidente)
                     .where(Incidente.id == incident_id)

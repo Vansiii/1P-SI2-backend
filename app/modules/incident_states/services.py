@@ -8,9 +8,11 @@ from sqlalchemy import select, update
 
 from ...core.logging import get_logger
 from ...core.exceptions import NotFoundError, ValidationError
+from ...core.event_publisher import EventPublisher
 from ...models.incidente import Incidente
 from ...models.historial_servicio import HistorialServicio
 from ...models.estados_servicio import EstadosServicio
+from ...shared.schemas.events.incident import IncidentStatusChangedEvent
 from ..push_notifications.services import PushNotificationService
 
 logger = get_logger(__name__)
@@ -52,6 +54,7 @@ class IncidentStateService:
         incident_id: int,
         new_state: str,
         changed_by: int,
+        changed_by_role: str = "unknown",
         notes: Optional[str] = None,
         force: bool = False
     ) -> Incidente:
@@ -62,6 +65,7 @@ class IncidentStateService:
             incident_id: ID of the incident
             new_state: Target state
             changed_by: ID of user making the change
+            changed_by_role: Role of the user (client, technician, workshop, admin)
             notes: Optional notes about the transition
             force: Skip validation (admin only)
             
@@ -116,7 +120,7 @@ class IncidentStateService:
 
         # Send push notification
         if self.push_service.is_enabled():
-            await self._send_state_notification(incident, new_state)
+            await self._send_state_notification(incident, new_state, changed_by, changed_by_role, notes)
 
         logger.info(
             f"Incident {incident_id} transitioned from {current_state} to {new_state} "
@@ -347,34 +351,46 @@ class IncidentStateService:
     async def _send_state_notification(
         self,
         incident: Incidente,
-        new_state: str
+        new_state: str,
+        changed_by: int,
+        changed_by_role: str,
+        notes: Optional[str] = None
     ) -> None:
         """
-        Send push notification about state change.
+        Send push notification about state change via OutboxProcessor.
+        
+        Publishes an IncidentStatusChangedEvent which flows through:
+        EventPublisher → OutboxEvent → OutboxProcessor → PushNotificationService
         
         Args:
             incident: Incident that changed state
             new_state: New state
+            changed_by: User ID who made the change
+            changed_by_role: Role of the user who made the change
+            notes: Optional transition notes
         """
-        notification_messages = {
-            "asignado": "Tu incidente ha sido asignado a un taller",
-            "en_camino": "El técnico está en camino",
-            "en_sitio": "El técnico ha llegado al lugar",
-            "resuelto": "Tu incidente ha sido resuelto",
-            "cancelado": "Tu incidente ha sido cancelado"
-        }
+        try:
+            event = IncidentStatusChangedEvent(
+                incident_id=incident.id,
+                old_status=incident.estado_actual,
+                new_status=new_state,
+                workshop_id=incident.taller_id,
+                changed_by=changed_by,
+                changed_by_role=changed_by_role,
+                reason=notes
+            )
+            await EventPublisher.publish(self.session, event)
+            await self.session.commit()
 
-        message = notification_messages.get(
-            new_state,
-            f"Estado del incidente actualizado a: {new_state}"
-        )
-
-        # ═══════════════════════════════════════════════════════════════════════
-        # ✅ NOTIFICACIONES MANEJADAS POR OUTBOX PROCESSOR
-        # El OutboxProcessor maneja todas las notificaciones automáticamente
-        # via EventPublisher → OutboxEvent → Delivery Strategies
-        # NO enviar notificaciones duplicadas aquí
-        # ═══════════════════════════════════════════════════════════════════════
+            logger.info(
+                f"✅ State transition event published: incident {incident.id} "
+                f"({incident.estado_actual} -> {new_state}) by user {changed_by} ({changed_by_role})"
+            )
+        except Exception as e:
+            logger.error(
+                f"❌ Error publishing state change event: {str(e)}",
+                exc_info=True
+            )
 
     async def get_state_history(
         self,
@@ -448,7 +464,8 @@ class IncidentStateService:
         self,
         incident_id: int,
         cancelled_by: int,
-        reason: str
+        reason: str,
+        cancelled_by_role: str = "unknown"
     ) -> Incidente:
         """
         Cancel an incident with reason.
@@ -457,6 +474,7 @@ class IncidentStateService:
             incident_id: ID of the incident
             cancelled_by: ID of user cancelling
             reason: Reason for cancellation
+            cancelled_by_role: Role of the user cancelling
             
         Returns:
             Updated incident
@@ -465,6 +483,7 @@ class IncidentStateService:
             incident_id=incident_id,
             new_state="cancelado",
             changed_by=cancelled_by,
+            changed_by_role=cancelled_by_role,
             notes=f"Cancelado: {reason}"
         )
 
@@ -472,7 +491,8 @@ class IncidentStateService:
         self,
         incident_id: int,
         resolved_by: int,
-        resolution_notes: Optional[str] = None
+        resolution_notes: Optional[str] = None,
+        resolved_by_role: str = "unknown"
     ) -> Incidente:
         """
         Mark incident as resolved.
@@ -481,6 +501,7 @@ class IncidentStateService:
             incident_id: ID of the incident
             resolved_by: ID of user resolving
             resolution_notes: Optional resolution notes
+            resolved_by_role: Role of the user resolving
             
         Returns:
             Updated incident
@@ -489,6 +510,7 @@ class IncidentStateService:
             incident_id=incident_id,
             new_state="resuelto",
             changed_by=resolved_by,
+            changed_by_role=resolved_by_role,
             notes=resolution_notes or "Incidente resuelto exitosamente"
         )
 
