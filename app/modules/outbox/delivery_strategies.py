@@ -447,6 +447,7 @@ class StrategyConfig:
         "incident.no_workshop_available",
         "incident.assignment_timeout",
         "incident.reassigned",
+        "incident.status_changed",
         "cancellation.requested",
         "cancellation.approved",
         "cancellation.rejected",
@@ -467,6 +468,7 @@ class StrategyConfig:
         "incident.assignment_timeout",
         "incident.reassigned",
         "incident.cancelled",
+        "incident.status_changed",
         "chat.message_sent",
     }
     

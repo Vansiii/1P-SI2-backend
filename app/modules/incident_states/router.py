@@ -58,6 +58,7 @@ async def transition_incident_state(
             incident_id=incident_id,
             new_state=request.new_state,
             changed_by=current_user.id,
+            changed_by_role=current_user.user_type,
             notes=request.notes,
             force=request.force and current_user.user_type == "admin"
         )
@@ -104,7 +105,8 @@ async def cancel_incident(
         incident = await state_service.cancel_incident(
             incident_id=incident_id,
             cancelled_by=current_user.id,
-            reason=request.reason
+            reason=request.reason,
+            cancelled_by_role=current_user.user_type
         )
 
         return success_response(
@@ -149,7 +151,8 @@ async def resolve_incident(
         incident = await state_service.resolve_incident(
             incident_id=incident_id,
             resolved_by=current_user.id,
-            resolution_notes=request.resolution_notes
+            resolution_notes=request.resolution_notes,
+            resolved_by_role=current_user.user_type
         )
 
         return success_response(

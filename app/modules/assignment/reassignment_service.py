@@ -484,6 +484,21 @@ class ReassignmentService:
             # Notificaciones persistentes y push se gestionan vía OutboxProcessor.
             # Evita duplicación de registros en tabla notifications.
             
+            # Cancelar todos los assignment attempts pendientes y en timeout
+            await self.session.execute(
+                update(AssignmentAttempt)
+                .where(
+                    and_(
+                        AssignmentAttempt.incident_id == incident_id,
+                        AssignmentAttempt.status.in_(['pending', 'timeout'])
+                    )
+                )
+                .values(
+                    status='cancelled',
+                    response_message='Incident marked as sin_taller_disponible - no workshops available'
+                )
+            )
+
             # Update incident status
             await self.session.execute(
                 update(Incidente)

@@ -474,13 +474,13 @@ async def _mark_incident_no_workshop_available(session: AsyncSession, incident_i
         incident.tecnico_id = None
         incident.updated_at = datetime.now(UTC)
         
-        # ✅ CANCELAR todos los assignment attempts pendientes
+        # ✅ CANCELAR todos los assignment attempts pendientes y en timeout
         await session.execute(
             update(AssignmentAttempt)
             .where(
                 and_(
                     AssignmentAttempt.incident_id == incident_id,
-                    AssignmentAttempt.status == 'pending'
+                    AssignmentAttempt.status.in_(['pending', 'timeout'])
                 )
             )
             .values(
