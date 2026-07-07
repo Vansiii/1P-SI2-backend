@@ -57,6 +57,13 @@ from .technician_location_history import TechnicianLocationHistory
 from .tracking_session import TrackingSession
 from .vehiculo import Vehiculo
 
+# Modelos de inventario (CU34)
+from .inventory_category import InventoryCategory
+from .supplier import Supplier
+from .inventory_product import InventoryProduct
+from .inventory_movement import InventoryMovement
+from .stock_alert import StockAlert
+
 # Modelos financieros (Módulo 6: Pagos y Comisiones)
 from .transaction import Transaction
 from .workshop_balance import WorkshopBalance, Withdrawal
@@ -72,6 +79,20 @@ from .service_rating import ServiceRating
 from .cotizacion import Cotizacion
 from .cotizacion_respuesta import CotizacionRespuesta
 from .cotizacion_chat_sala import CotizacionChatSala
+
+# Modelos del Marketplace (CU35)
+from .marketplace_listing import MarketplaceListing
+from .marketplace_listing_image import MarketplaceListingImage
+from .shopping_cart import ShoppingCart
+from .cart_item import CartItem
+from .marketplace_order import MarketplaceOrder
+from .order_item import OrderItem
+from .promotion import Promotion
+from .product_review import ProductReview
+
+# Bot de asistencia (CU36)
+from .bot_conversation import BotConversation
+from .bot_message import BotMessage
 
 __all__ = [
     # Base
@@ -142,5 +163,23 @@ __all__ = [
     "SubscriptionPlan",
     "TenantSubscription",
     "SubscriptionInvoice",
+    # Inventario (CU34)
+    "InventoryCategory",
+    "Supplier",
+    "InventoryProduct",
+    "InventoryMovement",
+    "StockAlert",
+    # Marketplace (CU35)
+    "MarketplaceListing",
+    "MarketplaceListingImage",
+    "ShoppingCart",
+    "CartItem",
+    "MarketplaceOrder",
+    "OrderItem",
+    "Promotion",
+    "ProductReview",
+    # Bot de asistencia (CU36)
+    "BotConversation",
+    "BotMessage",
 ]
 
