@@ -104,6 +104,11 @@ class Settings(BaseSettings):
     gemini_timeout_seconds: int = Field(default=30, alias="GEMINI_TIMEOUT_SECONDS")
     gemini_max_media_bytes: int = Field(default=4_000_000, alias="GEMINI_MAX_MEDIA_BYTES")
     gemini_prompt_version: str = Field(default="v1", alias="GEMINI_PROMPT_VERSION")
+
+    # Groq AI Configuration
+    groq_api_key: str = Field(default="", alias="GROQ_API_KEY")
+    groq_model: str = Field(default="llama-3.3-70b-versatile", alias="GROQ_MODEL")
+    groq_fallback_model: str = Field(default="mixtral-8x7b-32768", alias="GROQ_FALLBACK_MODEL")
     
     # AI Analysis Slow Detection
     ai_slow_threshold_seconds: int = Field(

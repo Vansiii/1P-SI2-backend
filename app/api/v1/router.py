@@ -75,6 +75,23 @@ from ...modules.tenants.webhook_router import router as webhook_router
 from .admin import ai_analytics_router
 from ...modules.admin_monitoring.router import router as admin_monitoring_router
 
+# CU34: Inventario y Proveedores
+from ...modules.inventory.router import router as inventory_router
+from ...modules.inventory.upload_router import router as inventory_upload_router
+from ...modules.suppliers.router import router as suppliers_router
+
+# CU35: Marketplace
+from ...modules.marketplace.router import router as marketplace_router
+from ...modules.cart.router import router as cart_router
+from ...modules.orders.router import router as orders_router
+from ...modules.promotions.router import router as promotions_router
+from ...modules.product_reviews.router import router as product_reviews_router
+
+# CU36: Bot de Asistencia
+from ...modules.bot.router import router as bot_router
+# CU37: VIN Decoder
+from ...modules.vin_decoder.router import router as vin_decoder_router
+
 # Create main v1 router
 api_router = APIRouter(prefix="/api/v1")
 
@@ -415,6 +432,60 @@ api_router.include_router(
 api_router.include_router(
     cotizaciones_admin_router,
     tags=["Admin - Cotizaciones"],
+)
+
+# CU34: Inventario y Proveedores
+api_router.include_router(
+    inventory_router,
+    prefix="/workshop",
+    tags=["Workshop - Inventory"],
+)
+
+api_router.include_router(
+    inventory_upload_router,
+    prefix="/workshop",
+    tags=["Workshop - Inventory Upload"],
+)
+
+api_router.include_router(
+    suppliers_router,
+    prefix="/workshop",
+    tags=["Workshop - Suppliers"],
+)
+
+# CU35: Marketplace
+api_router.include_router(
+    marketplace_router,
+    tags=["Marketplace"],
+)
+api_router.include_router(
+    cart_router,
+    tags=["Shopping Cart"],
+)
+api_router.include_router(
+    orders_router,
+    tags=["Orders"],
+)
+api_router.include_router(
+    promotions_router,
+    prefix="/workshop",
+    tags=["Workshop - Promotions"],
+)
+api_router.include_router(
+    product_reviews_router,
+    tags=["Product Reviews"],
+)
+
+# CU36: Bot de Asistencia
+api_router.include_router(
+    bot_router,
+    tags=["Bot de Asistencia"],
+)
+
+# CU37: VIN Decoder
+api_router.include_router(
+    vin_decoder_router,
+    tags=["VIN Decoder"],
 )
 
 __all__ = ["api_router"]

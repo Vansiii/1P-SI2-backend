@@ -43,10 +43,18 @@ from app.models.password_reset_token import PasswordResetToken
 from app.models.login_attempt import LoginAttempt
 from app.models.audit_log import AuditLog
 from app.models.two_factor_auth import TwoFactorAuth
+from app.models.file import File
 
 # Modelos de cotizaciones (CU32)
 from app.models.cotizacion import Cotizacion
 from app.models.cotizacion_respuesta import CotizacionRespuesta
+
+# Modelos de inventario (CU34)
+from app.models.inventory_category import InventoryCategory
+from app.models.supplier import Supplier
+from app.models.inventory_product import InventoryProduct
+from app.models.inventory_movement import InventoryMovement
+from app.models.stock_alert import StockAlert
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

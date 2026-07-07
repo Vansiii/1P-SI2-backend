@@ -263,3 +263,12 @@ async def _handle_customer_subscription_deleted(event, session):
                 "old_status": old_status,
             }),
         ))
+
+
+async def _handle_payment_intent_succeeded(event, session):
+    obj = event.data.object
+    metadata = obj.get("metadata", {})
+    if metadata.get("type") == "marketplace_order":
+        from ..orders.service import OrderService
+        service = OrderService(session)
+        await service.complete_payment(obj.get("id"))

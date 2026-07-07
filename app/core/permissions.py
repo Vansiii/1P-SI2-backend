@@ -198,6 +198,39 @@ class Permission(str, Enum):
     COTIZACION_ACEPTAR = "cotizacion:accept"
     COTIZACION_NEGOCIAR = "cotizacion:negotiate"
 
+    # ========== MÓDULO 14: INVENTARIO (CU34) ==========
+    INVENTORY_VIEW = "inventory:view"
+    INVENTORY_CREATE = "inventory:create"
+    INVENTORY_UPDATE = "inventory:update"
+    INVENTORY_DELETE = "inventory:delete"
+    INVENTORY_MOVEMENT_CREATE = "inventory:movement:create"
+    INVENTORY_MOVEMENT_VIEW = "inventory:movement:view"
+    SUPPLIER_VIEW = "supplier:view"
+    SUPPLIER_CREATE = "supplier:create"
+    SUPPLIER_UPDATE = "supplier:update"
+    SUPPLIER_DELETE = "supplier:delete"
+
+    # ========== MÓDULO 15: MARKETPLACE (CU35) ==========
+    MARKETPLACE_PUBLISH = "marketplace:publish"
+    MARKETPLACE_UPDATE = "marketplace:update"
+    MARKETPLACE_DELETE = "marketplace:delete"
+    MARKETPLACE_VIEW_OWN = "marketplace:view:own"
+    ORDER_VIEW_WORKSHOP = "order:view:workshop"
+    ORDER_MANAGE = "order:manage"
+    PROMOTION_VIEW = "promotion:view"
+    PROMOTION_CREATE = "promotion:create"
+    PROMOTION_UPDATE = "promotion:update"
+    PROMOTION_DELETE = "promotion:delete"
+    
+    MARKETPLACE_VIEW = "marketplace:view"
+    MARKETPLACE_REVIEW_CREATE = "marketplace:review:create"
+    CART_VIEW = "cart:view"
+    CART_MODIFY = "cart:modify"
+    ORDER_CREATE = "order:create"
+    ORDER_VIEW_OWN = "order:view:own"
+    ORDER_PAY = "order:pay"
+    ORDER_CANCEL = "order:cancel"
+
 
 # Mapeo de permisos por rol basado en casos de uso
 ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
@@ -257,6 +290,16 @@ ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
         Permission.COTIZACION_CANCELAR,
         Permission.COTIZACION_ACEPTAR,
         Permission.COTIZACION_NEGOCIAR,
+
+        # CU35: Marketplace (Cliente)
+        Permission.MARKETPLACE_VIEW,
+        Permission.MARKETPLACE_REVIEW_CREATE,
+        Permission.CART_VIEW,
+        Permission.CART_MODIFY,
+        Permission.ORDER_CREATE,
+        Permission.ORDER_VIEW_OWN,
+        Permission.ORDER_PAY,
+        Permission.ORDER_CANCEL,
     },
     
     # A2: Taller Mecánico (Usuario de la App Web)
@@ -326,6 +369,30 @@ ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
         # CU32: Cotizaciones (Taller)
         Permission.COTIZACION_VER_RECIBIDAS,
         Permission.COTIZACION_RESPONDER,
+
+        # CU34: Inventario (Taller)
+        Permission.INVENTORY_VIEW,
+        Permission.INVENTORY_CREATE,
+        Permission.INVENTORY_UPDATE,
+        Permission.INVENTORY_DELETE,
+        Permission.INVENTORY_MOVEMENT_CREATE,
+        Permission.INVENTORY_MOVEMENT_VIEW,
+        Permission.SUPPLIER_VIEW,
+        Permission.SUPPLIER_CREATE,
+        Permission.SUPPLIER_UPDATE,
+        Permission.SUPPLIER_DELETE,
+
+        # CU35: Marketplace (Taller)
+        Permission.MARKETPLACE_PUBLISH,
+        Permission.MARKETPLACE_UPDATE,
+        Permission.MARKETPLACE_DELETE,
+        Permission.MARKETPLACE_VIEW_OWN,
+        Permission.ORDER_VIEW_WORKSHOP,
+        Permission.ORDER_MANAGE,
+        Permission.PROMOTION_VIEW,
+        Permission.PROMOTION_CREATE,
+        Permission.PROMOTION_UPDATE,
+        Permission.PROMOTION_DELETE,
     },
     
     # A4: Técnico de Taller (Usuario de la App Móvil)
@@ -432,6 +499,25 @@ ROLE_PERMISSIONS: dict[UserRole, set[Permission]] = {
 
         # CU32: Cotizaciones (Admin)
         Permission.COTIZACION_ADMIN_VER,
+
+        # CU35: Marketplace (Admin)
+        Permission.MARKETPLACE_VIEW,
+        Permission.MARKETPLACE_PUBLISH,
+        Permission.MARKETPLACE_UPDATE,
+        Permission.MARKETPLACE_DELETE,
+        Permission.MARKETPLACE_VIEW_OWN,
+        Permission.ORDER_VIEW_WORKSHOP,
+        Permission.ORDER_MANAGE,
+        Permission.PROMOTION_VIEW,
+        Permission.PROMOTION_CREATE,
+        Permission.PROMOTION_UPDATE,
+        Permission.PROMOTION_DELETE,
+        Permission.CART_VIEW,
+        Permission.CART_MODIFY,
+        Permission.ORDER_CREATE,
+        Permission.ORDER_VIEW_OWN,
+        Permission.ORDER_PAY,
+        Permission.ORDER_CANCEL,
     },
     
     # A5: Sistema/IA (Actor interno)

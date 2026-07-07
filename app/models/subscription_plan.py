@@ -28,6 +28,11 @@ class SubscriptionPlan(Base):
     enable_priority_support: Mapped[bool] = mapped_column(Boolean, default=False)
     enable_api_access: Mapped[bool] = mapped_column(Boolean, default=False)
     enable_white_label: Mapped[bool] = mapped_column(Boolean, default=False)
+    # CU34-CU37: Inventario, Marketplace, Bot
+    enable_inventory: Mapped[bool] = mapped_column(Boolean, default=False, server_default=sa.text('false'))
+    enable_marketplace: Mapped[bool] = mapped_column(Boolean, default=False, server_default=sa.text('false'))
+    max_inventory_products: Mapped[int | None] = mapped_column(Integer, nullable=True, default=50)
+    enable_bot: Mapped[bool] = mapped_column(Boolean, default=False, server_default=sa.text('false'))
     sort_order: Mapped[int] = mapped_column(Integer, default=0)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(
